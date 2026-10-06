@@ -86,6 +86,19 @@ sesame apply changes.json                      # run exactly that, or refuse if 
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 
+A first plan creates the roles and grants the spec declares:
+
+![sesame plan: the roles and grants a spec needs](https://raw.githubusercontent.com/almostly/pgsesame/main/docs/images/plan.png)
+
+Later, two grants someone made by hand show up as drift; they are revoked only
+with `--allow-revoke`:
+
+![sesame plan: drift, planned as revokes](https://raw.githubusercontent.com/almostly/pgsesame/main/docs/images/drift.png)
+
+A saved change set can be reviewed without a database, then applied exactly:
+
+![sesame show: a saved change set](https://raw.githubusercontent.com/almostly/pgsesame/main/docs/images/change-set.png)
+
 ## Testing locally
 
 The integration tests run against PostgreSQL in Docker and against

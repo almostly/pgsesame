@@ -7,3 +7,4 @@ dist
 tests
 examples
 **/__pycache__
+docs/images
