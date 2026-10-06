@@ -1,0 +1,114 @@
+[project]
+name = "pgsesame"
+version = "0.0.1"
+description = "Permissions as code for PostgreSQL and Amazon Redshift."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "almostly" }]
+keywords = ["postgresql", "redshift", "permissions", "grants", "access-control", "iac"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Security",
+]
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "pyyaml>=6",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# the Redshift Data API backend (no direct socket into the VPC)
+redshift = ["boto3>=1.34"]
+
+[project.scripts]
+sesame = "pgsesame.cli:app"
+
+[project.urls]
+Repository = "https://github.com/almostly/pgsesame"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "commitizen>=4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pgsesame"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+# Ruff's classic default rules, written out so that every ruff version (the
+# pre-commit pin, an editor's, `uvx ruff`) checks the same set
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "postgres: needs a PostgreSQL server (Docker)",
+    "redshift: needs oblako's redshift-local (Docker)",
+]
+
+[tool.commitizen]
+# Message format: `Area(<+|~|->): description`, where the symbol is what the change
+# does to that area: + added, ~ changed, - removed. Example:
+#   Spec(+): default privileges per schema
+name = "cz_customize"
+version_provider = "pep621"
+version_scheme = "semver"
+tag_format = "v$version"
+major_version_zero = true
+update_changelog_on_bump = true
+changelog_incremental = true
+
+[tool.commitizen.customize]
+message_template = "{{area}}({{change}}): {{description}}"
+example = "Spec(+): default privileges per schema"
+schema = "<Area>(<+|~|->): <description>"
+schema_pattern = "^[\\w .+/-]+\\([+~-]\\): .+"
+bump_pattern = "^[\\w .+/-]+\\(([+~-])\\):"
+commit_parser = "^(?P<scope>[\\w .+/-]+)\\((?P<change_type>[+~-])\\): (?P<message>.+)"
+changelog_pattern = "^[\\w .+/-]+\\([+~-]\\):"
+change_type_order = ["Added", "Changed", "Removed"]
+
+[tool.commitizen.customize.change_type_map]
+"+" = "Added"
+"~" = "Changed"
+"-" = "Removed"
+
+[tool.commitizen.customize.bump_map]
+"+" = "MINOR"
+"-" = "MINOR"
+"~" = "PATCH"
+
+[[tool.commitizen.customize.questions]]
+type = "input"
+name = "area"
+message = "Area (e.g. Spec, Plan, Postgres, Redshift, CLI, Docs):"
+
+[[tool.commitizen.customize.questions]]
+type = "list"
+name = "change"
+message = "What does this do to it?"
+choices = [
+    { value = "+", name = "+ : added" },
+    { value = "~", name = "~ : changed" },
+    { value = "-", name = "- : removed" },
+]
+
+[[tool.commitizen.customize.questions]]
+type = "input"
+name = "description"
+message = "Short description of the change:"

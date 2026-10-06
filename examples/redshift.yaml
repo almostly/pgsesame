@@ -1,0 +1,40 @@
+version: 1
+engine: redshift
+
+principals:
+  etl:
+    type: user
+    login: true
+    password: disabled
+    owns:
+      schemas: [analytics]
+
+  reader:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+      tables:
+        select: [analytics.*]
+
+  analyst:
+    type: role
+    member_of: [reader]
+    privileges:
+      tables:
+        insert: [analytics.scratch]
+
+  alice:
+    type: user
+    password_env: ALICE_PASSWORD
+    groups: [analysts]
+    member_of: [analyst]
+
+  analysts:
+    type: group
+
+default_privileges:
+  - owner: etl
+    schema: analytics
+    grantee: reader
+    tables: [select]
