@@ -11,6 +11,18 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.1.1 (2026-10-06)
+
+### Added
+
+- **Action**: a GitHub Action, `uses: almostly/pgsesame@v0.1.1`: `command: plan` posts the plan on the pull request as one comment, updated on each push, and keeps the change set; `command: apply` runs that change set (revokes with `allow-revoke: true`). Outputs `has-changes`, `to-add`, `to-change`, `to-remove`
+- **Docs**: the icon, screenshots of a plan, drift and a change set, and how to run pgsesame in GitHub Actions
+
+### Changed
+
+- **Postgres**: `MAINTAIN` (PostgreSQL 17+) is a privilege the spec can declare; a privilege pgsesame doesn't model is noted in the plan instead of failing it
+- **Plan**: privileges on `functions` are noted as not planned yet, instead of being skipped silently
+
 ## v0.1.0 (2026-10-06)
 
 The first release.
