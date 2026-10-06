@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import ClassVar, Literal
 
 from psycopg import sql
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 from pgsesame.spec import PRIVILEGES
 
@@ -87,7 +87,9 @@ class CreateRole(Operation):
     order: ClassVar[int] = 10
     name: str
     login: bool
-    password: str | None = None
+    # SecretStr: the password never shows in a repr, a log or an error; only
+    # statement() unwraps it, into a quoted literal
+    password: SecretStr | None = None
 
     def _sql(self, password: sql.Composable | None) -> sql.Composed:
         parts = [
@@ -100,7 +102,9 @@ class CreateRole(Operation):
 
     def statement(self) -> sql.Composed:
         """Return CREATE ROLE, with the password when there is one."""
-        return self._sql(None if self.password is None else sql.Literal(self.password))
+        if self.password is None:
+            return self._sql(None)
+        return self._sql(sql.Literal(self.password.get_secret_value()))
 
     def display(self) -> sql.Composed:
         """Return CREATE ROLE with the password masked."""

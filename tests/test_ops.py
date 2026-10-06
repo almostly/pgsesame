@@ -74,6 +74,7 @@ def test_names_are_quoted_not_pasted():
 def test_a_plan_never_shows_a_password():
     op = CreateRole(name="alice", login=True, password="s3cret")
     assert "s3cret" not in op.display().as_string()
+    assert "s3cret" not in repr(op) and "s3cret" not in str(op)
 
 
 def test_removals_are_gated():
