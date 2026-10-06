@@ -97,3 +97,63 @@ jobs:
 
       - name: Redshift tests
         run: uv run pytest -q tests/test_redshift.py
+
+  action:
+    name: the GitHub Action (uses ./)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # the plan comment
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sesame
+          POSTGRES_PASSWORD: sesame
+          POSTGRES_DB: sesame
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sesame" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+    env:
+      SESAME_DSN: postgresql://sesame:sesame@localhost:5432/sesame
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: A schema to grant on
+        run: psql "$SESAME_DSN" -c "CREATE SCHEMA app; CREATE TABLE app.t (id int)"
+
+      - name: Plan (changes expected)
+        id: plan
+        uses: ./
+        with:
+          command: plan
+          spec: tests/action/permissions.yaml
+          package: .  # this checkout, not the published release
+
+      - name: The plan found the changes
+        env:
+          HAS_CHANGES: ${{ steps.plan.outputs.has-changes }}
+          TO_ADD: ${{ steps.plan.outputs.to-add }}
+        run: test "$HAS_CHANGES" = true && test "$TO_ADD" = 5
+
+      - name: Apply the change set
+        uses: ./
+        with:
+          command: apply
+          package: .
+
+      - name: Plan again (nothing expected)
+        id: again
+        uses: ./
+        with:
+          command: plan
+          spec: tests/action/permissions.yaml
+          package: .
+          comment: "false"
+          artifact: ""
+
+      - name: The database matches the spec
+        env:
+          HAS_CHANGES: ${{ steps.again.outputs.has-changes }}
+        run: test "$HAS_CHANGES" = false

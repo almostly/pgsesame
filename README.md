@@ -105,96 +105,47 @@ A saved change set can be reviewed without a database, then applied exactly:
 
 ## In GitHub Actions
 
-Review a plan on the pull request, then apply on merge exactly the change set a
-reviewer approves. Keep the spec in the repository and the connection in a
-secret (`SESAME_DSN`).
+Review the plan on the pull request; apply the reviewed change set on merge. The
+connection comes from a secret (`SESAME_DSN`), and the `production` environment
+can require a reviewer's approval before apply runs.
 
-````yaml
-# .github/workflows/permissions.yml
-name: permissions
-
+```yaml
 on:
   pull_request:
-    paths: [permissions.yaml]
   push:
     branches: [main]
-    paths: [permissions.yaml]
 
 jobs:
   plan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write  # to post the plan on the pull request
-    env:
-      SESAME_DSN: ${{ secrets.SESAME_DSN }}
-      NO_COLOR: "1"
+    permissions: {contents: read, pull-requests: write}
+    env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-
-      # exit code 2 means "changes planned": a result here, not a failure
-      - name: Plan
-        run: uvx pgsesame plan permissions.yaml -o changes.json > plan.txt || [ $? -eq 2 ]
-
-      - name: Post the plan on the pull request
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          { echo '### sesame plan'; echo '```diff'; cat plan.txt; echo '```'; } > comment.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
-        with:
-          name: changes
-          path: changes.json
-          if-no-files-found: ignore  # nothing to apply
+      - uses: almostly/pgsesame@v0.1.1
+        with: {command: plan, spec: permissions.yaml}
 
   apply:
     if: github.event_name == 'push'
     needs: plan
     runs-on: ubuntu-latest
-    # a protected environment: a reviewer approves before anything runs
     environment: production
-    env:
-      SESAME_DSN: ${{ secrets.SESAME_DSN }}
+    env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: changes
-        continue-on-error: true  # no change set: the database already matches
-      - uses: astral-sh/setup-uv@v5
-      - name: Apply the reviewed change set
-        run: |
-          if [ -f changes.json ]; then uvx pgsesame apply changes.json; fi
-````
-
-A plan's `+`, `~` and `-` lines render as a diff in the comment. `apply`
-refuses the change set if the database changed since it was planned; revokes run
-only with `--allow-revoke`, so add that flag once you trust the spec to remove
-access too. A new user's password comes from the variable its spec names
-(`password_env`), so pass that secret to the `apply` job as well.
-
-For Redshift with IAM instead of a stored password, sign the jobs in to AWS with
-OIDC and connect through `--iam` (or `--data-api` when the runner can't reach the
-cluster's network):
-
-```yaml
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::123456789012:role/sesame
-          aws-region: us-east-1
-      - run: uvx --from "pgsesame[redshift]" sesame plan permissions.yaml --iam --workgroup analytics -o changes.json || [ $? -eq 2 ]
+      - uses: almostly/pgsesame@v0.1.1
+        with: {command: apply}
 ```
 
-Outside GitHub, the container image does the same without Python:
-`docker run --rm -v "$PWD:/work" -e SESAME_DSN ghcr.io/almostly/pgsesame plan permissions.yaml`.
+On a pull request the plan is posted as one comment, updated on each push. On
+merge, `apply` runs exactly the change set the plan job saved, or refuses if the
+database changed since. Revokes need `allow-revoke: true`. The step's outputs
+(`has-changes`, `to-add`, `to-change`, `to-remove`) can drive other steps. For
+Redshift with IAM, sign in with `aws-actions/configure-aws-credentials` and pass
+`args: --iam --workgroup analytics`.
+
+Outside GitHub, run `uvx pgsesame` or the image
+(`docker run --rm -v "$PWD:/work" -e SESAME_DSN ghcr.io/almostly/pgsesame plan
+permissions.yaml`); `plan` exits 2 when it has changes.
 
 ## Testing locally
 

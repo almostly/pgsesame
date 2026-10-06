@@ -1,0 +1,152 @@
+name: pgsesame
+description: Permissions as code for PostgreSQL and Amazon Redshift. Plan on a pull request, apply the reviewed change set on merge.
+author: almostly
+branding:
+  icon: key
+  color: green
+
+inputs:
+  command:
+    description: "plan or apply"
+    required: true
+  spec:
+    description: "The spec to plan from (plan)"
+    default: permissions.yaml
+  change-set:
+    description: "Where plan saves the change set and apply reads it"
+    default: changes.json
+  artifact:
+    description: "The artifact that carries the change set from the plan job to the apply job ('' to skip)"
+    default: pgsesame-changes
+  allow-revoke:
+    description: "apply: also run revokes and membership removals"
+    default: "false"
+  comment:
+    description: "plan on a pull request: post the plan as a comment, updated in place on each push"
+    default: "true"
+  args:
+    description: "Extra arguments for sesame, e.g. --iam --workgroup analytics"
+    default: ""
+  package:
+    description: "What to install: a pgsesame requirement, or a path"
+    default: "pgsesame[redshift]==0.1.1"
+  github-token:
+    description: "Token for the pull request comment (needs pull-requests: write)"
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: "sesame's exit code: 0 nothing to do, 2 changes planned (plan)"
+    value: ${{ steps.plan.outputs.exit-code || steps.apply.outputs.exit-code }}
+  has-changes:
+    description: "plan: true when the plan has changes"
+    value: ${{ steps.plan.outputs.has-changes }}
+  to-add:
+    description: "plan: statements that add"
+    value: ${{ steps.plan.outputs.to-add }}
+  to-change:
+    description: "plan: statements that change"
+    value: ${{ steps.plan.outputs.to-change }}
+  to-remove:
+    description: "plan: statements that remove (revokes need allow-revoke)"
+    value: ${{ steps.plan.outputs.to-remove }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v5
+
+    - name: sesame plan
+      id: plan
+      if: inputs.command == 'plan'
+      shell: bash
+      env:
+        NO_COLOR: "1"
+        PACKAGE: ${{ inputs.package }}
+        SPEC: ${{ inputs.spec }}
+        CHANGES: ${{ inputs.change-set }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        out="$RUNNER_TEMP/pgsesame-plan.txt"
+        set +e
+        # shellcheck disable=SC2086  # ARGS is a list of arguments
+        uvx --from "$PACKAGE" sesame plan "$SPEC" -o "$CHANGES" $ARGS > "$out" 2>&1
+        code=$?
+        set -e
+        cat "$out"
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+        summary=$(grep -E '^Plan: ' "$out" || true)
+        count() { echo "$summary" | grep -oE "[0-9]+ to $1" | grep -oE '^[0-9]+' || echo 0; }
+        {
+          echo "has-changes=$([ "$code" -eq 2 ] && echo true || echo false)"
+          echo "to-add=$(count add)"
+          echo "to-change=$(count change)"
+          echo "to-remove=$(count remove)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Post the plan on the pull request
+      if: inputs.command == 'plan' && inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        SPEC: ${{ inputs.spec }}
+        HAS_CHANGES: ${{ steps.plan.outputs.has-changes }}
+      run: |
+        marker="<!-- pgsesame plan: $SPEC -->"
+        body="$RUNNER_TEMP/pgsesame-comment.md"
+        {
+          echo "$marker"
+          if [ "$HAS_CHANGES" = "true" ]; then
+            echo "### sesame plan: \`$SPEC\` has changes"
+          else
+            echo "### sesame plan: \`$SPEC\` matches the database"
+          fi
+          echo '```diff'
+          cat "$RUNNER_TEMP/pgsesame-plan.txt"
+          echo '```'
+          echo "<sub>Updated for $GITHUB_SHA.</sub>"
+        } > "$body"
+        existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+          --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -n 1)
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F "body=@$body" > /dev/null
+        else
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F "body=@$body" > /dev/null
+        fi
+
+    - name: Keep the change set for the apply job
+      if: inputs.command == 'plan' && inputs.artifact != '' && steps.plan.outputs.has-changes == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ inputs.change-set }}
+
+    - name: Fetch the change set from the plan job
+      if: inputs.command == 'apply' && inputs.artifact != ''
+      continue-on-error: true  # no change set: the database already matched
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+
+    - name: sesame apply
+      id: apply
+      if: inputs.command == 'apply'
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        CHANGES: ${{ inputs.change-set }}
+        ALLOW_REVOKE: ${{ inputs.allow-revoke }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        if [ ! -f "$CHANGES" ]; then
+          echo "No change set: nothing to apply."
+          echo "exit-code=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        flags=""
+        if [ "$ALLOW_REVOKE" = "true" ]; then flags="--allow-revoke"; fi
+        # shellcheck disable=SC2086
+        uvx --from "$PACKAGE" sesame apply "$CHANGES" $flags $ARGS
+        echo "exit-code=0" >> "$GITHUB_OUTPUT"

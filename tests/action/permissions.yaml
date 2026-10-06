@@ -1,0 +1,16 @@
+# The spec the Action's self-test (.github/workflows/ci.yml, job "action") plans
+# and applies against a fresh PostgreSQL.
+version: 1
+engine: postgres
+principals:
+  action_reader:
+    type: role
+    privileges:
+      schemas:
+        usage: [app]
+      tables:
+        select: [app.*]
+  action_user:
+    type: user
+    password: disabled
+    member_of: [action_reader]

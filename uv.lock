@@ -491,7 +491,7 @@ wheels = [
 
 [[package]]
 name = "pgsesame"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
