@@ -245,17 +245,28 @@ use, and the integration tests can run the same scenarios over each.
   `SVV_*` privilege views; adding them to oblako is a prerequisite for the Redshift
   integration tests, and also a parity gain for oblako.
 
-## Milestones
+## Roadmap
 
-1. Spec model and `sesame validate`.
-2. PostgreSQL: read, diff, plan and apply for roles, users, memberships, schema and
-   table privileges.
-3. Ownership and default privileges.
-4. Redshift reader and renderer: users, groups, roles; tested on redshift-local.
-5. `manage.prefixes`.
+Done in 0.1: the spec and `sesame validate`; plan and apply for roles, users,
+groups, memberships and privileges on PostgreSQL (14 to 18) and Redshift (read
+through its SVV views); change sets; Redshift over IAM credentials and the Data
+API, each tested against oblako and Redshift Serverless.
 
-Redshift IAM credentials and the Data API backend are done; each is tested
-against oblako (its Redshift API and Data API) and, with the same tests, against
-Amazon Redshift.
+0.2:
 
-Change sets (saved plans) were brought forward and are done.
+- Ownership (`owns`) and default privileges, planned and applied.
+- Built-in roles a spec can refer to without managing them: Redshift Serverless's
+  `sys:*`, Supabase's `anon`, `authenticated`, `service_role`, AlloyDB's
+  `alloydbsuperuser`, RDS's `rds_superuser`, Cloud SQL's `cloudsqlsuperuser`.
+- Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
+  the platform's admin role, which is not a superuser there (on PostgreSQL 16+
+  such a role manages only the roles it created).
+- A GitHub Action: plan on a pull request with the plan as a comment, apply the
+  reviewed change set on merge.
+- `manage.prefixes`.
+
+0.3:
+
+- Row-level security: `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in the
+  spec, planned and diffed like grants. On Supabase, policies are how data access
+  is controlled, more than grants.

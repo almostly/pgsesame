@@ -9,7 +9,7 @@ Terraform.
 > tested against PostgreSQL 14 to 18, oblako's redshift-local and Redshift
 > Serverless, on Python 3.10 to 3.13.
 > Ownership (`owns`) and default privileges are validated but not yet planned; see
-> [DESIGN.md](DESIGN.md) for the milestones.
+> the [roadmap](DESIGN.md#roadmap).
 
 ## Why
 
@@ -22,6 +22,15 @@ It is built on what went wrong with earlier tools (redtape for Redshift, pgbedro
 for PostgreSQL): it reads the real catalog without crashing on what it doesn't
 model, issues only the difference instead of every grant on every run, and plans
 revokes and drops but applies them only when you ask.
+
+## Where it runs
+
+PostgreSQL 14 to 18 and Amazon Redshift (provisioned or Serverless). PostgreSQL
+services work through the same connection: Supabase, Google's AlloyDB, Amazon RDS
+and Aurora, Cloud SQL, Neon; connect as the platform's admin role. Referring to a
+platform's built-in roles (`authenticated`, `alloydbsuperuser`, ...) without
+managing them, and Supabase's row-level security policies, are on the
+[roadmap](DESIGN.md#roadmap).
 
 ## Install
 
