@@ -194,6 +194,12 @@ def make(spec: Spec, current: State) -> Plan:
     for name, p in spec.principals.items():
         if p.owns:
             plan.notes.append(f"{name}: ownership is planned from a later milestone")
+        unplanned = sorted(set(p.privileges) - set(PLANNED_TYPES))
+        if unplanned:
+            plan.notes.append(
+                f"{name}: privileges on {', '.join(unplanned)} are planned from a "
+                "later milestone"
+            )
     if spec.default_privileges:
         plan.notes.append("default privileges are planned from a later milestone")
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order

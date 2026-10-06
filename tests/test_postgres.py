@@ -226,3 +226,29 @@ def test_an_edited_or_misdirected_change_set_is_refused(dsn, tmp_path):
     saved.write_text(json.dumps(elsewhere))
     code, out = _sesame("apply", str(saved), "--dsn", dsn)
     assert code == 1 and "planned against someone@prod:warehouse" in out, out
+
+
+def test_a_failed_apply_changes_nothing(dsn, tmp_path, monkeypatch):
+    from pgsesame import cli
+    from pgsesame.ops import Operation
+
+    class Boom(Operation):
+        order = 99  # last, after every role and grant ran
+
+        def statement(self):
+            return sql.SQL("SELECT 1 / 0")
+
+    make = cli.planner.make
+
+    def make_with_a_failure(*args, **kwargs):
+        plan = make(*args, **kwargs)
+        plan.operations.append(Boom())
+        return plan
+
+    monkeypatch.setattr(cli.planner, "make", make_with_a_failure)
+    code, out = _sesame("apply", _spec(tmp_path), "--dsn", dsn)
+    assert code == 1 and "apply failed, nothing was changed" in out, out
+    with psycopg.connect(dsn) as conn:  # the roles created before it rolled back
+        assert conn.execute(
+            "SELECT count(*) FROM pg_roles WHERE rolname LIKE %s", (f"{P}%",)
+        ).fetchone() == (0,)

@@ -17,8 +17,13 @@ concurrency:
 
 jobs:
   check:
-    name: lint, types and tests
+    name: tests (python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # the oldest version pyproject.toml allows, the one the hooks use, the newest
+        python: ["3.10", "3.12", "3.13"]
     services:
       postgres:
         image: postgres:16
@@ -39,9 +44,10 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install the project
-        run: uv sync --locked
+        run: uv sync --locked --python ${{ matrix.python }}
 
       - name: Hooks (ruff, pydocstyle, ty)
+        if: matrix.python == '3.12'
         run: uvx prek run --all-files --show-diff-on-failure
 
       - name: Tests
