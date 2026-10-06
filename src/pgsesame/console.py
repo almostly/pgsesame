@@ -20,8 +20,9 @@ THEME = Theme(
         "ok": "green",
     }
 )
-console = Console(theme=THEME, highlight=False)
-err = Console(theme=THEME, highlight=False, stderr=True)
+# soft_wrap: long statements and messages stay on one line (logs, grep, copy-paste)
+console = Console(theme=THEME, highlight=False, soft_wrap=True)
+err = Console(theme=THEME, highlight=False, soft_wrap=True, stderr=True)
 
 SYMBOL = {"create": "+", "change": "~", "remove": "-"}
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import psycopg
 import typer
 from typer import rich_utils
 
-from pgsesame import __version__, spec
-from pgsesame.console import console, err, header
+from pgsesame import __version__, planner, postgres, spec
+from pgsesame.console import console, err, header, operation
+from pgsesame.db import Database
 
 # pgcli's green for the help screens, in place of Typer's cyan and yellow
 for _name, _style in {
@@ -78,17 +80,111 @@ def schema() -> None:
     print(json.dumps(spec.json_schema(), indent=2))
 
 
-@app.command()
-def plan(path: Path = SpecPath) -> None:
-    """Show the SQL that would make the database match the spec."""
-    header("plan", str(path))
-    err.print("[error]plan isn't implemented yet[/error] (milestone 2, see DESIGN.md)")
-    raise typer.Exit(1)
+DsnOption = typer.Option(
+    "",
+    "--dsn",
+    envvar="SESAME_DSN",
+    help="Connection string; empty uses PGHOST, PGUSER, PGPASSWORD and the rest.",
+    show_default=False,
+)
+
+
+def _load(path: Path) -> spec.Spec:
+    try:
+        return spec.load(path)
+    except spec.SpecError as e:
+        for problem in e.problems:
+            err.print(f"[error]✗[/error] {problem}")
+        raise typer.Exit(1) from None
+
+
+def _plan(loaded: spec.Spec, db: Database) -> planner.Plan:
+    if loaded.engine != "postgres":
+        err.print("[error]Redshift support comes in a later milestone[/error]")
+        raise typer.Exit(1)
+    try:
+        return planner.make(loaded, postgres.read(db))
+    except planner.PlanError as e:
+        for problem in e.problems:
+            err.print(f"[error]✗[/error] {problem}")
+        raise typer.Exit(1) from None
+
+
+def _connect(dsn: str) -> Database:
+    try:
+        return Database(dsn)
+    except psycopg.OperationalError as e:
+        err.print(f"[error]can't connect:[/error] {str(e).strip()}")
+        raise typer.Exit(1) from None
+
+
+def _show(result: planner.Plan, db: Database) -> None:
+    for note in result.notes:
+        console.print(f"[muted]note: {note}[/muted]")
+    for op in result.operations:
+        gate = f"needs --allow-{op.gate}" if op.gate else ""
+        operation(op.kind, db.render(op.display()), gate)
+
+
+def _summary(result: planner.Plan) -> str:
+    counts = {"create": 0, "change": 0, "remove": 0}
+    for op in result.operations:
+        counts[op.kind] += 1
+    return (
+        f"[create]{counts['create']} to add[/create], "
+        f"[change]{counts['change']} to change[/change], "
+        f"[remove]{counts['remove']} to remove[/remove]"
+    )
 
 
 @app.command()
-def apply(path: Path = SpecPath) -> None:
-    """Make the database match the spec."""
-    header("apply", str(path))
-    err.print("[error]apply isn't implemented yet[/error] (milestone 2, see DESIGN.md)")
-    raise typer.Exit(1)
+def plan(path: Path = SpecPath, dsn: str = DsnOption) -> None:
+    """Show the SQL that would make the database match the spec.
+
+    Exits 0 when the database already matches, 2 when there are changes, 1 on
+    errors, like ``terraform plan -detailed-exitcode``.
+    """
+    loaded = _load(path)
+    db = _connect(dsn)
+    header("plan", db.target)
+    result = _plan(loaded, db)
+    if not result.operations:
+        console.print("[ok]✓[/ok] the database matches the spec; nothing to do")
+        raise typer.Exit(0)
+    _show(result, db)
+    console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
+    raise typer.Exit(2)
+
+
+@app.command()
+def apply(
+    path: Path = SpecPath,
+    dsn: str = DsnOption,
+    allow_revoke: bool = typer.Option(
+        False, "--allow-revoke", help="Also run revokes and membership removals."
+    ),
+    allow_drop: bool = typer.Option(False, "--allow-drop", help="Also run drops."),
+) -> None:
+    """Make the database match the spec, in one transaction."""
+    loaded = _load(path)
+    db = _connect(dsn)
+    header("apply", db.target)
+    result = _plan(loaded, db)
+    runnable = result.allowed(allow_revoke, allow_drop)
+    skipped = [op for op in result.operations if op not in runnable]
+    if not runnable:
+        console.print("[ok]✓[/ok] nothing to apply")
+    else:
+        _show(planner.Plan(runnable, result.notes), db)
+        try:
+            db.run([op.statement() for op in runnable])
+        except psycopg.Error as e:
+            err.print(f"[error]apply failed, nothing was changed:[/error] {e}")
+            raise typer.Exit(1) from None
+        console.print(f"\n[ok]✓[/ok] applied {len(runnable)} statement(s)")
+    if skipped:
+        for op in skipped:
+            operation(
+                op.kind, db.render(op.display()), f"skipped: needs --allow-{op.gate}"
+            )
+        console.print(f"[change]{len(skipped)} statement(s) skipped[/change]")
