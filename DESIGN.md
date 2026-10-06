@@ -46,8 +46,27 @@ database ──read catalog──────▶ current state ─┘
 - `sesame plan spec.yaml`: connect, read, diff, print the plan. The exit code
   follows `terraform plan -detailed-exitcode`: 0 nothing to do, 2 changes planned,
   1 error, so CI can tell "drift" from "failure".
-- `sesame apply spec.yaml`: plan, then run the plan. `--plan-file` applies a
-  plan saved earlier, refusing it if the database changed since it was made.
+- `sesame apply spec.yaml`: plan, then run the plan.
+
+### Change sets
+
+For review before anything runs, as CloudFormation's change sets and
+`terraform plan -out` do: `sesame plan spec.yaml -o changes.json` saves the plan,
+`sesame show changes.json` prints it again without a database, and
+`sesame apply changes.json` runs exactly those statements.
+
+A change set embeds the validated spec (with its SHA-256, so an edited file is
+refused), the target it was planned against (`user@host:db`; applying it anywhere
+else is refused), when it was made, and the typed operations. Apply plans again
+from the embedded spec against the database as it is now and runs the saved
+statements only if the new plan is identical; otherwise it refuses and shows the
+new plan. So a change that matters (a grant made by hand, a new table under
+`schema.*`) stops a stale change set, and a change elsewhere does not. No secret
+is written: a new role's password stays out of the file and is read again from
+its environment variable at apply.
+
+In a pull request: CI runs `sesame plan -o`, the plan is posted for review, and
+the merge job runs `sesame apply` on that file.
 
 ## The CLI's look
 
@@ -233,4 +252,6 @@ use, and the integration tests can run the same scenarios over each.
    table privileges.
 3. Ownership and default privileges.
 4. Redshift reader and renderer: users, groups, roles; tested on redshift-local.
-5. Redshift IAM credentials and the Data API backend; saved plans; `manage.prefixes`.
+5. Redshift IAM credentials and the Data API backend; `manage.prefixes`.
+
+Change sets (saved plans) were brought forward and are done.

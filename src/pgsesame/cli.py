@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from typer import rich_utils
 
 from pgsesame import __version__, planner, postgres, spec
+from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
 from pgsesame.db import Database
 
@@ -139,7 +140,17 @@ def _summary(result: planner.Plan) -> str:
 
 
 @app.command()
-def plan(path: Path = SpecPath, dsn: str = DsnOption) -> None:
+def plan(
+    path: Path = SpecPath,
+    dsn: str = DsnOption,
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        "-o",
+        dir_okay=False,
+        help="Save the plan as a change set, for sesame apply to run exactly.",
+    ),
+) -> None:
     """Show the SQL that would make the database match the spec.
 
     Exits 0 when the database already matches, 2 when there are changes, 1 on
@@ -154,23 +165,77 @@ def plan(path: Path = SpecPath, dsn: str = DsnOption) -> None:
         raise typer.Exit(0)
     _show(result, db)
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
+    if out is not None:
+        ChangeSet.build(loaded, db.target, result.operations).save(out)
+        console.print(
+            f"[accent]Saved[/accent] to {out}; run it with: sesame apply {out}"
+        )
     raise typer.Exit(2)
 
 
 @app.command()
+def show(
+    path: Path = typer.Argument(..., exists=True, dir_okay=False, help="A change set."),
+) -> None:
+    """Print a saved change set (no database needed)."""
+    changeset = _load_changeset(path)
+    header("show", changeset.target)
+    console.print(
+        f"[muted]planned {changeset.created_at:%Y-%m-%d %H:%M} UTC from spec "
+        f"{changeset.spec_sha256[:12]} ({changeset.engine})[/muted]"
+    )
+    result = planner.Plan(list(changeset.operations))
+    for op in result.operations:
+        gate = f"needs --allow-{op.gate}" if op.gate else ""
+        operation(op.kind, op.display().as_string(), gate)
+    console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
+
+
+def _load_changeset(path: Path) -> ChangeSet:
+    try:
+        return ChangeSet.load(path)
+    except ChangeSetError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
+
+
+@app.command()
 def apply(
-    path: Path = SpecPath,
+    path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="A spec (YAML) or a saved change set."
+    ),
     dsn: str = DsnOption,
     allow_revoke: bool = typer.Option(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
     allow_drop: bool = typer.Option(False, "--allow-drop", help="Also run drops."),
 ) -> None:
-    """Make the database match the spec, in one transaction."""
-    loaded = _load(path)
+    """Make the database match the spec, in one transaction.
+
+    Given a change set (``sesame plan -o``), runs exactly its statements, and
+    refuses if the database changed since in a way that changes the plan.
+    """
+    saved = _load_changeset(path) if is_changeset(path) else None
+    loaded = saved.parsed_spec() if saved else _load(path)
     db = _connect(dsn)
     header("apply", db.target)
     result = _plan(loaded, db)
+    if saved is not None:
+        if saved.target != db.target:
+            err.print(
+                f"[error]✗[/error] this change set was planned against {saved.target}, "
+                f"not {db.target}"
+            )
+            raise typer.Exit(1)
+        if not same_operations(result.operations, list(saved.operations)):
+            err.print(
+                "[error]✗[/error] the database changed since this change set was "
+                "planned; its plan is now:"
+            )
+            _show(result, db)
+            err.print("plan again (sesame plan -o) and review the new change set")
+            raise typer.Exit(1)
+        result = planner.Plan(saved.with_secrets(), result.notes)
     runnable = result.allowed(allow_revoke, allow_drop)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:

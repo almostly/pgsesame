@@ -9,10 +9,10 @@ into SQL text.
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from psycopg import sql
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pgsesame.spec import PRIVILEGES
 
@@ -85,11 +85,14 @@ class CreateRole(Operation):
     """Create a role, user (a role that can log in) or group."""
 
     order: ClassVar[int] = 10
+    op: Literal["create_role"] = "create_role"
     name: str
     login: bool
     # SecretStr: the password never shows in a repr, a log or an error; only
     # statement() unwraps it, into a quoted literal
-    password: SecretStr | None = None
+    password: SecretStr | None = Field(None, exclude=True)  # never saved
+    # where apply finds the password again when it runs a saved change set
+    password_env: str | None = None
 
     def _sql(self, password: sql.Composable | None) -> sql.Composed:
         parts = [
@@ -116,6 +119,7 @@ class AlterLogin(Operation):
 
     kind: ClassVar[Kind] = "change"
     order: ClassVar[int] = 20
+    op: Literal["alter_login"] = "alter_login"
     name: str
     login: bool
 
@@ -130,6 +134,7 @@ class AddMember(Operation):
     """Make ``member`` a member of ``role``."""
 
     order: ClassVar[int] = 30
+    op: Literal["add_member"] = "add_member"
     member: str
     role: str
 
@@ -144,6 +149,7 @@ class Grant(Operation):
     """Grant a privilege on an object."""
 
     order: ClassVar[int] = 40
+    op: Literal["grant"] = "grant"
     grantee: str
     object_type: str
     object_name: str
@@ -164,6 +170,7 @@ class Revoke(Operation):
     kind: ClassVar[Kind] = "remove"
     gate: ClassVar[Gate | None] = "revoke"
     order: ClassVar[int] = 50
+    op: Literal["revoke"] = "revoke"
     grantee: str
     object_type: str
     object_name: str
@@ -184,6 +191,7 @@ class RemoveMember(Operation):
     kind: ClassVar[Kind] = "remove"
     gate: ClassVar[Gate | None] = "revoke"
     order: ClassVar[int] = 60
+    op: Literal["remove_member"] = "remove_member"
     member: str
     role: str
 
@@ -192,3 +200,10 @@ class RemoveMember(Operation):
         return sql.SQL("REVOKE {} FROM {}").format(
             sql.Identifier(self.role), sql.Identifier(self.member)
         )
+
+
+# a plan's operations as one type, told apart by ``op``: what a change set stores
+AnyOperation = Annotated[
+    CreateRole | AlterLogin | AddMember | Grant | Revoke | RemoveMember,
+    Field(discriminator="op"),
+]

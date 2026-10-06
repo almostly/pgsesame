@@ -173,3 +173,56 @@ def test_a_missing_object_stops_the_plan(dsn, tmp_path):
     code, out = _sesame("plan", spec, "--dsn", dsn)
     assert code == 1
     assert "analytics.nope does not exist" in out
+
+
+def test_a_change_set_applies_exactly_what_was_planned(dsn, tmp_path):
+    spec, saved = _spec(tmp_path), str(tmp_path / "changes.json")
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-2"}
+    code, out = _sesame("plan", spec, "--dsn", dsn, "-o", saved, env=env)
+    assert code == 2 and "Saved to" in out, out
+    text = (tmp_path / "changes.json").read_text()
+    assert "alice-pw-2" not in text and "SESAME_TEST_ALICE_PASSWORD" in text
+
+    code, out = _sesame("show", saved)
+    assert code == 0 and f'+ CREATE ROLE "{P}alice" LOGIN' in out, out
+
+    # a change elsewhere in the database doesn't get in the way
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE marts.extra (x int)")
+    code, out = _sesame("apply", saved, "--dsn", dsn, env=env)
+    assert code == 0, out
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    alice = make_conninfo(dsn, user=f"{P}alice", password="alice-pw-2")
+    psycopg.connect(alice).close()  # the password came from the environment again
+
+
+def test_a_change_set_is_refused_when_the_plan_would_differ(dsn, tmp_path):
+    spec, saved = _spec(tmp_path), str(tmp_path / "changes.json")
+    assert _sesame("plan", spec, "--dsn", dsn, "-o", saved)[0] == 2
+    with psycopg.connect(dsn, autocommit=True) as conn:  # analytics.* grows
+        conn.execute("CREATE TABLE analytics.late (x int)")
+    code, out = _sesame("apply", saved, "--dsn", dsn)
+    assert code == 1 and "the database changed since" in out, out
+    assert '"analytics"."late"' in out  # the new plan is shown
+    with psycopg.connect(dsn) as conn:  # nothing ran
+        assert conn.execute(
+            "SELECT count(*) FROM pg_roles WHERE rolname LIKE %s", (f"{P}%",)
+        ).fetchone() == (0,)
+
+
+def test_an_edited_or_misdirected_change_set_is_refused(dsn, tmp_path):
+    import json
+
+    spec, saved = _spec(tmp_path), tmp_path / "changes.json"
+    assert _sesame("plan", spec, "--dsn", dsn, "-o", str(saved))[0] == 2
+    original = json.loads(saved.read_text())
+
+    edited = {**original, "spec": {**original["spec"], "engine": "redshift"}}
+    saved.write_text(json.dumps(edited))
+    code, out = _sesame("apply", str(saved), "--dsn", dsn)
+    assert code == 1 and "edited after planning" in out, out
+
+    elsewhere = {**original, "target": "someone@prod:warehouse"}
+    saved.write_text(json.dumps(elsewhere))
+    code, out = _sesame("apply", str(saved), "--dsn", dsn)
+    assert code == 1 and "planned against someone@prod:warehouse" in out, out

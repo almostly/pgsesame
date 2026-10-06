@@ -103,7 +103,12 @@ def make(spec: Spec, current: State) -> Plan:
                     "without a password"
                 )
             plan.operations.append(
-                CreateRole(name=name, login=p.can_login, password=password)
+                CreateRole(
+                    name=name,
+                    login=p.can_login,
+                    password=password,
+                    password_env=p.password_env,
+                )
             )
         else:
             if role.superuser:
@@ -127,9 +132,23 @@ def make(spec: Spec, current: State) -> Plan:
     }
     want_privileges = {p for p in want_privileges if p.grantee in managed}
     for p in sorted(want_privileges - have_privileges):
-        plan.operations.append(Grant(**_fields(p)))
+        plan.operations.append(
+            Grant(
+                grantee=p.grantee,
+                object_type=p.object_type,
+                object_name=p.object_name,
+                privilege=p.privilege,
+            )
+        )
     for p in sorted(have_privileges - want_privileges):
-        plan.operations.append(Revoke(**_fields(p)))
+        plan.operations.append(
+            Revoke(
+                grantee=p.grantee,
+                object_type=p.object_type,
+                object_name=p.object_name,
+                privilege=p.privilege,
+            )
+        )
 
     for name, p in spec.principals.items():
         if p.owns:
@@ -138,12 +157,3 @@ def make(spec: Spec, current: State) -> Plan:
         plan.notes.append("default privileges are planned from a later milestone")
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     return plan
-
-
-def _fields(p: Privilege) -> dict[str, str]:
-    return {
-        "grantee": p.grantee,
-        "object_type": p.object_type,
-        "object_name": p.object_name,
-        "privilege": p.privilege,
-    }

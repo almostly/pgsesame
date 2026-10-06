@@ -56,6 +56,10 @@ principals:
 sesame validate permissions.yaml
 sesame plan permissions.yaml       # exit code 2 when there are changes
 sesame apply permissions.yaml      # revokes and drops need --allow-revoke / --allow-drop
+
+sesame plan permissions.yaml -o changes.json   # save the plan as a change set
+sesame show changes.json                       # review it, no database needed
+sesame apply changes.json                      # run exactly that, or refuse if it's stale
 ```
 
 Passwords never go in the spec: name an environment variable with `password_env`,
