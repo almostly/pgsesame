@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs>
+  <!-- measured against each seed's own outline: lavender at the point, mint at the base -->
+  <linearGradient id="seed" x1="0.2" y1="0" x2="0.8" y2="1">
+    <stop offset="0" stop-color="#A78BFA"/><stop offset="1" stop-color="#6EE7B7"/>
+  </linearGradient>
+  <linearGradient id="shade" x1="0.2" y1="0" x2="0.8" y2="1">
+    <stop offset="0" stop-color="#6854D6"/><stop offset="1" stop-color="#34A0AA"/>
+  </linearGradient>
+</defs>
+<path transform="translate(245.00,253.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(246.00,254.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(247.00,255.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(248.00,256.00) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(249.00,256.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(250.00,257.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(251.00,258.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(252.00,259.00) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(253.00,259.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(254.00,260.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(255.00,261.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(256.00,262.00) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(257.00,262.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(258.00,263.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(259.00,264.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(260.00,265.00) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(261.00,265.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(262.00,266.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(263.00,267.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(264.00,268.00) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(265.00,268.75) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(266.00,269.50) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#shade)"/>
+<path transform="translate(267.00,270.25) rotate(22)" d="M0,-205 C58,-190 112,-96 112,4 C112,110 62,190 0,196 C-62,190 -112,110 -112,4 C-112,-96 -58,-190 0,-205 Z" fill="url(#seed)"/>
+<path transform="translate(267.00,270.25) rotate(22)" d="M0,-150 C6,-80 6,40 0,120" fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="7" stroke-linecap="round"/>
+</svg>

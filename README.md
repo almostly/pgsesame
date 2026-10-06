@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://oblako-public.s3.amazonaws.com/pgsesame_icon.png" width="128" alt="pgsesame">
+</p>
+
 # pgsesame
 
 Declarative permission management for PostgreSQL and Amazon Redshift. Define
