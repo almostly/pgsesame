@@ -252,6 +252,10 @@ use, and the integration tests can run the same scenarios over each.
    table privileges.
 3. Ownership and default privileges.
 4. Redshift reader and renderer: users, groups, roles; tested on redshift-local.
-5. Redshift IAM credentials and the Data API backend; `manage.prefixes`.
+5. `manage.prefixes`.
+
+Redshift IAM credentials and the Data API backend are done; each is tested
+against oblako (its Redshift API and Data API) and, with the same tests, against
+Amazon Redshift.
 
 Change sets (saved plans) were brought forward and are done.

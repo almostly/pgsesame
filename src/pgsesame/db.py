@@ -7,11 +7,41 @@ IAM and Data API connections can provide the same one later.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg
 from psycopg import sql
 from pydantic import SecretStr
+
+
+class Connection(Protocol):
+    """What the readers and the CLI use from a connection, whichever kind it is."""
+
+    @property
+    def database(self) -> str:
+        """Return the database's name."""
+        ...
+
+    @property
+    def target(self) -> str:
+        """Return where the connection goes, for headers and change sets."""
+        ...
+
+    def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        """Run a catalog query and return its rows."""
+        ...
+
+    def render(self, statement: sql.Composed) -> str:
+        """Return a statement as SQL text."""
+        ...
+
+    def run(self, statements: list[sql.Composed]) -> None:
+        """Run statements in one transaction."""
+        ...
+
+    def close(self) -> None:
+        """Release the connection."""
+        ...
 
 
 class Database:

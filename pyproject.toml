@@ -36,6 +36,7 @@ Repository = "https://github.com/almostly/pgsesame"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "boto3>=1.34",  # the [redshift] extra, for the IAM and Data API tests
     "commitizen>=4",
 ]
 

@@ -8,7 +8,7 @@ out; so are grants to PUBLIC, which pgsesame does not manage yet. System schemas
 
 from __future__ import annotations
 
-from pgsesame.db import Database
+from pgsesame.db import Connection
 from pgsesame.state import Membership, Privilege, Role, State
 
 ROLES = """
@@ -68,7 +68,7 @@ where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
 """
 
 
-def read(db: Database) -> State:
+def read(db: Connection) -> State:
     """Return the current state of the database ``db`` is connected to."""
     state = State()
     for name, login, superuser in db.rows(ROLES):

@@ -10,7 +10,9 @@ is implied by ownership. Superusers are never managed.
 
 from __future__ import annotations
 
-from pgsesame.db import Database
+from typing import Any
+
+from pgsesame.db import Connection
 from pgsesame.state import Membership, Privilege, Role, State
 
 USERS = "select usesysid, usename, usesuper from pg_user"
@@ -46,7 +48,17 @@ from svv_relation_privileges
 """
 
 
-def read(db: Database) -> State:
+def _int_array(value: Any) -> list[int]:
+    """Return an int[] column: a list over a driver, ``{1,2}`` text over the Data API."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        inner = value.strip("{}")
+        return [int(v) for v in inner.split(",") if v.strip()]
+    return list(value)
+
+
+def read(db: Connection) -> State:
     """Return the current state of the Redshift database ``db`` is connected to."""
     state = State()
     users: dict[int, str] = {}
@@ -55,7 +67,7 @@ def read(db: Database) -> State:
         state.roles[name] = Role(name, True, superuser, "user")
     for name, members in db.rows(GROUPS):
         state.roles[name] = Role(name, False, False, "group")
-        for sysid in members or []:
+        for sysid in _int_array(members):
             if sysid in users:
                 state.memberships.add(Membership(users[sysid], name))
     for (name,) in db.rows(ROLES):

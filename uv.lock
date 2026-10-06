@@ -507,6 +507,7 @@ redshift = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "boto3" },
     { name = "commitizen" },
     { name = "pytest" },
 ]
@@ -523,6 +524,7 @@ provides-extras = ["redshift"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boto3", specifier = ">=1.34" },
     { name = "commitizen", specifier = ">=4" },
     { name = "pytest", specifier = ">=8" },
 ]

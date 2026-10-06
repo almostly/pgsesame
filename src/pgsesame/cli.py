@@ -12,7 +12,7 @@ from typer import rich_utils
 from pgsesame import __version__, planner, postgres, redshift, spec
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
-from pgsesame.db import Database
+from pgsesame.db import Connection, Database
 
 # pgcli's green for the help screens, in place of Typer's cyan and yellow
 for _name, _style in {
@@ -100,7 +100,7 @@ def _load(path: Path) -> spec.Spec:
         raise typer.Exit(1) from None
 
 
-def _plan(loaded: spec.Spec, db: Database) -> planner.Plan:
+def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
     reader = redshift.read if loaded.engine == "redshift" else postgres.read
     try:
         return planner.make(loaded, reader(db))
@@ -110,15 +110,86 @@ def _plan(loaded: spec.Spec, db: Database) -> planner.Plan:
         raise typer.Exit(1) from None
 
 
-def _connect(dsn: str) -> Database:
+class Target:
+    """Where to connect, from the command line: a DSN, IAM credentials or the Data API."""
+
+    def __init__(
+        self,
+        dsn: str,
+        cluster: str | None,
+        workgroup: str | None,
+        database: str,
+        iam: bool,
+        data_api: bool,
+        secret_arn: str | None,
+        db_user: str | None,
+    ):
+        """Keep the options; the DSN as a SecretStr, as it may carry a password."""
+        self.dsn = SecretStr(dsn)
+        self.cluster, self.workgroup, self.database = cluster, workgroup, database
+        self.iam, self.data_api = iam, data_api
+        self.secret_arn, self.db_user = secret_arn, db_user
+
+    def connect(self) -> Connection:
+        """Open the connection these options describe."""
+        if self.iam and self.data_api:
+            raise ValueError("choose --iam or --data-api, not both")
+        if (self.iam or self.data_api) and not (self.cluster or self.workgroup):
+            raise ValueError("--iam and --data-api need --cluster or --workgroup")
+        if self.data_api:
+            from pgsesame.aws import DataApiDatabase
+
+            return DataApiDatabase(
+                self.database,
+                cluster=self.cluster,
+                workgroup=self.workgroup,
+                secret_arn=self.secret_arn,
+                db_user=self.db_user,
+            )
+        if self.iam:
+            from pgsesame.aws import iam_database
+
+            return iam_database(self.database, self.cluster, self.workgroup)
+        return Database(self.dsn)
+
+
+ClusterOption = typer.Option(
+    None, "--cluster", help="Redshift cluster identifier (for --iam or --data-api)."
+)
+WorkgroupOption = typer.Option(
+    None, "--workgroup", help="Redshift Serverless workgroup (for --iam or --data-api)."
+)
+DatabaseOption = typer.Option(
+    "dev", "--database", help="Database, for --iam or --data-api."
+)
+IamOption = typer.Option(
+    False, "--iam", help="Connect with temporary credentials AWS issues (Redshift)."
+)
+DataApiOption = typer.Option(
+    False,
+    "--data-api",
+    help="Go through the Redshift Data API (no network path needed).",
+)
+SecretArnOption = typer.Option(
+    None, "--secret-arn", help="Secrets Manager secret, for --data-api."
+)
+DbUserOption = typer.Option(
+    None, "--db-user", help="Database user, for --data-api on a cluster."
+)
+
+
+def _connect(target: Target) -> Connection:
     try:
-        return Database(SecretStr(dsn))
-    except psycopg.OperationalError as e:
+        return target.connect()
+    except (psycopg.OperationalError, ValueError, RuntimeError) as e:
         err.print(f"[error]can't connect:[/error] {str(e).strip()}")
+        raise typer.Exit(1) from None
+    except Exception as e:  # botocore's errors: no credentials, access denied, ...
+        err.print(f"[error]can't connect through AWS:[/error] {e}")
         raise typer.Exit(1) from None
 
 
-def _show(result: planner.Plan, db: Database) -> None:
+def _show(result: planner.Plan, db: Connection) -> None:
     for note in result.notes:
         console.print(f"[muted]note: {note}[/muted]")
     for op in result.operations:
@@ -141,6 +212,13 @@ def _summary(result: planner.Plan) -> str:
 def plan(
     path: Path = SpecPath,
     dsn: str = DsnOption,
+    cluster: str | None = ClusterOption,
+    workgroup: str | None = WorkgroupOption,
+    database: str = DatabaseOption,
+    iam: bool = IamOption,
+    data_api: bool = DataApiOption,
+    secret_arn: str | None = SecretArnOption,
+    db_user: str | None = DbUserOption,
     out: Path | None = typer.Option(
         None,
         "--out",
@@ -155,7 +233,9 @@ def plan(
     errors, like ``terraform plan -detailed-exitcode``.
     """
     loaded = _load(path)
-    db = _connect(dsn)
+    db = _connect(
+        Target(dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user)
+    )
     header("plan", db.target)
     result = _plan(loaded, db)
     if not result.operations:
@@ -203,6 +283,13 @@ def apply(
         ..., exists=True, dir_okay=False, help="A spec (YAML) or a saved change set."
     ),
     dsn: str = DsnOption,
+    cluster: str | None = ClusterOption,
+    workgroup: str | None = WorkgroupOption,
+    database: str = DatabaseOption,
+    iam: bool = IamOption,
+    data_api: bool = DataApiOption,
+    secret_arn: str | None = SecretArnOption,
+    db_user: str | None = DbUserOption,
     allow_revoke: bool = typer.Option(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
@@ -215,7 +302,9 @@ def apply(
     """
     saved = _load_changeset(path) if is_changeset(path) else None
     loaded = saved.parsed_spec() if saved else _load(path)
-    db = _connect(dsn)
+    db = _connect(
+        Target(dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user)
+    )
     header("apply", db.target)
     result = _plan(loaded, db)
     if saved is not None:
@@ -242,7 +331,9 @@ def apply(
         _show(planner.Plan(runnable, result.notes), db)
         try:
             db.run([op.statement() for op in runnable])
-        except psycopg.Error as e:
+        except (
+            Exception
+        ) as e:  # psycopg's or the Data API's: the transaction rolled back
             err.print(f"[error]apply failed, nothing was changed:[/error] {e}")
             raise typer.Exit(1) from None
         console.print(f"\n[ok]✓[/ok] applied {len(runnable)} statement(s)")
