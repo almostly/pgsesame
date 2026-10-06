@@ -11,14 +11,20 @@ from typing import Any
 
 import psycopg
 from psycopg import sql
+from pydantic import SecretStr
 
 
 class Database:
     """A psycopg connection, from a DSN or the standard ``PG*`` variables."""
 
-    def __init__(self, dsn: str = ""):
-        """Connect; an empty DSN uses PGHOST, PGUSER, PGPASSWORD and the rest."""
-        self.conn = psycopg.connect(dsn, autocommit=True)
+    def __init__(self, dsn: SecretStr | None = None):
+        """Connect; no DSN uses PGHOST, PGUSER, PGPASSWORD and the rest.
+
+        The DSN can carry a password, so it stays a SecretStr until the moment it
+        is handed to libpq; ``target`` shows the connection without it.
+        """
+        secret = dsn.get_secret_value() if dsn is not None else ""
+        self.conn = psycopg.connect(secret, autocommit=True)
 
     @property
     def database(self) -> str:

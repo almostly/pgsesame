@@ -6,6 +6,7 @@ from pathlib import Path
 
 import psycopg
 import typer
+from pydantic import SecretStr
 from typer import rich_utils
 
 from pgsesame import __version__, planner, postgres, spec
@@ -112,7 +113,7 @@ def _plan(loaded: spec.Spec, db: Database) -> planner.Plan:
 
 def _connect(dsn: str) -> Database:
     try:
-        return Database(dsn)
+        return Database(SecretStr(dsn))
     except psycopg.OperationalError as e:
         err.print(f"[error]can't connect:[/error] {str(e).strip()}")
         raise typer.Exit(1) from None

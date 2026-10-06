@@ -15,16 +15,52 @@ same structure.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 Engine = Literal["postgres", "redshift"]
 ObjectType = Literal[
     "databases", "schemas", "tables", "views", "sequences", "functions"
 ]
 OBJECT_TYPES: tuple[str, ...] = get_args(ObjectType)
+
+# Parse at the edge: a spec that gets past these types holds only well-formed
+# names, so nothing past the loader has to check them again.
+#
+# A role, user, group or schema name: not empty, no NUL byte, at most 127 bytes
+# (Redshift's limit; PostgreSQL's 63 is checked per engine in the second pass).
+Identifier = Annotated[
+    str, StringConstraints(min_length=1, max_length=127, pattern=r"^[^\x00]+$")
+]
+# an environment variable name, as a shell accepts it
+EnvVar = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+# an object: name, schema.name, or schema.* (every object of the type in schema)
+ObjectPattern = Annotated[
+    str, StringConstraints(pattern=r"^[^.\x00]+(\.([^.\x00]+|\*))?$")
+]
+# every privilege name any engine knows; which apply to which engine and object
+# type is the second pass's job
+Privilege = Literal[
+    "alter",
+    "connect",
+    "create",
+    "delete",
+    "drop",
+    "execute",
+    "insert",
+    "references",
+    "select",
+    "temp",
+    "temporary",
+    "trigger",
+    "truncate",
+    "update",
+    "usage",
+]
+# PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
+MAX_NAME_BYTES = {"postgres": 63, "redshift": 127}
 
 # privileges each object type accepts, per engine
 _COMMON = {
@@ -64,16 +100,18 @@ class Principal(_Model):
 
     type: Literal["role", "user", "group"]
     login: bool | None = Field(None, description="Defaults to true for users.")
-    member_of: list[str] = Field(
+    member_of: list[Identifier] = Field(
         default_factory=list, description="Roles it belongs to."
     )
-    groups: list[str] = Field(default_factory=list, description="Redshift groups.")
-    owns: dict[ObjectType, list[str]] = Field(default_factory=dict)
-    privileges: dict[ObjectType, dict[str, list[str]]] = Field(
+    groups: list[Identifier] = Field(
+        default_factory=list, description="Redshift groups."
+    )
+    owns: dict[ObjectType, list[ObjectPattern]] = Field(default_factory=dict)
+    privileges: dict[ObjectType, dict[Privilege, list[ObjectPattern]]] = Field(
         default_factory=dict,
         description="Object type -> privilege -> objects (schema.* for all).",
     )
-    password_env: str | None = Field(
+    password_env: EnvVar | None = Field(
         None, description="Environment variable holding the password."
     )
     password: Literal["disabled"] | None = Field(
@@ -91,15 +129,15 @@ class DefaultPrivilege(_Model):
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
-    owner: str
-    grantee: str
-    in_schema: str | None = Field(None, alias="schema")
-    databases: list[str] | None = None
-    schemas: list[str] | None = None
-    tables: list[str] | None = None
-    views: list[str] | None = None
-    sequences: list[str] | None = None
-    functions: list[str] | None = None
+    owner: Identifier
+    grantee: Identifier
+    in_schema: Identifier | None = Field(None, alias="schema")
+    databases: list[Privilege] | None = None
+    schemas: list[Privilege] | None = None
+    tables: list[Privilege] | None = None
+    views: list[Privilege] | None = None
+    sequences: list[Privilege] | None = None
+    functions: list[Privilege] | None = None
 
     def grants(self) -> dict[str, list[str]]:
         """Return object type -> privileges, for the types this rule covers."""
@@ -115,7 +153,7 @@ class Spec(_Model):
 
     version: Literal[1]
     engine: Engine
-    principals: dict[str, Principal] = Field(default_factory=dict)
+    principals: dict[Identifier, Principal] = Field(default_factory=dict)
     default_privileges: list[DefaultPrivilege] = Field(default_factory=list)
 
 
@@ -148,7 +186,8 @@ def json_schema() -> dict[str, Any]:
 
 
 def _describe(err: Any) -> str:
-    path = ".".join(str(part) for part in err["loc"]) or "spec"
+    # pydantic marks a bad mapping key with a "[key]" step; the path names the key
+    path = ".".join(str(part) for part in err["loc"] if part != "[key]") or "spec"
     if err["type"] == "extra_forbidden":
         return f"{path}: unknown key"
     if err["type"] == "missing":
@@ -161,8 +200,11 @@ def _check(spec: Spec) -> list[str]:
     problems: list[str] = []
     redshift = spec.engine == "redshift"
     principals = spec.principals
+    limit = MAX_NAME_BYTES[spec.engine]
     for name, p in principals.items():
         where = f"principals.{name}"
+        if len(name.encode()) > limit:
+            problems.append(f"{where}: longer than {spec.engine}'s {limit} bytes")
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")
         if p.groups and not redshift:
