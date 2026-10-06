@@ -86,3 +86,20 @@ def test_temp_and_temporary_are_one_privilege():
             privilege="temporary",
         )
     ]
+
+
+def test_a_privilege_pgsesame_does_not_model_is_noted_and_left_alone():
+    loaded = _spec(r={"type": "role", "privileges": {"tables": {"select": ["s.t"]}}})
+    current = _state(
+        Role("r", False),
+        objects={"tables": {"s.t"}},
+        privileges={
+            Privilege("r", "tables", "s.t", "select"),
+            Privilege("r", "tables", "s.t", "rule"),  # a privilege from elsewhere
+        },
+    )
+    plan = planner.make(loaded, current)
+    assert plan.operations == []
+    assert plan.notes == [
+        "r holds RULE on s.t, which pgsesame doesn't manage; left as it is"
+    ]

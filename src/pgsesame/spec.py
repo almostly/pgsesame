@@ -43,6 +43,7 @@ ObjectPattern = Annotated[
 # every privilege name any engine knows; which apply to which engine and object
 # type is the second pass's job
 Privilege = Literal[
+    "maintain",
     "alter",
     "connect",
     "create",
@@ -72,7 +73,8 @@ _COMMON = {
     "functions": {"execute"},
 }
 PRIVILEGES: dict[str, dict[str, set[str]]] = {
-    "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger"}},
+    # MAINTAIN (VACUUM, ANALYZE, REFRESH ...) exists from PostgreSQL 17 on
+    "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger", "maintain"}},
     "redshift": {
         **_COMMON,
         "schemas": _COMMON["schemas"] | {"alter", "drop"},

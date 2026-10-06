@@ -252,3 +252,16 @@ def test_a_failed_apply_changes_nothing(dsn, tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT count(*) FROM pg_roles WHERE rolname LIKE %s", (f"{P}%",)
         ).fetchone() == (0,)
+
+
+def test_grant_all_is_read_whatever_the_server_version(dsn, tmp_path):
+    # PostgreSQL 17 added MAINTAIN, which GRANT ALL includes: it must neither crash
+    # a plan nor be revoked unless the spec manages it
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'GRANT ALL ON analytics.daily TO "{P}reader"')
+    code, out = _sesame("plan", _spec(tmp_path), "--dsn", dsn)
+    assert code == 2, out  # the extra grants are drift
+    assert f'- REVOKE INSERT ON TABLE "analytics"."daily" FROM "{P}reader"' in out
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", _spec(tmp_path), "--dsn", dsn)[0] == 0

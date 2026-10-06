@@ -37,6 +37,7 @@ _PRIVILEGE = {
     "drop": sql.SQL("DROP"),
     "execute": sql.SQL("EXECUTE"),
     "insert": sql.SQL("INSERT"),
+    "maintain": sql.SQL("MAINTAIN"),
     "references": sql.SQL("REFERENCES"),
     "select": sql.SQL("SELECT"),
     "temp": sql.SQL("TEMP"),

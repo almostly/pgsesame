@@ -6,8 +6,8 @@ Terraform.
 
 > **Status: 0.1, alpha.** `validate`, `plan`, `apply` and change sets work for
 > roles, users, groups, memberships and privileges on PostgreSQL and Redshift,
-> tested against PostgreSQL, oblako's redshift-local and Redshift Serverless, on
-> Python 3.10 to 3.13.
+> tested against PostgreSQL 14 to 18, oblako's redshift-local and Redshift
+> Serverless, on Python 3.10 to 3.13.
 > Ownership (`owns`) and default privileges are validated but not yet planned; see
 > [DESIGN.md](DESIGN.md) for the milestones.
 

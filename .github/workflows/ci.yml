@@ -17,16 +17,25 @@ concurrency:
 
 jobs:
   check:
-    name: tests (python ${{ matrix.python }})
+    name: tests (python ${{ matrix.python }}, postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # the oldest version pyproject.toml allows, the one the hooks use, the newest
-        python: ["3.10", "3.12", "3.13"]
+        # every PostgreSQL still supported (the access catalogs change between
+        # versions: pg_auth_members in 16, MAINTAIN in 17) on the hooks' Python, and
+        # the oldest and newest Python pyproject.toml allows on one PostgreSQL
+        include:
+          - {python: "3.12", postgres: "14"}
+          - {python: "3.12", postgres: "15"}
+          - {python: "3.12", postgres: "16"}
+          - {python: "3.12", postgres: "17"}
+          - {python: "3.12", postgres: "18"}
+          - {python: "3.10", postgres: "16"}
+          - {python: "3.13", postgres: "16"}
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: sesame
           POSTGRES_PASSWORD: sesame
@@ -47,7 +56,7 @@ jobs:
         run: uv sync --locked --python ${{ matrix.python }}
 
       - name: Hooks (ruff, pydocstyle, ty)
-        if: matrix.python == '3.12'
+        if: matrix.python == '3.12' && matrix.postgres == '16'
         run: uvx prek run --all-files --show-diff-on-failure
 
       - name: Tests

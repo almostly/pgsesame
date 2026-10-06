@@ -21,7 +21,7 @@ from pgsesame.ops import (
     RemoveMember,
     Revoke,
 )
-from pgsesame.spec import Spec
+from pgsesame.spec import PRIVILEGES, Spec
 from pgsesame.state import Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
@@ -164,11 +164,20 @@ def make(spec: Spec, current: State) -> Plan:
             )
         )
 
-    have_privileges = {
+    held = {
         p
         for p in current.privileges
         if p.grantee in managed and p.object_type in PLANNED_TYPES
     }
+    # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
+    # is reported and left in place: never planned, never revoked, never fatal
+    known = PRIVILEGES[spec.engine]
+    have_privileges = {p for p in held if p.privilege in known.get(p.object_type, ())}
+    for p in sorted(held - have_privileges):
+        plan.notes.append(
+            f"{p.grantee} holds {p.privilege.upper()} on {p.object_name}, which "
+            "pgsesame doesn't manage; left as it is"
+        )
     want_privileges = {p for p in want_privileges if p.grantee in managed}
     for p in sorted(want_privileges - have_privileges):
         plan.operations.append(
