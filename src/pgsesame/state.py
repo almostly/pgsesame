@@ -8,6 +8,11 @@ name, a relation or sequence as ``schema.name``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+# what kind of identity a name is: a PostgreSQL role ("pg"), or one of Redshift's
+# three, which each have their own DDL and grantee syntax
+Identity = Literal["pg", "user", "group", "role"]
 
 
 @dataclass(frozen=True, order=True)
@@ -17,6 +22,7 @@ class Role:
     name: str
     login: bool
     superuser: bool = False
+    identity: Identity = "pg"
 
 
 @dataclass(frozen=True, order=True)

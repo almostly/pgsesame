@@ -211,6 +211,10 @@ def _check(spec: Spec) -> list[str]:
             problems.append(f"{where}.groups: groups exist on Redshift only")
         if p.type == "group" and (p.login or p.member_of):
             problems.append(f"{where}: a group can't log in or be a member of a role")
+        elif redshift and p.login is not None and p.login != (p.type == "user"):
+            problems.append(
+                f"{where}.login: on Redshift a user always logs in and a role never does"
+            )
         for kind, grants in p.privileges.items():
             allowed = PRIVILEGES[spec.engine][kind]
             for privilege in grants:

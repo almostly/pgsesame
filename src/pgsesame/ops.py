@@ -15,6 +15,7 @@ from psycopg import sql
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pgsesame.spec import PRIVILEGES
+from pgsesame.state import Identity
 
 Kind = Literal["create", "change", "remove"]
 Gate = Literal["revoke", "drop"]
@@ -81,22 +82,42 @@ class Operation(BaseModel):
         return self.statement()
 
 
+def _grantee(name: str, identity: Identity) -> sql.Composed:
+    """Return a grantee as GRANT and REVOKE name it: Redshift says GROUP and ROLE."""
+    if identity == "group":
+        return sql.SQL("GROUP {}").format(sql.Identifier(name))
+    if identity == "role":
+        return sql.SQL("ROLE {}").format(sql.Identifier(name))
+    return sql.SQL("{}").format(sql.Identifier(name))
+
+
 class CreateRole(Operation):
-    """Create a role, user (a role that can log in) or group."""
+    """Create a principal: a PostgreSQL role, or a Redshift user, group or role."""
 
     order: ClassVar[int] = 10
     op: Literal["create_role"] = "create_role"
     name: str
-    login: bool
+    identity: Identity = "pg"
+    login: bool = False
     # SecretStr: the password never shows in a repr, a log or an error; only
     # statement() unwraps it, into a quoted literal
     password: SecretStr | None = Field(None, exclude=True)  # never saved
     # where apply finds the password again when it runs a saved change set
     password_env: str | None = None
+    password_disabled: bool = False
 
     def _sql(self, password: sql.Composable | None) -> sql.Composed:
+        name = sql.Identifier(self.name)
+        if self.identity == "group":
+            return sql.SQL("CREATE GROUP {}").format(name)
+        if self.identity == "role":
+            return sql.SQL("CREATE ROLE {}").format(name)
+        if self.identity == "user":  # Redshift: a user always has a password clause
+            return sql.SQL("CREATE USER {} PASSWORD {}").format(
+                name, password if password is not None else sql.SQL("DISABLE")
+            )
         parts = [
-            sql.SQL("CREATE ROLE {}").format(sql.Identifier(self.name)),
+            sql.SQL("CREATE ROLE {}").format(name),
             sql.SQL("LOGIN" if self.login else "NOLOGIN"),
         ]
         if password is not None:
@@ -104,18 +125,20 @@ class CreateRole(Operation):
         return sql.SQL(" ").join(parts)
 
     def statement(self) -> sql.Composed:
-        """Return CREATE ROLE, with the password when there is one."""
-        if self.password is None:
+        """Return the CREATE statement, with the password when there is one."""
+        if self.password is None or self.password_disabled:
             return self._sql(None)
         return self._sql(sql.Literal(self.password.get_secret_value()))
 
     def display(self) -> sql.Composed:
-        """Return CREATE ROLE with the password masked."""
-        return self._sql(None if self.password is None else sql.SQL("'********'"))
+        """Return the CREATE statement with the password masked."""
+        if self.password is None or self.password_disabled:
+            return self._sql(None)
+        return self._sql(sql.SQL("'********'"))
 
 
 class AlterLogin(Operation):
-    """Let a role log in, or stop it."""
+    """Let a PostgreSQL role log in, or stop it."""
 
     kind: ClassVar[Kind] = "change"
     order: ClassVar[int] = 20
@@ -130,18 +153,50 @@ class AlterLogin(Operation):
         )
 
 
+def _membership(
+    verb: Literal["add", "remove"],
+    member: str,
+    member_identity: Identity,
+    role: str,
+    role_identity: Identity,
+) -> sql.Composed:
+    """Render a membership change for the kind of identity ``role`` is."""
+    add = verb == "add"
+    if role_identity == "group":  # Redshift groups hold users
+        return sql.SQL("ALTER GROUP {} {} USER {}").format(
+            sql.Identifier(role),
+            sql.SQL("ADD" if add else "DROP"),
+            sql.Identifier(member),
+        )
+    if role_identity == "role":  # Redshift roles go to users and other roles
+        return sql.SQL("{} ROLE {} {} {}").format(
+            sql.SQL("GRANT" if add else "REVOKE"),
+            sql.Identifier(role),
+            sql.SQL("TO" if add else "FROM"),
+            _grantee(member, member_identity),
+        )
+    return sql.SQL("{} {} {} {}").format(
+        sql.SQL("GRANT" if add else "REVOKE"),
+        sql.Identifier(role),
+        sql.SQL("TO" if add else "FROM"),
+        sql.Identifier(member),
+    )
+
+
 class AddMember(Operation):
-    """Make ``member`` a member of ``role``."""
+    """Make ``member`` a member of ``role`` (a group or role on Redshift)."""
 
     order: ClassVar[int] = 30
     op: Literal["add_member"] = "add_member"
     member: str
     role: str
+    member_identity: Identity = "pg"
+    role_identity: Identity = "pg"
 
     def statement(self) -> sql.Composed:
-        """Return GRANT role TO member."""
-        return sql.SQL("GRANT {} TO {}").format(
-            sql.Identifier(self.role), sql.Identifier(self.member)
+        """Return GRANT role TO member, or Redshift's form for the identity."""
+        return _membership(
+            "add", self.member, self.member_identity, self.role, self.role_identity
         )
 
 
@@ -154,13 +209,14 @@ class Grant(Operation):
     object_type: str
     object_name: str
     privilege: str
+    grantee_identity: Identity = "pg"
 
     def statement(self) -> sql.Composed:
         """Return GRANT privilege ON object TO grantee."""
         return sql.SQL("GRANT {} ON {} TO {}").format(
             _privilege(self.privilege),
             _object(self.object_type, self.object_name),
-            sql.Identifier(self.grantee),
+            _grantee(self.grantee, self.grantee_identity),
         )
 
 
@@ -175,18 +231,19 @@ class Revoke(Operation):
     object_type: str
     object_name: str
     privilege: str
+    grantee_identity: Identity = "pg"
 
     def statement(self) -> sql.Composed:
         """Return REVOKE privilege ON object FROM grantee."""
         return sql.SQL("REVOKE {} ON {} FROM {}").format(
             _privilege(self.privilege),
             _object(self.object_type, self.object_name),
-            sql.Identifier(self.grantee),
+            _grantee(self.grantee, self.grantee_identity),
         )
 
 
 class RemoveMember(Operation):
-    """Take ``member`` out of ``role``."""
+    """Take ``member`` out of ``role`` (a group or role on Redshift)."""
 
     kind: ClassVar[Kind] = "remove"
     gate: ClassVar[Gate | None] = "revoke"
@@ -194,11 +251,13 @@ class RemoveMember(Operation):
     op: Literal["remove_member"] = "remove_member"
     member: str
     role: str
+    member_identity: Identity = "pg"
+    role_identity: Identity = "pg"
 
     def statement(self) -> sql.Composed:
-        """Return REVOKE role FROM member."""
-        return sql.SQL("REVOKE {} FROM {}").format(
-            sql.Identifier(self.role), sql.Identifier(self.member)
+        """Return REVOKE role FROM member, or Redshift's form for the identity."""
+        return _membership(
+            "remove", self.member, self.member_identity, self.role, self.role_identity
         )
 
 

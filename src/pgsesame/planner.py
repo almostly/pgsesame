@@ -22,7 +22,7 @@ from pgsesame.ops import (
     Revoke,
 )
 from pgsesame.spec import Spec
-from pgsesame.state import Membership, Privilege, State
+from pgsesame.state import Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
 PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences")
@@ -56,7 +56,7 @@ def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]
     memberships = {
         Membership(name, parent)
         for name, p in spec.principals.items()
-        for parent in p.member_of
+        for parent in [*p.member_of, *p.groups]
     }
     privileges: set[Privilege] = set()
     for name, p in spec.principals.items():
@@ -72,9 +72,9 @@ def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]
                             f"principals.{name}.privileges.{kind}.{privilege}: "
                             f"{pattern} does not exist"
                         )
-                    privileges |= {
-                        Privilege(name, kind, obj, privilege) for obj in matched
-                    }
+                    # one spelling for TEMP and TEMPORARY, as the readers report it
+                    spelt = "temporary" if privilege == "temp" else privilege
+                    privileges |= {Privilege(name, kind, obj, spelt) for obj in matched}
     if problems:
         raise PlanError(problems)
     return memberships, privileges
@@ -90,40 +90,79 @@ def _expand(pattern: str, existing: set[str]) -> set[str]:
 def make(spec: Spec, current: State) -> Plan:
     """Compare the spec with the current state and return the plan."""
     plan = Plan()
+    redshift = spec.engine == "redshift"
     managed = set(spec.principals)
     want_members, want_privileges = desired(spec, current)
 
+    def identity(name: str) -> Identity:
+        """Return the kind of identity a name is: the spec's word, else the database's."""
+        if not redshift:
+            return "pg"
+        if name in spec.principals:
+            return spec.principals[name].type
+        role = current.roles.get(name)
+        if role is not None and role.identity != "pg":
+            return role.identity
+        return "user"
+
+    problems: list[str] = []
     for name, p in sorted(spec.principals.items()):
         role = current.roles.get(name)
         if role is None:
             password = os.environ.get(p.password_env) if p.password_env else None
             if p.password_env and password is None:
                 plan.notes.append(
-                    f"{name}: {p.password_env} is not set; the role is created "
-                    "without a password"
+                    f"{name}: {p.password_env} is not set; it is created without a password"
+                )
+            elif redshift and p.type == "user" and not p.password_env:
+                plan.notes.append(
+                    f"{name}: created with PASSWORD DISABLE (IAM sign-in)"
                 )
             plan.operations.append(
                 CreateRole(
                     name=name,
+                    identity=identity(name),
                     login=p.can_login,
                     password=password,
                     password_env=p.password_env,
+                    password_disabled=p.password == "disabled",
                 )
             )
-        else:
-            if role.superuser:
-                plan.notes.append(f"{name} is a superuser; pgsesame leaves it alone")
-                managed.discard(name)
-                continue
-            if role.login != p.can_login:
-                plan.operations.append(AlterLogin(name=name, login=p.can_login))
+            continue
+        if role.superuser:
+            plan.notes.append(f"{name} is a superuser; pgsesame leaves it alone")
+            managed.discard(name)
+            continue
+        if redshift and role.identity != p.type:
+            problems.append(
+                f"principals.{name}: the database has it as a {role.identity}, "
+                f"the spec declares a {p.type}"
+            )
+        elif not redshift and role.login != p.can_login:
+            plan.operations.append(AlterLogin(name=name, login=p.can_login))
+    if problems:
+        raise PlanError(problems)
 
     want_members = {m for m in want_members if m.member in managed}
     have_members = {m for m in current.memberships if m.member in managed}
     for m in sorted(want_members - have_members):
-        plan.operations.append(AddMember(member=m.member, role=m.role))
+        plan.operations.append(
+            AddMember(
+                member=m.member,
+                role=m.role,
+                member_identity=identity(m.member),
+                role_identity=identity(m.role),
+            )
+        )
     for m in sorted(have_members - want_members):
-        plan.operations.append(RemoveMember(member=m.member, role=m.role))
+        plan.operations.append(
+            RemoveMember(
+                member=m.member,
+                role=m.role,
+                member_identity=identity(m.member),
+                role_identity=identity(m.role),
+            )
+        )
 
     have_privileges = {
         p
@@ -138,6 +177,7 @@ def make(spec: Spec, current: State) -> Plan:
                 object_type=p.object_type,
                 object_name=p.object_name,
                 privilege=p.privilege,
+                grantee_identity=identity(p.grantee),
             )
         )
     for p in sorted(have_privileges - want_privileges):
@@ -147,6 +187,7 @@ def make(spec: Spec, current: State) -> Plan:
                 object_type=p.object_type,
                 object_name=p.object_name,
                 privilege=p.privilege,
+                grantee_identity=identity(p.grantee),
             )
         )
 

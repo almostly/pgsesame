@@ -9,7 +9,7 @@ import typer
 from pydantic import SecretStr
 from typer import rich_utils
 
-from pgsesame import __version__, planner, postgres, spec
+from pgsesame import __version__, planner, postgres, redshift, spec
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
 from pgsesame.db import Database
@@ -101,11 +101,9 @@ def _load(path: Path) -> spec.Spec:
 
 
 def _plan(loaded: spec.Spec, db: Database) -> planner.Plan:
-    if loaded.engine != "postgres":
-        err.print("[error]Redshift support comes in a later milestone[/error]")
-        raise typer.Exit(1)
+    reader = redshift.read if loaded.engine == "redshift" else postgres.read
     try:
-        return planner.make(loaded, postgres.read(db))
+        return planner.make(loaded, reader(db))
     except planner.PlanError as e:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {problem}")
