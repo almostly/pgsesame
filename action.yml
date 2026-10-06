@@ -97,6 +97,8 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         SPEC: ${{ inputs.spec }}
         HAS_CHANGES: ${{ steps.plan.outputs.has-changes }}
+        # the pull request's own commit, not the merge commit GitHub tests
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         marker="<!-- pgsesame plan: $SPEC -->"
         body="$RUNNER_TEMP/pgsesame-comment.md"
@@ -110,7 +112,7 @@ runs:
           echo '```diff'
           cat "$RUNNER_TEMP/pgsesame-plan.txt"
           echo '```'
-          echo "<sub>Updated for $GITHUB_SHA.</sub>"
+          echo "<sub>Updated for ${HEAD_SHA:0:7}.</sub>"
         } > "$body"
         existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
           --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -n 1)
