@@ -156,7 +156,17 @@ class DataApiDatabase:
     def run(self, statements: list[sql.Composed]) -> None:
         """Run the statements as one batch, which Redshift runs as one transaction."""
         sqls = [self.render(statement) for statement in statements]
-        started = self.client.batch_execute_statement(Sqls=sqls, **self._where)
+        try:
+            started = self.client.batch_execute_statement(Sqls=sqls, **self._where)
+        except Exception as e:
+            code = getattr(e, "response", {}).get("Error", {}).get("Code")
+            if code == "AccessDeniedException":
+                raise DataApiError(
+                    f"{e}\napply runs the plan as one transaction, which needs "
+                    "redshift-data:BatchExecuteStatement (plan needs only "
+                    "ExecuteStatement, DescribeStatement and GetStatementResult)"
+                ) from None
+            raise
         self._wait(started["Id"])
 
     def close(self) -> None:

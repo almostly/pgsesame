@@ -16,6 +16,7 @@ user holds no privileges) and is dropped afterwards.
 """
 
 import os
+import secrets
 import textwrap
 
 import psycopg
@@ -69,16 +70,36 @@ def _where() -> list[str]:
 
 
 def _iam_user() -> str:
-    """Return the database user AWS maps this IAM identity to (and create it)."""
+    """Return the database user AWS maps this IAM identity to, created by a login.
+
+    Redshift creates the user on its first login, not when it issues the
+    credentials, so the test logs in once.
+    """
     if WORKGROUP:
-        creds = boto3.client("redshift-serverless").get_credentials(
-            workgroupName=WORKGROUP, dbName=DATABASE
+        api = boto3.client("redshift-serverless")
+        creds = api.get_credentials(workgroupName=WORKGROUP, dbName=DATABASE)
+        endpoint = api.get_workgroup(workgroupName=WORKGROUP)["workgroup"]["endpoint"]
+        user, password = creds["dbUser"], creds["dbPassword"]
+    else:
+        api = boto3.client("redshift")
+        creds = api.get_cluster_credentials_with_iam(
+            ClusterIdentifier=CLUSTER, DbName=DATABASE
         )
-        return creds["dbUser"]
-    creds = boto3.client("redshift").get_cluster_credentials_with_iam(
-        ClusterIdentifier=CLUSTER, DbName=DATABASE
-    )
-    return creds["DbUser"]
+        found = api.describe_clusters(ClusterIdentifier=CLUSTER)["Clusters"][0]
+        endpoint = {
+            "address": found["Endpoint"]["Address"],
+            "port": found["Endpoint"]["Port"],
+        }
+        user, password = creds["DbUser"], creds["DbPassword"]
+    psycopg.connect(
+        host=endpoint["address"],
+        port=endpoint["port"],
+        dbname=DATABASE,
+        user=user,
+        password=password,
+        sslmode="require",
+    ).close()
+    return user
 
 
 def _cleanup(conn: psycopg.Connection) -> None:
@@ -137,8 +158,18 @@ def _converge(tmp_path, *how: str) -> None:
 def iam_superuser(admin):
     """Make this IAM identity's database user a superuser for the test, then drop it."""
     user = _iam_user()
-    admin.execute(sql.SQL("ALTER USER {} CREATEUSER").format(sql.Identifier(user)))
+    # Redshift refuses a superuser without a password ("Superusers cannot have
+    # disabled passwords") and an IAM user has none, so it gets one here; it
+    # still signs in through IAM
+    password = "Aa1" + secrets.token_urlsafe(16)
+    admin.execute(
+        sql.SQL("ALTER USER {} PASSWORD {} CREATEUSER").format(
+            sql.Identifier(user), sql.Literal(password)
+        )
+    )
     yield user
+    # what the user created (the roles) is owned by it on Redshift: drop that first
+    _cleanup(admin)
     admin.execute(sql.SQL("DROP USER IF EXISTS {}").format(sql.Identifier(user)))
 
 

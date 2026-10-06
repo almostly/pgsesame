@@ -1,0 +1,46 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  A short-lived Redshift Serverless workgroup for pgsesame's integration tests
+  (and for comparing oblako's redshift-local with Redshift). Delete the stack
+  when the tests are done.
+
+Parameters:
+  AllowedCidr:
+    Type: String
+    Description: The one address (x.x.x.x/32) that may connect on 5439
+
+Resources:
+  Namespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: pgsesame-test
+      AdminUsername: sesame_admin
+      # Redshift keeps the admin password in Secrets Manager: no password in this
+      # template or on a command line, and the Data API tests use the secret
+      # (its ARN: aws redshift-serverless get-namespace, adminPasswordSecretArn)
+      ManageAdminPassword: true
+      DbName: dev
+
+  Access:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Redshift from one address
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: !Ref AllowedCidr
+
+  Workgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Properties:
+      WorkgroupName: pgsesame-test
+      NamespaceName: !Ref Namespace
+      BaseCapacity: 8
+      PubliclyAccessible: true
+      SecurityGroupIds: [!GetAtt Access.GroupId]
+
+Outputs:
+  Host:
+    Value: !GetAtt Workgroup.Workgroup.Endpoint.Address
