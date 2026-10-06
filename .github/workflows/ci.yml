@@ -67,7 +67,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       redshift:
-        image: public.ecr.aws/oblako/redshift-local:16
+        # pinned by digest: :16 moves with every oblako image change. To update,
+        # docker buildx imagetools inspect public.ecr.aws/oblako/redshift-local:16
+        # (oblako d56528d: users, groups, roles and the SVV privilege views)
+        image: public.ecr.aws/oblako/redshift-local:16@sha256:3d2618b23e25ab76d4a2dbfb716f5066e8983d0865182eacec6ea215bb958f8b
         env:
           POSTGRES_USER: oblako
           POSTGRES_PASSWORD: oblako
