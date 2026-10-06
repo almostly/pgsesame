@@ -68,11 +68,15 @@ runs:
         ARGS: ${{ inputs.args }}
       run: |
         out="$RUNNER_TEMP/pgsesame-plan.txt"
+        err="$RUNNER_TEMP/pgsesame-plan.err"
         set +e
+        # the plan (stdout) goes to the comment; uv's install messages and
+        # sesame's errors (stderr) only to the log
         # shellcheck disable=SC2086  # ARGS is a list of arguments
-        uvx --from "$PACKAGE" sesame plan "$SPEC" -o "$CHANGES" $ARGS > "$out" 2>&1
+        uvx --from "$PACKAGE" sesame plan "$SPEC" -o "$CHANGES" $ARGS > "$out" 2> "$err"
         code=$?
         set -e
+        cat "$err" >&2
         cat "$out"
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
