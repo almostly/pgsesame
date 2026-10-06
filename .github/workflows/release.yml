@@ -2,6 +2,7 @@
 # origin v0.1.0). Trusted publishing: PyPI trusts this workflow through GitHub's
 # OIDC token, so no API token is stored anywhere. The publish job runs in the
 # `pypi` environment, which can require a reviewer's approval before it starts.
+# Then the same version goes to ghcr.io/almostly/pgsesame as a container image.
 name: release
 
 on:
@@ -56,3 +57,45 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  image:
+    name: image to ghcr.io
+    # after PyPI, so an image never carries a version PyPI doesn't have
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # push to ghcr.io with the workflow's own token
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3  # arm64 on an amd64 runner
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags (v0.1.0 -> 0.1.0, 0.1, latest) and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=pgsesame
+            org.opencontainers.image.description=Permissions as code for PostgreSQL and Amazon Redshift
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

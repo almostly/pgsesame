@@ -41,6 +41,12 @@ uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```
 
+In CI without Python, use the image (amd64 and arm64):
+
+```bash
+docker run --rm -v "$PWD:/work" -e SESAME_DSN ghcr.io/almostly/pgsesame plan permissions.yaml
+```
+
 pgsesame connects the way you already do: a DSN or the standard `PG*` variables
 with a password (PostgreSQL and Redshift), temporary credentials from IAM for a
 Redshift cluster or Serverless workgroup, or the Redshift Data API when the

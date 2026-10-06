@@ -24,6 +24,7 @@ The first release.
 - **Postgres**: read through the catalog's ACLs; plan and apply in one transaction
 - **Redshift**: users, groups and RBAC roles, read through Redshift's SVV views (no ACL parsing); Redshift's DDL and `GROUP` / `ROLE` grantees
 - **Redshift**: connect with a password, with temporary IAM credentials (`--iam`, a cluster or a Serverless workgroup), or through the Data API (`--data-api`, one transaction per apply)
+- **Release**: on PyPI, and as a container image for CI without Python: `ghcr.io/almostly/pgsesame` (amd64, arm64; tags `0.1.0`, `0.1`, `latest`)
 - **Security**: passwords never go in the spec, a plan, a change set or a log: SecretStr from the environment variable the spec names; the DSN is a SecretStr
 
 Ownership and default privileges are validated but not yet planned.
