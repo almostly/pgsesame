@@ -29,6 +29,7 @@ redshift = ["boto3>=1.34"]
 
 [project.scripts]
 sesame = "pgsesame.cli:app"
+pgsesame = "pgsesame.cli:app"  # the same command, so `uvx pgsesame` works
 
 [project.urls]
 Repository = "https://github.com/almostly/pgsesame"

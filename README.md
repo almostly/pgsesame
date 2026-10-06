@@ -25,8 +25,10 @@ revokes and drops but applies them only when you ask.
 ## Install
 
 ```bash
-pip install pgsesame               # PostgreSQL and Redshift over a direct connection
-pip install "pgsesame[redshift]"   # adds IAM credentials and the Data API for Redshift
+uv tool install pgsesame               # installs the `sesame` command
+uv tool install "pgsesame[redshift]"   # adds IAM credentials and the Data API for Redshift
+uvx pgsesame --help                    # or try it without installing
+pip install pgsesame                   # or into an environment
 ```
 
 pgsesame connects the way you already do: a DSN or the standard `PG*` variables
