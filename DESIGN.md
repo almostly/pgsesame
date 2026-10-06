@@ -194,6 +194,29 @@ All three produce the same connection interface inside pgsesame (run a query,
 run statements), so the reader, planner and applier do not know which one is in
 use, and the integration tests can run the same scenarios over each.
 
+## Implementation choices
+
+- **The spec is pydantic models.** Pydantic checks the structure (types, unknown
+  keys, allowed values); a second pass checks what needs the whole spec
+  (engine-specific privileges, references between principals). Both report every
+  problem with its YAML path. `sesame schema` prints the spec's JSON Schema, so
+  editors can complete and check the YAML as it's written.
+- **Statements are typed objects, not strings.** The planner produces frozen
+  pydantic models (`CreateRole`, `Grant`, `Revoke`, `AddMember`, `AlterOwner`,
+  ...); each renders itself for PostgreSQL or Redshift in one place, and golden
+  tests pin the SQL for both engines.
+- **SQL is composed with `psycopg.sql`** (`SQL`, `Identifier`, `Literal`), so
+  names from the spec are always quoted correctly (`IAM:alice`, mixed case,
+  reserved words) and never concatenated into SQL. The Data API path renders the
+  same objects to text with the same quoting rules.
+- **Catalog queries are named constants**, one module per engine, each covered by
+  the integration tests against a real server.
+- **No SQLAlchemy.** Its Core has no constructs for GRANT, REVOKE, roles, default
+  privileges or ownership, its reflection does not cover roles or ACLs, and it
+  needs a DBAPI driver, which the Data API does not have. It would add weight
+  without removing any SQL. An adapter that accepts a SQLAlchemy engine as a
+  connection can come later if users ask for it.
+
 ## Testing
 
 - Unit tests: spec validation, diff and plan ordering, SQL rendering, the ACL

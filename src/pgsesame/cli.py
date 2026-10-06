@@ -71,6 +71,14 @@ def validate(path: Path = SpecPath) -> None:
 
 
 @app.command()
+def schema() -> None:
+    """Print the spec's JSON Schema, for editor completion and checking."""
+    import json
+
+    print(json.dumps(spec.json_schema(), indent=2))
+
+
+@app.command()
 def plan(path: Path = SpecPath) -> None:
     """Show the SQL that would make the database match the spec."""
     header("plan", str(path))

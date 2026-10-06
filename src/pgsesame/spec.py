@@ -1,22 +1,30 @@
-"""The permissions spec: loading YAML into a validated model.
+"""The permissions spec: YAML loaded into validated pydantic models.
 
 The spec is principal-centric: each principal (role, user or, on Redshift, group)
 declares its memberships, the objects it owns and the privileges it holds. See
-DESIGN.md for the format. Validation reports every problem it finds, each with its
-path in the file, instead of stopping at the first.
+DESIGN.md for the format.
+
+Validation runs in two passes and reports every problem, each with its path in the
+file: pydantic checks the structure (types, unknown keys, allowed values), then
+``_check`` checks what needs the whole spec (engine-specific rules and references
+between principals). The second pass runs once the structure is valid, so a spec
+with structural problems reports those first. ``json_schema()`` gives editors the
+same structure.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-ENGINES = ("postgres", "redshift")
-PRINCIPAL_TYPES = ("role", "user", "group")
-OBJECT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functions")
+Engine = Literal["postgres", "redshift"]
+ObjectType = Literal[
+    "databases", "schemas", "tables", "views", "sequences", "functions"
+]
+OBJECT_TYPES: tuple[str, ...] = get_args(ObjectType)
 
 # privileges each object type accepts, per engine
 _COMMON = {
@@ -27,7 +35,7 @@ _COMMON = {
     "sequences": {"usage", "select", "update"},
     "functions": {"execute"},
 }
-PRIVILEGES = {
+PRIVILEGES: dict[str, dict[str, set[str]]] = {
     "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger"}},
     "redshift": {
         **_COMMON,
@@ -36,17 +44,6 @@ PRIVILEGES = {
         "views": _COMMON["views"] | {"alter", "drop"},
     },
 }
-_PRINCIPAL_KEYS = {
-    "type",
-    "login",
-    "member_of",
-    "groups",
-    "owns",
-    "privileges",
-    "password_env",
-    "password",
-}
-_DEFAULT_KEYS = {"owner", "schema", "grantee", *OBJECT_TYPES}
 
 
 class SpecError(Exception):
@@ -58,38 +55,68 @@ class SpecError(Exception):
         self.problems = problems
 
 
-@dataclass
-class Principal:
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class Principal(_Model):
     """A role, user or (Redshift) group, and what it is granted."""
 
-    name: str
-    type: str
-    login: bool = False
-    member_of: list[str] = field(default_factory=list)
-    groups: list[str] = field(default_factory=list)
-    owns: dict[str, list[str]] = field(default_factory=dict)
-    privileges: dict[str, dict[str, list[str]]] = field(default_factory=dict)
-    password_env: str | None = None
-    password_disabled: bool = False
+    type: Literal["role", "user", "group"]
+    login: bool | None = Field(None, description="Defaults to true for users.")
+    member_of: list[str] = Field(
+        default_factory=list, description="Roles it belongs to."
+    )
+    groups: list[str] = Field(default_factory=list, description="Redshift groups.")
+    owns: dict[ObjectType, list[str]] = Field(default_factory=dict)
+    privileges: dict[ObjectType, dict[str, list[str]]] = Field(
+        default_factory=dict,
+        description="Object type -> privilege -> objects (schema.* for all).",
+    )
+    password_env: str | None = Field(
+        None, description="Environment variable holding the password."
+    )
+    password: Literal["disabled"] | None = Field(
+        None, description="'disabled' for no password; never a password itself."
+    )
+
+    @property
+    def can_login(self) -> bool:
+        """Whether the principal logs in (users do unless ``login: false``)."""
+        return self.login if self.login is not None else self.type == "user"
 
 
-@dataclass
-class DefaultPrivilege:
+class DefaultPrivilege(_Model):
     """Privileges ``grantee`` gets on objects ``owner`` creates (in ``schema``)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     owner: str
     grantee: str
-    schema: str | None
-    privileges: dict[str, list[str]]
+    in_schema: str | None = Field(None, alias="schema")
+    databases: list[str] | None = None
+    schemas: list[str] | None = None
+    tables: list[str] | None = None
+    views: list[str] | None = None
+    sequences: list[str] | None = None
+    functions: list[str] | None = None
+
+    def grants(self) -> dict[str, list[str]]:
+        """Return object type -> privileges, for the types this rule covers."""
+        return {
+            kind: sorted(names)
+            for kind in OBJECT_TYPES
+            if (names := getattr(self, kind)) is not None
+        }
 
 
-@dataclass
-class Spec:
-    """A validated spec."""
+class Spec(_Model):
+    """A whole spec: the engine, the principals and default-privilege rules."""
 
-    engine: str
-    principals: dict[str, Principal]
-    default_privileges: list[DefaultPrivilege]
+    version: Literal[1]
+    engine: Engine
+    principals: dict[str, Principal] = Field(default_factory=dict)
+    default_privileges: list[DefaultPrivilege] = Field(default_factory=list)
 
 
 def load(path: str | Path) -> Spec:
@@ -103,153 +130,77 @@ def load(path: str | Path) -> Spec:
 
 def parse(raw: Any) -> Spec:
     """Validate a spec already loaded from YAML."""
-    problems: list[str] = []
-    if not isinstance(raw, dict):
-        raise SpecError(["the spec must be a mapping"])
-    unknown = set(raw) - {"version", "engine", "principals", "default_privileges"}
-    problems += [f"{k}: unknown key" for k in sorted(unknown)]
-    if raw.get("version") != 1:
-        problems.append("version: must be 1")
-    engine = raw.get("engine")
-    if engine not in ENGINES:
-        problems.append(f"engine: must be one of {', '.join(ENGINES)}")
-        engine = "postgres"  # keep validating the rest
-
-    principals: dict[str, Principal] = {}
-    for name, body in (raw.get("principals") or {}).items():
-        principal = _principal(str(name), body or {}, engine, problems)
-        if principal:
-            principals[principal.name] = principal
-    _check_references(principals, problems)
-
-    defaults = [
-        d
-        for i, body in enumerate(raw.get("default_privileges") or [])
-        if (d := _default(i, body or {}, engine, principals, problems))
-    ]
+    try:
+        spec = Spec.model_validate(raw)
+    except ValidationError as e:
+        raise SpecError([_describe(err) for err in e.errors()]) from None
+    problems = _check(spec)
     if problems:
         raise SpecError(problems)
-    return Spec(engine=engine, principals=principals, default_privileges=defaults)
+    return spec
 
 
-def _principal(
-    name: str, body: Any, engine: str, problems: list[str]
-) -> Principal | None:
-    where = f"principals.{name}"
-    if not isinstance(body, dict):
-        problems.append(f"{where}: must be a mapping")
-        return None
-    problems += [
-        f"{where}.{k}: unknown key" for k in sorted(set(body) - _PRINCIPAL_KEYS)
-    ]
-    kind = body.get("type")
-    if kind not in PRINCIPAL_TYPES:
-        problems.append(f"{where}.type: must be one of {', '.join(PRINCIPAL_TYPES)}")
-        return None
-    if kind == "group" and engine != "redshift":
-        problems.append(f"{where}.type: groups exist on Redshift only")
-    if body.get("groups") and engine != "redshift":
-        problems.append(f"{where}.groups: groups exist on Redshift only")
-    if kind == "group" and (body.get("login") or body.get("member_of")):
-        problems.append(f"{where}: a group can't log in or be a member of a role")
-    password = body.get("password")
-    if password not in (None, "disabled"):
-        problems.append(
-            f"{where}.password: only 'disabled' is allowed; "
-            "name an environment variable with password_env instead"
-        )
-    privileges = _privileges(
-        where + ".privileges", body.get("privileges"), engine, problems
-    )
-    owns = body.get("owns") or {}
-    for kind_owned in set(owns) - set(OBJECT_TYPES):
-        problems.append(f"{where}.owns.{kind_owned}: unknown object type")
-    return Principal(
-        name=name,
-        type=kind,
-        login=bool(body.get("login", kind == "user")),
-        member_of=list(body.get("member_of") or []),
-        groups=list(body.get("groups") or []),
-        owns={k: list(v or []) for k, v in owns.items() if k in OBJECT_TYPES},
-        privileges=privileges,
-        password_env=body.get("password_env"),
-        password_disabled=password == "disabled",
-    )
+def json_schema() -> dict[str, Any]:
+    """Return the spec's JSON Schema, for editor completion and checking."""
+    schema = Spec.model_json_schema(by_alias=True)
+    schema["title"] = "pgsesame spec"
+    return schema
 
 
-def _privileges(
-    where: str, body: Any, engine: str, problems: list[str]
-) -> dict[str, dict[str, list[str]]]:
-    out: dict[str, dict[str, list[str]]] = {}
-    for kind, grants in (body or {}).items():
-        if kind not in OBJECT_TYPES:
-            problems.append(f"{where}.{kind}: unknown object type")
-            continue
-        allowed = PRIVILEGES[engine][kind]
-        out[kind] = {}
-        for privilege, objects in (grants or {}).items():
-            if privilege not in allowed:
-                problems.append(
-                    f"{where}.{kind}.{privilege}: not a {engine} privilege on {kind} "
-                    f"({', '.join(sorted(allowed))})"
-                )
-                continue
-            out[kind][privilege] = list(objects or [])
-    return out
+def _describe(err: Any) -> str:
+    path = ".".join(str(part) for part in err["loc"]) or "spec"
+    if err["type"] == "extra_forbidden":
+        return f"{path}: unknown key"
+    if err["type"] == "missing":
+        return f"{path}: required"
+    return f"{path}: {err['msg'][0].lower()}{err['msg'][1:]}"
 
 
-def _check_references(principals: dict[str, Principal], problems: list[str]) -> None:
-    for p in principals.values():
+def _check(spec: Spec) -> list[str]:
+    """Check what pydantic can't: engine rules and references between principals."""
+    problems: list[str] = []
+    redshift = spec.engine == "redshift"
+    principals = spec.principals
+    for name, p in principals.items():
+        where = f"principals.{name}"
+        if p.type == "group" and not redshift:
+            problems.append(f"{where}.type: groups exist on Redshift only")
+        if p.groups and not redshift:
+            problems.append(f"{where}.groups: groups exist on Redshift only")
+        if p.type == "group" and (p.login or p.member_of):
+            problems.append(f"{where}: a group can't log in or be a member of a role")
+        for kind, grants in p.privileges.items():
+            allowed = PRIVILEGES[spec.engine][kind]
+            for privilege in grants:
+                if privilege not in allowed:
+                    problems.append(
+                        f"{where}.privileges.{kind}.{privilege}: not a {spec.engine} "
+                        f"privilege on {kind} ({', '.join(sorted(allowed))})"
+                    )
         for parent in p.member_of:
             target = principals.get(parent)
             if target is None:
-                problems.append(
-                    f"principals.{p.name}.member_of: {parent} is not declared"
-                )
+                problems.append(f"{where}.member_of: {parent} is not declared")
             elif target.type == "group":
-                problems.append(
-                    f"principals.{p.name}.member_of: {parent} is a group; use groups"
-                )
+                problems.append(f"{where}.member_of: {parent} is a group; use groups")
         for group in p.groups:
             target = principals.get(group)
             if target is None or target.type != "group":
-                problems.append(
-                    f"principals.{p.name}.groups: {group} is not a declared group"
-                )
-
-
-def _default(
-    i: int,
-    body: Any,
-    engine: str,
-    principals: dict[str, Principal],
-    problems: list[str],
-) -> DefaultPrivilege | None:
-    where = f"default_privileges[{i}]"
-    if not isinstance(body, dict):
-        problems.append(f"{where}: must be a mapping")
-        return None
-    problems += [f"{where}.{k}: unknown key" for k in sorted(set(body) - _DEFAULT_KEYS)]
-    for key in ("owner", "grantee"):
-        if body.get(key) not in principals:
-            problems.append(f"{where}.{key}: {body.get(key)} is not declared")
-    privileges: dict[str, list[str]] = {}
-    for kind in OBJECT_TYPES:
-        if kind not in body:
-            continue
-        allowed = PRIVILEGES[engine][kind]
-        names = list(body[kind] or [])
-        for privilege in names:
-            if privilege not in allowed:
-                problems.append(
-                    f"{where}.{kind}: {privilege} is not a {engine} privilege on {kind}"
-                )
-        privileges[kind] = sorted(p for p in names if p in allowed)
-    if not privileges:
-        problems.append(f"{where}: grants no privileges")
-    return DefaultPrivilege(
-        owner=str(body.get("owner")),
-        grantee=str(body.get("grantee")),
-        schema=body.get("schema"),
-        privileges=privileges,
-    )
+                problems.append(f"{where}.groups: {group} is not a declared group")
+    for i, rule in enumerate(spec.default_privileges):
+        where = f"default_privileges[{i}]"
+        for key in ("owner", "grantee"):
+            if getattr(rule, key) not in principals:
+                problems.append(f"{where}.{key}: {getattr(rule, key)} is not declared")
+        grants = rule.grants()
+        if not grants:
+            problems.append(f"{where}: grants no privileges")
+        for kind, names in grants.items():
+            allowed = PRIVILEGES[spec.engine][kind]
+            for privilege in names:
+                if privilege not in allowed:
+                    problems.append(
+                        f"{where}.{kind}: {privilege} is not a {spec.engine} "
+                        f"privilege on {kind}"
+                    )
+    return problems
