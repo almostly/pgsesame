@@ -23,8 +23,13 @@ revokes and drops but applies them only when you ask.
 
 ```bash
 pip install pgsesame               # PostgreSQL and Redshift over a direct connection
-pip install "pgsesame[redshift]"   # adds the Redshift Data API
+pip install "pgsesame[redshift]"   # adds IAM credentials and the Data API for Redshift
 ```
+
+pgsesame connects the way you already do: a DSN or the standard `PG*` variables
+with a password (PostgreSQL and Redshift), temporary credentials from IAM for a
+Redshift cluster or Serverless workgroup, or the Redshift Data API when the
+database isn't reachable over the network.
 
 ## A spec
 

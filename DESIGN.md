@@ -169,11 +169,30 @@ should be empty; the integration tests assert exactly that.
 
 ## Connecting
 
-- **Direct**: a psycopg connection (`--dsn` or the standard `PG*` variables), for
-  PostgreSQL and Redshift.
-- **Redshift Data API** (`pip install pgsesame[redshift]`): cluster or Serverless
-  workgroup, with a secret or IAM; no network path to the database is needed, which
-  suits CI runners outside the VPC.
+Connection settings are not part of the spec: the same spec is planned against
+development, staging and production, so where to connect comes from the command
+line or the environment. Redshift speaks PostgreSQL's wire protocol, so a direct
+connection is the same psycopg connection for both engines; only how the
+credentials are obtained differs.
+
+- **Credentials**: `--dsn`, or the standard libpq variables (`PGHOST`, `PGPORT`,
+  `PGDATABASE`, `PGUSER`, `PGPASSWORD`) and `~/.pgpass`. Works for PostgreSQL and
+  for Redshift with a database user's password.
+- **Redshift with IAM** (`pip install "pgsesame[redshift]"`): `--cluster ID` or
+  `--workgroup NAME` with `--iam`. pgsesame asks AWS for temporary database
+  credentials (`GetClusterCredentialsWithIAM` or `GetClusterCredentials` for a
+  provisioned cluster, `redshift-serverless GetCredentials` for a workgroup) with
+  the usual AWS credential chain, then connects directly with them. No password is
+  stored anywhere; the machine still needs a network path to the database.
+- **Redshift Data API** (same extra): `--data-api` with `--cluster ID` or
+  `--workgroup NAME`, authenticated with `--secret-arn` or IAM. Statements go over
+  AWS's HTTPS API, so no network path to the database is needed, which suits CI
+  runners outside the VPC. The Data API runs one statement (or one batch) per call,
+  so apply sends the plan as a batch where Redshift allows it.
+
+All three produce the same connection interface inside pgsesame (run a query,
+run statements), so the reader, planner and applier do not know which one is in
+use, and the integration tests can run the same scenarios over each.
 
 ## Testing
 
@@ -191,4 +210,4 @@ should be empty; the integration tests assert exactly that.
    table privileges.
 3. Ownership and default privileges.
 4. Redshift reader and renderer: users, groups, roles; tested on redshift-local.
-5. Redshift Data API backend; saved plans; `manage.prefixes`.
+5. Redshift IAM credentials and the Data API backend; saved plans; `manage.prefixes`.
