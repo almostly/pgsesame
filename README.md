@@ -4,8 +4,11 @@ Declarative permission management for PostgreSQL and Amazon Redshift. Define
 roles, users, grants and ownership in YAML, then plan and apply changes like
 Terraform.
 
-> **Status: early development.** `sesame validate` works; `plan` and `apply` are
-> being built (see [DESIGN.md](DESIGN.md) for the milestones).
+> **Status: 0.1, alpha.** `validate`, `plan`, `apply` and change sets work for
+> roles, users, groups, memberships and privileges on PostgreSQL and Redshift,
+> tested against PostgreSQL, oblako's redshift-local and Redshift Serverless.
+> Ownership (`owns`) and default privileges are validated but not yet planned; see
+> [DESIGN.md](DESIGN.md) for the milestones.
 
 ## Why
 

@@ -1,0 +1,48 @@
+# Lint, types and tests on every pull request and on main. The PostgreSQL tests
+# run against a real server (a service container); the Redshift tests need
+# oblako's redshift-local and run locally (see tests/test_redshift.py).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint, types and tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sesame
+          POSTGRES_PASSWORD: sesame
+          POSTGRES_DB: sesame
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sesame" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+    env:
+      PGSESAME_TEST_DSN: postgresql://sesame:sesame@localhost:5432/sesame
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install the project
+        run: uv sync --locked
+
+      - name: Hooks (ruff, pydocstyle, ty)
+        run: uvx prek run --all-files --show-diff-on-failure
+
+      - name: Tests
+        run: uv run pytest -q

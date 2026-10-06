@@ -1,6 +1,6 @@
 [project]
 name = "pgsesame"
-version = "0.0.1"
+version = "0.1.0"
 description = "Permissions as code for PostgreSQL and Amazon Redshift."
 readme = "README.md"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ requires-python = ">=3.10"
 authors = [{ name = "almostly" }]
 keywords = ["postgresql", "redshift", "permissions", "grants", "access-control", "iac"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
@@ -32,10 +32,13 @@ sesame = "pgsesame.cli:app"
 
 [project.urls]
 Repository = "https://github.com/almostly/pgsesame"
+Changelog = "https://github.com/almostly/pgsesame/blob/main/CHANGELOG.md"
+Design = "https://github.com/almostly/pgsesame/blob/main/DESIGN.md"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "ty>=0.0.84",  # type checks, run by the ty hook (uv run ty check)
     "boto3>=1.34",  # the [redshift] extra, for the IAM and Data API tests
     "commitizen>=4",
 ]

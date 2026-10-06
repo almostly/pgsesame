@@ -1,5 +1,6 @@
-# Run on demand: uvx pre-commit run --all-files
-# Install the git hooks: uvx pre-commit install --hook-type pre-commit --hook-type commit-msg
+# Hooks for prek (or pre-commit, which reads the same file).
+# Run on demand: uvx prek run --all-files
+# Install the git hooks: uvx prek install --hook-type pre-commit --hook-type commit-msg
 repos:
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.16.4
@@ -19,3 +20,13 @@ repos:
     hooks:
       - id: pydocstyle
         files: ^src/pgsesame/.*\.py$
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        # through uv, so ty resolves imports against the project's environment
+        entry: uv run --frozen ty check src tests
+        language: system
+        types: [python]
+        pass_filenames: false
