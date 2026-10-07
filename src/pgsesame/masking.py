@@ -198,27 +198,50 @@ def wanted_policies(spec: Spec, state: State) -> dict[str, CreateMaskingPolicy]:
 def normalize(db: Connection, spec: Spec, state: State) -> Normalized | None:
     """Return each wanted policy as Redshift stores it, or None if it can't be had.
 
-    Each policy is created under a probe name in a transaction that is always
-    rolled back, and read back from svv_masking_policy. The Data API has no
-    transaction to roll back, so there the spec's text is compared as written.
+    Each policy is created under a probe name and read back from
+    svv_masking_policy. Over a direct connection that happens in a transaction
+    that is always rolled back. The Data API has no transaction to roll back, so
+    there the probes are created in one batch, read, and dropped (also when the
+    read fails); never attached, no query sees them. If they can't be created
+    (no BatchExecuteStatement, say), None: the expressions aren't compared.
     """
-    if not isinstance(db, Database):
+    wanted = sorted(wanted_policies(spec, state).items())
+    if isinstance(db, Database):
+        out: Normalized = {}
+        with db.conn.transaction(force_rollback=True), db.conn.cursor() as cur:
+            for i, (name, create) in enumerate(wanted):
+                probe = f"pgsesame_probe_{i}"
+                cur.execute(create.model_copy(update={"name": probe}).statement())
+                row = cur.execute(
+                    "select input_columns, policy_expression from svv_masking_policy "
+                    "where policy_name = %s",
+                    (probe,),
+                ).fetchone()
+                if row:
+                    out[name] = _policy(name, row[0], row[1])
+        return out
+    if not wanted or not hasattr(db, "rows_many"):  # the Redshift Data API
         return None
-    out: Normalized = {}
-    with db.conn.transaction(force_rollback=True), db.conn.cursor() as cur:
-        for i, (name, create) in enumerate(
-            sorted(wanted_policies(spec, state).items())
-        ):
-            probe = f"pgsesame_probe_{i}"
-            cur.execute(create.model_copy(update={"name": probe}).statement())
-            row = cur.execute(
-                "select input_columns, policy_expression from svv_masking_policy "
-                "where policy_name = %s",
-                (probe,),
-            ).fetchone()
-            if row:
-                out[name] = _policy(name, row[0], row[1])
-    return out
+    import secrets
+
+    stem = f"pgsesame_probe_{secrets.token_hex(4)}_"
+    probes = {f"{stem}{i}": name for i, (name, _) in enumerate(wanted)}
+    creates = [
+        create.model_copy(update={"name": probe}).statement()
+        for probe, (_, create) in zip(probes, wanted)
+    ]
+    try:
+        db.run(creates)  # one batch: all of them or none
+    except Exception:  # can't create them here: compare nothing, as before
+        return None
+    try:
+        rows = db.rows(
+            "select policy_name, input_columns, policy_expression "
+            f"from svv_masking_policy where policy_name like '{stem}%'"
+        )
+    finally:
+        db.run([DropMaskingPolicy(name=probe).statement() for probe in probes])
+    return {probes[p]: _policy(probes[p], i, e) for p, i, e in rows if p in probes}
 
 
 # ---------------------------------------------------------------------------
@@ -315,9 +338,9 @@ def plan(
             ops.append(AlterMaskingPolicy(name=name, using=create.using))
     if normalized is None and any(n in state.mask_policies for n in wanted):
         notes.append(
-            "masking: over the Data API policy expressions aren't compared (Redshift "
-            "stores its own form, read by a rolled-back probe); connect with a "
-            "password or IAM to plan changes to them"
+            "masking: policy expressions aren't compared: Redshift stores its own "
+            "form, read back from probe policies this user couldn't create (over the "
+            "Data API that needs redshift-data:BatchExecuteStatement)"
         )
 
     # per policy, column and grantee: one DETACH removes every priority, so a
@@ -332,6 +355,18 @@ def plan(
             ops.append(_detach(a, ReattachMaskingPolicy, replacing=True))
         if not managed(a):  # someone else's column: put it back as it was
             ops.append(_attach(a, replacing=True))
+
+    # priorities matter only relative to each other: on a column where the
+    # database already has the spec's attachments in the spec's order (who
+    # outranks whom), its own numbers are kept and nothing is planned
+    for column in {(a.table, a.columns) for a in have | want}:
+        now = [a for a in have if (a.table, a.columns) == column]
+        then = [a for a in want if (a.table, a.columns) == column]
+        if any(a.policy in replaced for a in now + then):
+            continue
+        if same_order(now, then):
+            have -= set(now)
+            want -= set(then)
 
     groups = {key(a) for a in have | want}
     for k in sorted(groups):
@@ -357,6 +392,33 @@ def plan(
         if not still and not any(a.policy == name for a in want):
             ops.append(DropMaskingPolicy(name=name))
     return ops
+
+
+def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
+    """Return whether two sets of a column's attachments rank grantees alike.
+
+    The same policy for the same grantee from the same inputs on both sides,
+    once each, and for every pair the same "outranks, ties or yields": what
+    each user reads is then the same, whatever the numbers.
+    """
+
+    def ident(a: Attachment) -> tuple:
+        return (a.policy, a.grantee, a.grantee_type, a.inputs)
+
+    if len({ident(a) for a in now}) != len(now) or len(now) != len(then):
+        return False
+    have = {ident(a): a.priority for a in now}
+    want = {ident(a): a.priority for a in then}
+    if set(have) != set(want):
+        return False
+
+    def sign(x: int) -> int:
+        return (x > 0) - (x < 0)
+
+    keys = list(have)
+    return all(
+        sign(have[x] - have[y]) == sign(want[x] - want[y]) for x in keys for y in keys
+    )
 
 
 def _attach(a: Attachment, replacing: bool = False) -> AttachMaskingPolicy:

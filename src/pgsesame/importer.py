@@ -23,7 +23,8 @@ from typing import Any
 import yaml
 
 from pgsesame.planner import _system_role
-from pgsesame.masking import passes_through
+from pgsesame.masking import passes_through, same_order, unmasked_policy
+from pgsesame.state import Attachment
 from pgsesame.spec import (
     DEFAULT_PRIVILEGE_TYPES,
     OWNABLE,
@@ -257,14 +258,38 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
             used |= set(roles.values())
         if not entry:
             continue
-        expected = {10} if "mask" in entry else set()
-        expected |= {20 + 10 * i for i in range(len(roles))}
-        expected |= {1000} if unmasked else set()
-        have = {a.priority for a in attached}
-        if have != expected:
+        # pgsesame's attachments for this entry; where the database ranks the
+        # same attachments the same way, the plan keeps its numbers
+        then = []
+        if "mask" in entry:
+            then.append(
+                Attachment(
+                    entry["mask"], table, (column,), (column,), "public", "public", 10
+                )
+            )
+        for i, (grantee, policy) in enumerate(entry.get("roles", {}).items()):
+            gtype = winning[grantee].grantee_type
+            then.append(
+                Attachment(
+                    policy, table, (column,), (column,), grantee, gtype, 20 + 10 * i
+                )
+            )
+        for grantee in entry.get("unmasked", []):
+            then.append(
+                Attachment(
+                    unmasked_policy(policies[winning[grantee].policy].inputs[0][1]),
+                    table,
+                    (column,),
+                    (column,),
+                    grantee,
+                    winning[grantee].grantee_type,
+                    1000,
+                )
+            )
+        if not same_order(attached, then):
             notes.append(
-                f"{where}: priorities {sorted(have)} become pgsesame's "
-                f"{sorted(expected)}; the plan shows the change"
+                f"{where}: attached another way than pgsesame's model (priorities "
+                f"{sorted({a.priority for a in attached})}); the plan re-attaches them"
             )
         columns[f"{table}.{column}"] = entry
 

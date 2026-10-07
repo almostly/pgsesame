@@ -11,6 +11,12 @@ versioned entries below.
 
 ## Unreleased
 
+### Changed
+
+- **Redshift**: masking priorities are compared by order, not number: where a column's attachments already rank everyone as the spec does, the plan keeps the database's numbers, so `sesame import` then `plan` is empty for masking set up in the right order; an order that differs is still corrected, and import notes only the columns the plan will change
+- **Redshift**: over the Data API, masking expressions are compared too: probe policies are created, read back and dropped in the same plan (never attached); without `BatchExecuteStatement` the plan says it couldn't compare them
+- **Docs**: upgrading with `uv tool install --force --refresh`, as uv can otherwise reuse a cached version
+
 ## v0.2.2 (2026-10-07)
 
 Fixes from a first run against a production Redshift cluster over the Data API,

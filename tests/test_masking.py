@@ -278,7 +278,7 @@ def test_import_writes_masking_in_pgsesames_model_and_the_plan_corrects_it(
     out = result.stdout + result.stderr
     assert result.exit_code == 0, out
     assert "sesame_raw passes values through" in out
-    assert "priorities [5, 30, 50] become pgsesame's [10, 20, 1000]" in out
+    assert "attached another way than pgsesame's model (priorities [5, 30, 50])" in out
     import yaml
 
     written = yaml.safe_load(imported.read_text())
@@ -305,3 +305,42 @@ def test_import_writes_masking_in_pgsesames_model_and_the_plan_corrects_it(
         ("sesame_domain", "sesame_ddm_support", "role", 20, '["email"]'),
         ("sesame_unmasked_varchar_64", "sesame_ddm_pii", "role", 1000, '["email"]'),
     }
+
+
+def test_import_of_masking_in_the_right_order_plans_nothing(db, tmp_path):
+    # a role's mask at priority 0 with nothing competing (as on dwhcluster1's
+    # sensitive_data): the numbers differ from pgsesame's, what anyone reads doesn't
+    for stmt in [
+        "CREATE ROLE sesame_ddm_support",
+        "CREATE MASKING POLICY sesame_domain WITH (email varchar(64)) "
+        "USING (regexp_replace(email, '^[^@]+', '***'))",
+        "ATTACH MASKING POLICY sesame_domain ON sesame_ddm.customers(email) "
+        "TO ROLE sesame_ddm_support PRIORITY 0",
+    ]:
+        db.execute(stmt)
+    imported = tmp_path / "imported.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "import",
+            "--dsn",
+            DSN,
+            "--engine",
+            "redshift",
+            "--prefix",
+            "sesame_ddm_",
+            "--schema",
+            "sesame_ddm",
+            "-o",
+            str(imported),
+        ],
+        env={"NO_COLOR": "1"},
+    )
+    out = result.stdout + result.stderr
+    assert result.exit_code == 0, out
+    assert "attached another way" not in out  # nothing to correct
+    code, out = _sesame("plan", str(imported))
+    assert code == 0, out  # import -> plan: nothing to do
+    assert ("sesame_domain", "sesame_ddm_support", "role", 0, '["email"]') in _attached(
+        db
+    )
