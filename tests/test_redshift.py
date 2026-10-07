@@ -360,12 +360,13 @@ principals:
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
     with psycopg.connect(dsn, autocommit=True) as conn:  # hand them back for cleanup
-        conn.execute("ALTER SCHEMA rs_test OWNER TO oblako")
+        me = sql.Identifier(conn.info.user)
+        conn.execute(sql.SQL("ALTER SCHEMA rs_test OWNER TO {}").format(me))
         for (t,) in conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'rs_test'"
         ).fetchall():
             conn.execute(
-                sql.SQL("ALTER TABLE rs_test.{} OWNER TO oblako").format(
-                    sql.Identifier(t)
+                sql.SQL("ALTER TABLE rs_test.{} OWNER TO {}").format(
+                    sql.Identifier(t), me
                 )
             )

@@ -37,6 +37,13 @@ Last run, 2026-10-06 (us-east-1): every test in `test_redshift.py` and
 Serverless, once the tests cast their constant (`'***'::varchar(64)`), which
 Redshift requires.
 
+2026-10-07, again (us-east-1), for 0.2.1: all 15 tests in `test_redshift.py` and
+`test_masking.py` passed, default privileges (a role and a group grantee, for one
+schema and for every schema), ownership (schemas and tables to a user) and
+`sesame import` (an empty plan against the imported spec) among them. A first
+deploy rolled back on a `ThrottlingException` reading the workgroup's endpoint;
+deleting the stack and deploying again worked.
+
 ## Aurora PostgreSQL, express configuration
 
 A cluster made with express configuration needs no VPC or template: it is
