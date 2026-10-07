@@ -291,9 +291,47 @@ So, for each column:
 The pass-through policy (`USING (value)`) is created by pgsesame, one per column
 type, named `sesame_unmasked_<type>` (`sesame_unmasked_varchar_256`), and
 marked as pgsesame's own. A role that is both `unmasked` and in `roles` is a
-validation error, and so is a group, a role the spec doesn't declare, a column
-whose type doesn't match its policy's input, and masking on PostgreSQL (use
-column privileges there).
+validation error, and so is a group, a role the spec doesn't declare, and
+masking on PostgreSQL (use column privileges there).
+
+### Checked on Redshift Serverless (2026-10-07)
+
+The mapping above, run as written: an ordinary user read `***`, a `support`
+user `***@example.com`, a `pii_reader` the raw value, and a user with both roles
+the raw value. Also confirmed: one policy attached to two roles at one priority;
+a different policy at the same priority refused ("already attached ... with same
+priority"); `TO GROUP` a syntax error; a policy dropped while attached refused;
+`ALTER` changes the expression only; a user without `sys:secadmin` reads zero
+rows from the views.
+
+What the documentation doesn't say, and the design follows:
+
+- **Redshift stores an expression in its own form**, not as written: `'***'`
+  is kept as `CAST(CAST('***' AS VARCHAR) AS VARCHAR(256))`, a column as
+  `"masked_table"."value"`, functions in upper case. So a changed expression can't
+  be found by comparing text. pgsesame compares by round trip: in a transaction it
+  creates a scratch policy with the spec's expression, reads back Redshift's form
+  and rolls back (checked: the policy is gone afterwards), then compares that.
+- **Input types are not enforced on attach**: a `varchar(256)` policy attached
+  to a `varchar(32)` column without complaint. pgsesame doesn't reject a mismatch,
+  and keeps one pass-through policy per exact column type, so raw values come back
+  with the column's own type.
+- **The same policy can be attached to one grantee twice, at two priorities**,
+  and one `DETACH` removes both. A priority change is therefore a detach and an
+  attach of everything for that grantee and column. Priorities as high as 100000
+  are accepted.
+- **A policy's output type can differ from its input**: `regexp_replace` on a
+  `varchar(256)` gives `text`, and ALTER can't change it later ("different
+  types"). Changing it means replacing the policy (`--allow-drop`).
+
+The views, as Redshift fills them:
+`svv_masking_policy.input_columns` is JSON, `[{"colname":"value","type":"character
+varying(256)"}]`; `policy_expression` is JSON, `[{"expr":"...","type":"..."}]`;
+`svv_attached_masking_policy.input_columns` and `output_columns` are JSON arrays
+(`["email"]`), `grantee` is `public` with `grantee_type` `public` for PUBLIC,
+otherwise `role` or `user`. Column privileges are in `svv_column_privileges`
+(`namespace_name`, `relation_name`, `column_name`, `privilege_type`,
+`identity_id`, `identity_name`, `identity_type`).
 
 ### Reading and diffing
 
