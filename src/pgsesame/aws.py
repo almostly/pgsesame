@@ -264,11 +264,20 @@ class RdsEndpoint:
         master_user: str | None = None,
         arn: str | None = None,
         name: str | None = None,
+        cluster: bool = False,
+        iam_enabled: bool | None = None,
     ):
-        """Keep the endpoint; the ARN is the Data API's resource (a cluster's)."""
+        """Keep the endpoint; the ARN is the Data API's resource (a cluster's).
+
+        ``iam_enabled`` is what AWS reports (None: not known, for a bare host),
+        so an IAM sign-in that can't work is refused with the reason, not left
+        to fail at the server.
+        """
         self.host, self.port = host, port
         self.master_user, self.arn = master_user, arn
         self.name = name or host.split(".", 1)[0]
+        self.cluster = cluster
+        self.iam_enabled = iam_enabled
 
 
 def describe_rds(rds: str, client: Any = None) -> RdsEndpoint:
@@ -278,7 +287,7 @@ def describe_rds(rds: str, client: Any = None) -> RdsEndpoint:
     clusters are asked first, then the RDS instances.
     """
     if "." in rds:
-        return RdsEndpoint(rds)
+        return RdsEndpoint(rds, name=rds)
     client = client or _client("rds")
     try:
         cluster = client.describe_db_clusters(DBClusterIdentifier=rds)["DBClusters"][0]
@@ -288,6 +297,8 @@ def describe_rds(rds: str, client: Any = None) -> RdsEndpoint:
             cluster.get("MasterUsername"),
             cluster.get("DBClusterArn"),
             rds,
+            cluster=True,
+            iam_enabled=cluster.get("IAMDatabaseAuthenticationEnabled"),
         )
     except client.exceptions.DBClusterNotFoundFault:
         pass
@@ -302,6 +313,7 @@ def describe_rds(rds: str, client: Any = None) -> RdsEndpoint:
         instance.get("MasterUsername"),
         instance.get("DBInstanceArn"),
         rds,
+        iam_enabled=instance.get("IAMDatabaseAuthenticationEnabled"),
     )
 
 
@@ -319,7 +331,14 @@ def rds_iam_database(
     """
     client = client or _client("rds")
     endpoint = describe_rds(rds, client)
-    user = db_user or endpoint.master_user
+    if endpoint.iam_enabled is False:
+        kind = "cluster" if endpoint.cluster else "instance"
+        raise ValueError(
+            f"IAM database authentication is off on {endpoint.name}: enable it "
+            f"(aws rds modify-db-{kind} --db-{kind}-identifier {endpoint.name} "
+            "--enable-iam-database-authentication) or sign in with a password"
+        )
+    user = db_user or endpoint.master_user  # an explicit user wins
     if not user:
         raise ValueError("--iam with --rds needs --db-user (the endpoint is a host)")
     token = client.generate_db_auth_token(
