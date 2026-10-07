@@ -416,10 +416,7 @@ through its SVV views); change sets; Redshift over IAM credentials and the Data
 API, each tested against oblako and Redshift Serverless; the GitHub Action
 (0.1.1).
 
-0.2, masking, Supabase and RDS:
-
-- Done: built-in roles (`type: builtin`) and PostgreSQL row-level security,
-  tested on PostgreSQL 14 to 18 and on Supabase with `auth.uid()` policies.
+0.2, masking:
 
 - Redshift dynamic data masking by column and role (above), checked against
   Redshift Serverless.
@@ -442,4 +439,6 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
 
 0.4:
 
-- Redshift's row-level security policies (PostgreSQL's are done in 0.2).
+- Row-level security: PostgreSQL's `CREATE POLICY` and Redshift's RLS policies,
+  planned and diffed like grants. On Supabase, policies are how data access is
+  controlled, more than grants.

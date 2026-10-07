@@ -43,19 +43,6 @@ class Privilege:
     privilege: str  # lowercase: select, usage, ...
 
 
-@dataclass(frozen=True, order=True)
-class Policy:
-    """A row-level security policy, its expressions in the server's own form."""
-
-    table: str
-    name: str
-    command: str  # all, select, insert, update, delete
-    permissive: bool
-    roles: tuple[str, ...]  # sorted; ("public",) for PUBLIC
-    using: str | None
-    with_check: str | None
-
-
 @dataclass
 class State:
     """What the database grants (read) or should grant (from the spec)."""
@@ -65,6 +52,3 @@ class State:
     privileges: set[Privilege] = field(default_factory=set)
     # every object the database has, by type: lets the planner expand schema.*
     objects: dict[str, set[str]] = field(default_factory=dict)
-    # row-level security per table: (enabled, forced), and the tables' policies
-    rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
-    policies: dict[tuple[str, str], Policy] = field(default_factory=dict)
