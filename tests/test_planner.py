@@ -52,8 +52,7 @@ def test_parts_not_planned_yet_are_noted_not_dropped_silently():
             ],
         }
     )
-    plan = planner.make(loaded, _state())
-    assert "etl: ownership is planned from a later milestone" in plan.notes
+    plan = planner.make(loaded, _state(objects={"schemas": {"analytics"}}))
     assert (
         "fn: privileges on functions are planned from a later milestone" in plan.notes
     )
@@ -61,6 +60,7 @@ def test_parts_not_planned_yet_are_noted_not_dropped_silently():
     assert [type(op).__name__ for op in plan.operations] == [
         "CreateRole",
         "CreateRole",
+        "AlterOwner",  # etl owns analytics: after etl exists, before grants
         "GrantDefault",
     ]
 
@@ -571,3 +571,77 @@ def test_manage_prefixes_adopts_undeclared_roles_but_never_drops_them():
         "svc_old: not in the spec, managed by manage.prefixes" in n for n in plan.notes
     )
     assert not any("svc_admin" in n for n in plan.notes)  # a superuser: never adopted
+
+
+# ---------------------------------------------------------------------------
+# Ownership
+# ---------------------------------------------------------------------------
+def _owners_spec(owns, privileges=None):
+    principals = {"etl": {"type": "role", "owns": owns}}
+    if privileges:
+        principals["etl"]["privileges"] = privileges
+    return spec.parse({"version": 1, "engine": "postgres", "principals": principals})
+
+
+def _owned_state(**owners):
+    state = _state(
+        Role("etl", False),
+        Role("admin", True),
+        objects={"schemas": {"a"}, "tables": {"a.t", "a.u"}},
+    )
+    state.owners = {
+        (k.split(":", 1)[0], k.split(":", 1)[1]): v for k, v in owners.items()
+    }
+    return state
+
+
+def test_ownership_moves_only_what_isnt_the_owners_yet():
+    from pgsesame.ops import AlterOwner
+
+    state = _owned_state(
+        **{"schemas:a": "admin", "tables:a.t": "etl", "tables:a.u": "admin"}
+    )
+    ops = planner.make(
+        _owners_spec({"schemas": ["a"], "tables": ["a.*"]}), state
+    ).operations
+    assert [
+        op.statement().as_string(None) for op in ops if isinstance(op, AlterOwner)
+    ] == [
+        'ALTER SCHEMA "a" OWNER TO "etl"',
+        'ALTER TABLE "a"."u" OWNER TO "etl"',
+    ]
+
+
+def test_an_owners_privileges_on_its_objects_are_implied():
+    state = _owned_state(**{"tables:a.t": "admin", "tables:a.u": "etl"})
+    # explicit grants the new owner already holds: implied once it owns the table
+    state.privileges = {Privilege("etl", "tables", "a.t", "select")}
+    loaded = _owners_spec({"tables": ["a.t"]}, {"tables": {"select": ["a.*"]}})
+    ops = planner.make(loaded, state).operations
+    assert [type(op).__name__ for op in ops] == ["AlterOwner"]  # no grant, no revoke
+
+
+def test_an_object_has_one_owner_and_must_exist():
+    with pytest.raises(spec.SpecError, match="a.t is owned by etl too"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "postgres",
+                "principals": {
+                    "etl": {"type": "role", "owns": {"tables": ["a.t"]}},
+                    "app": {"type": "role", "owns": {"tables": ["a.t"]}},
+                },
+            }
+        )
+    with pytest.raises(
+        planner.PlanError, match="owns.tables: a.missing does not exist"
+    ):
+        planner.make(_owners_spec({"tables": ["a.missing"]}), _owned_state())
+    with pytest.raises(spec.SpecError, match="on Redshift only a user owns objects"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {"r": {"type": "role", "owns": {"schemas": ["a"]}}},
+            }
+        )

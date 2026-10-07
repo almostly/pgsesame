@@ -562,3 +562,34 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert "manage:\n  schemas:\n  - analytics" in text and "marts." not in text
     code, out = _sesame("plan", str(scoped), "--dsn", dsn)
     assert code == 0, out  # marts' grants are outside: not drift
+
+
+OWNERSHIP = f"""
+version: 1
+engine: postgres
+principals:
+  {P}etl:
+    type: role
+    owns:
+      schemas: [analytics]
+      tables: [analytics.*]
+    privileges:
+      tables:
+        select: [analytics.*]   # implied by owning them: nothing to grant
+"""
+
+
+def test_ownership(dsn, tmp_path):
+    spec = _spec(tmp_path, OWNERSHIP)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f'~ ALTER SCHEMA "analytics" OWNER TO "{P}etl"' in out
+    assert f'~ ALTER TABLE "analytics"."events" OWNER TO "{P}etl"' in out
+    assert "GRANT SELECT" not in out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn) as conn:
+        owners = conn.execute(
+            "SELECT tableowner FROM pg_tables WHERE schemaname = 'analytics'"
+        ).fetchall()
+    assert {o for (o,) in owners} == {f"{P}etl"}
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0

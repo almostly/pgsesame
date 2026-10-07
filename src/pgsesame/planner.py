@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from pgsesame.ops import (
     AddMember,
+    AlterOwner,
     AlterPolicy,
     CreatePolicy,
     DisableRowSecurity,
@@ -244,6 +245,44 @@ def make(
         and _in_managed_schemas(p, spec)
     }
     want_privileges = {p for p in want_privileges if p.grantee in managed}
+
+    # ownership: each object a principal owns goes to it; an owner's privileges
+    # on its own object are implied, so they are neither granted nor revoked
+    owner_of = dict(current.owners)
+    for name, p in sorted(spec.principals.items()):
+        if p.type == "builtin" or name not in managed:
+            continue
+        for kind, patterns in sorted(p.owns.items()):
+            existing = current.objects.get(kind, set())
+            for pattern in patterns:
+                matched = _expand(pattern, existing)
+                if not matched and not pattern.endswith(".*"):
+                    problems.append(
+                        f"principals.{name}.owns.{kind}: {pattern} does not exist"
+                    )
+                for obj in sorted(matched):
+                    owner_of[(kind, obj)] = name
+                    if current.owners.get((kind, obj)) != name:
+                        plan.operations.append(
+                            AlterOwner(
+                                object_type=kind,
+                                object_name=obj,
+                                owner=name,
+                                owner_identity=identity(name),
+                            )
+                        )
+
+    def implied(p: Privilege) -> bool:
+        if p.object_type == "columns":
+            table = p.object_name.rsplit(".", 1)[0]
+            return p.grantee in (
+                owner_of.get(("tables", table)),
+                owner_of.get(("views", table)),
+            )
+        return owner_of.get((p.object_type, p.object_name)) == p.grantee
+
+    want_privileges = {p for p in want_privileges if not implied(p)}
+    have_privileges = {p for p in have_privileges if not implied(p)}
     for p in sorted(want_privileges - have_privileges):
         plan.operations.append(
             Grant(
@@ -282,8 +321,6 @@ def make(
         raise PlanError(problems)
 
     for name, p in spec.principals.items():
-        if p.owns:
-            plan.notes.append(f"{name}: ownership is planned from a later milestone")
         unplanned = sorted(set(p.privileges) - set(PLANNED_TYPES))
         if unplanned:
             plan.notes.append(

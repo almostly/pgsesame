@@ -208,6 +208,20 @@ column needs `--allow-revoke`, and a policy whose type changes is replaced only
 with `--allow-drop`. Planning masking needs a superuser or the `sys:secadmin`
 role, as Redshift shows policies to no one else.
 
+Ownership is declared on the owner, and planned as `ALTER ... OWNER TO` for the
+objects it lists (`schema.*` for every table in a schema). Objects the spec
+doesn't list keep their owner; an owner's privileges on its own objects are
+implied, so they're neither granted nor revoked. On Redshift the owner is a user:
+
+```yaml
+principals:
+  etl:
+    type: user
+    owns:
+      schemas: [analytics]
+      tables: [analytics.*]
+```
+
 Default privileges give a role what an owner creates from now on, so a table
 made overnight is readable in the morning. The owner needn't be in the spec (it's
 often the ETL or admin user); pgsesame manages the entries whose grantee it does:
