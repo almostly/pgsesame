@@ -24,7 +24,7 @@ def _has_masking() -> bool:
     if not DSN:
         return False
     try:
-        with psycopg.connect(DSN, connect_timeout=3) as conn:
+        with psycopg.connect(DSN, connect_timeout=10) as conn:
             conn.execute("select 1 from svv_masking_policy limit 1")
         return True
     except psycopg.Error:
@@ -48,7 +48,7 @@ masking:
   policies:
     sesame_redact:
       type: varchar(64)
-      using: "'***'"
+      using: "'***'::varchar(64)"
     sesame_email_domain:
       type: varchar(64)
       using: "regexp_replace(value, '^[^@]+', '***')"
@@ -141,10 +141,12 @@ def test_plan_apply_then_nothing_to_do(db, tmp_path):
 
 def test_an_expression_change_is_an_alter(db, tmp_path):
     assert _sesame("apply", _spec(tmp_path))[0] == 0
-    changed = SPEC.replace("using: \"'***'\"", "using: \"'#####'\"")
+    changed = SPEC.replace("'***'::varchar(64)", "'#####'::varchar(64)")
     code, out = _sesame("plan", _spec(tmp_path, changed))
     assert code == 2, out
-    assert "~ ALTER MASKING POLICY \"sesame_redact\" USING ('#####')" in out
+    assert (
+        "~ ALTER MASKING POLICY \"sesame_redact\" USING ('#####'::varchar(64))" in out
+    )
     assert "ATTACH" not in out and "DETACH" not in out
     assert _sesame("apply", _spec(tmp_path, changed))[0] == 0
     assert _sesame("plan", _spec(tmp_path, changed))[0] == 0

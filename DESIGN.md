@@ -322,7 +322,13 @@ What the documentation doesn't say, and the design follows:
   are accepted.
 - **A policy's output type can differ from its input**: `regexp_replace` on a
   `varchar(256)` gives `text`, and ALTER can't change it later ("different
-  types"). Changing it means replacing the policy (`--allow-drop`).
+  types"). Changing it means replacing the policy (`--allow-drop`). The types
+  are compared exactly: `varchar(64)` and `varchar(10)` clash, as do `varchar`
+  and `text`.
+- **A constant needs a cast**: `USING ('***')` is refused, on CREATE and ALTER
+  ("with ambiguous type is not supported", hint "The masking expression requires
+  type casting"); `USING ('***'::varchar(256))` is accepted. A literal in a CASE
+  takes its type from the other branch and needs none.
 
 The views, as Redshift fills them:
 `svv_masking_policy.input_columns` is JSON, `[{"colname":"value","type":"character
@@ -421,8 +427,9 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
 - Done: built-in roles (`type: builtin`) and PostgreSQL row-level security,
   tested on PostgreSQL 14 to 18 and on Supabase with `auth.uid()` policies.
 - Done: Redshift dynamic data masking by column and role (above), planned and
-  applied against oblako's redshift-local; still to run against Redshift
-  Serverless.
+  applied against oblako's redshift-local and Redshift Serverless (2026-10-07: the
+  tests pass, and users read `***`, `***@example.com` or the raw value as the spec
+  says).
 - Column privileges on PostgreSQL and Redshift.
 - In oblako: masking policies in redshift-local, catalog first (done, on its
   branch), then queries.
