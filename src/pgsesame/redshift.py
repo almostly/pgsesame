@@ -10,6 +10,9 @@ is implied by ownership. Superusers are never managed.
 
 from __future__ import annotations
 
+import os
+import sys
+import time
 from typing import Any
 
 from pgsesame.db import Connection
@@ -27,9 +30,12 @@ _USER_SCHEMA = (
     "{col} not like 'pg\\_%' and {col} not in ('information_schema', 'catalog_history')"
 )
 SCHEMAS = "select nspname from pg_namespace where " + _USER_SCHEMA.format(col="nspname")
+# local tables and views from the catalog: svv_tables also lists external
+# (Spectrum, Glue) tables, which on a real cluster makes it slow to read
 RELATIONS = (
-    "select table_schema, table_name, table_type from svv_tables where "
-    + _USER_SCHEMA.format(col="table_schema")
+    "select n.nspname, c.relname, case c.relkind when 'v' then 'VIEW' else 'TABLE' end "
+    "from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+    "where c.relkind in ('r', 'v') and " + _USER_SCHEMA.format(col="n.nspname")
 )
 DATABASE_PRIVILEGES = """
 select identity_name, identity_type, database_name, lower(privilege_type)
@@ -46,9 +52,13 @@ select identity_name, identity_type, namespace_name, relation_name,
        lower(privilege_type)
 from svv_relation_privileges
 """
+# every column, needed only when a spec grants on columns (svv_columns, like
+# svv_tables, reaches into external schemas: the catalog stays local)
 COLUMNS = (
-    "select table_schema, table_name, column_name from svv_columns where "
-    + _USER_SCHEMA.format(col="table_schema")
+    "select n.nspname, c.relname, a.attname from pg_attribute a "
+    "join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace "
+    "where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'v') and "
+    + _USER_SCHEMA.format(col="n.nspname")
 )
 # owners: Redshift's objects are owned by users (pg_user, not pg_roles)
 OWNERS = (
@@ -88,27 +98,51 @@ def _int_array(value: Any) -> list[int]:
     return list(value)
 
 
-def read(db: Connection) -> State:
-    """Return the current state of the Redshift database ``db`` is connected to."""
+def read(db: Connection, columns: bool = True) -> State:
+    """Return the current state of the Redshift database ``db`` is connected to.
+
+    ``columns`` reads every column (to check the ones a spec grants on); without
+    it, column grants are still read. The queries are fetched together: over the
+    Data API they run at the same time, each an HTTP round trip.
+    """
+    queries = {
+        "users": USERS,
+        "groups": GROUPS,
+        "roles": ROLES,
+        "user_roles": USER_ROLES,
+        "role_roles": ROLE_ROLES,
+        "schemas": SCHEMAS,
+        "relations": RELATIONS,
+        "database_privileges": DATABASE_PRIVILEGES,
+        "schema_privileges": SCHEMA_PRIVILEGES,
+        "relation_privileges": RELATION_PRIVILEGES,
+        "owners": OWNERS,
+        "default_privileges": DEFAULT_PRIVILEGES,
+        "column_privileges": COLUMN_PRIVILEGES,
+    }
+    if columns:
+        queries["columns"] = COLUMNS
+    rows = fetch(db, queries)
+
     state = State()
     users: dict[int, str] = {}
-    for sysid, name, superuser in db.rows(USERS):
+    for sysid, name, superuser in rows["users"]:
         users[sysid] = name
         state.roles[name] = Role(name, True, superuser, "user")
-    for name, members in db.rows(GROUPS):
+    for name, members in rows["groups"]:
         state.roles[name] = Role(name, False, False, "group")
         for sysid in _int_array(members):
             if sysid in users:
                 state.memberships.add(Membership(users[sysid], name))
-    for (name,) in db.rows(ROLES):
+    for (name,) in rows["roles"]:
         state.roles[name] = Role(name, False, False, "role")
-    state.memberships |= {Membership(u, r) for u, r in db.rows(USER_ROLES)}
-    state.memberships |= {Membership(r, g) for r, g in db.rows(ROLE_ROLES)}
+    state.memberships |= {Membership(u, r) for u, r in rows["user_roles"]}
+    state.memberships |= {Membership(r, g) for r, g in rows["role_roles"]}
 
     state.objects = {"databases": {db.database}, "tables": set(), "views": set()}
-    state.objects["schemas"] = {name for (name,) in db.rows(SCHEMAS)}
+    state.objects["schemas"] = {name for (name,) in rows["schemas"]}
     kinds: dict[str, str] = {}
-    for schema, name, table_type in db.rows(RELATIONS):
+    for schema, name, table_type in rows["relations"]:
         kind = "views" if table_type == "VIEW" else "tables"
         kinds[f"{schema}.{name}"] = kind
         state.objects[kind].add(f"{schema}.{name}")
@@ -120,23 +154,53 @@ def read(db: Connection) -> State:
             priv = "temporary"
         state.privileges.add(Privilege(grantee, kind, name, priv))
 
-    for grantee, identity, name, priv in db.rows(DATABASE_PRIVILEGES):
+    for grantee, identity, name, priv in rows["database_privileges"]:
         privilege(grantee, identity, "databases", name, priv)
-    for grantee, identity, name, priv in db.rows(SCHEMA_PRIVILEGES):
+    for grantee, identity, name, priv in rows["schema_privileges"]:
         privilege(grantee, identity, "schemas", name, priv)
-    for grantee, identity, schema, relation, priv in db.rows(RELATION_PRIVILEGES):
+    for grantee, identity, schema, relation, priv in rows["relation_privileges"]:
         full = f"{schema}.{relation}"
         privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
-    for kind, name, owner in db.rows(OWNERS):
+    for kind, name, owner in rows["owners"]:
         state.owners[(kind, name)] = owner
-    for owner, schema, kind, grantee, gtype, priv in db.rows(DEFAULT_PRIVILEGES):
+    for owner, schema, kind, grantee, gtype, priv in rows["default_privileges"]:
         if gtype != "public":  # PUBLIC isn't managed yet
             state.default_privileges.add(
                 DefaultGrant(
                     owner, schema, _DEFAULT_TYPES.get(kind, kind.lower()), grantee, priv
                 )
             )
-    state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in db.rows(COLUMNS)}
-    for grantee, identity, schema, relation, column, priv in db.rows(COLUMN_PRIVILEGES):
+    if columns:
+        state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in rows["columns"]}
+    for grantee, identity, schema, relation, column, priv in rows["column_privileges"]:
         privilege(grantee, identity, "columns", f"{schema}.{relation}.{column}", priv)
     return state
+
+
+def fetch(db: Connection, queries: dict[str, str]) -> dict[str, list[tuple[Any, ...]]]:
+    """Run catalog queries, together where the connection can; time them on request.
+
+    A Data API connection runs them all at once (``rows_many``); a direct one in
+    turn. ``SESAME_TIMING=1`` prints each query's time and row count to stderr.
+    """
+    started = time.monotonic()
+    many = getattr(db, "rows_many", None)
+    if many is not None:
+        results = dict(zip(queries, many(list(queries.values()))))
+        durations = getattr(db, "durations", [None] * len(queries))
+        timings = dict(zip(queries, durations))
+    else:
+        results, timings = {}, {}
+        for name, query in queries.items():
+            t = time.monotonic()
+            results[name] = db.rows(query)
+            timings[name] = time.monotonic() - t
+    if os.environ.get("SESAME_TIMING"):
+        for name, rows in results.items():
+            took = f"{timings[name]:.2f}s" if timings[name] is not None else "together"
+            print(f"sesame: {name}: {len(rows)} rows, {took}", file=sys.stderr)
+        print(
+            f"sesame: catalog read in {time.monotonic() - started:.2f}s",
+            file=sys.stderr,
+        )
+    return results

@@ -55,7 +55,7 @@ membership change it can't make is noted in the plan, not attempted.
 
 ```bash
 uv tool install pgsesame               # installs the `sesame` command
-uv tool install "pgsesame[redshift]"   # adds IAM credentials and the Data API for Redshift
+uv tool install "pgsesame[aws]"   # adds IAM credentials and the Data API for Redshift
 uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```

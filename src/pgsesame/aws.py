@@ -36,30 +36,63 @@ from pydantic import SecretStr
 from pgsesame.db import Database
 
 
+_SESSION: dict[str, str | None] = {"profile": None, "region": None}
+
+
+def configure(profile: str | None = None, region: str | None = None) -> None:
+    """Use this AWS profile and region for the connections made from now on."""
+    _SESSION["profile"], _SESSION["region"] = profile, region
+
+
+def configure_defaults(profile: str | None, region: str | None) -> None:
+    """Fill in a profile and region where none was given (a saved target's)."""
+    _SESSION["profile"] = _SESSION["profile"] or profile
+    _SESSION["region"] = _SESSION["region"] or region
+
+
 def _boto3():
     try:
         import boto3
     except ImportError as e:
         raise RuntimeError(
-            'connecting through AWS needs boto3: pip install "pgsesame[redshift]"'
+            "connecting through AWS needs boto3, which comes with the aws extra: "
+            "uv tool install --force 'pgsesame[aws]' (or pip install 'pgsesame[aws]')"
         ) from e
     return boto3
+
+
+def _client(service: str) -> Any:
+    """Return a boto3 client from the configured profile and region.
+
+    The region comes from --region, else AWS_REGION / AWS_DEFAULT_REGION, else the
+    profile's ``region`` in ~/.aws/config; without one, say where to set it.
+    """
+    session = _boto3().session.Session(
+        profile_name=_SESSION["profile"], region_name=_SESSION["region"]
+    )
+    if not session.region_name:
+        profile = _SESSION["profile"] or session.profile_name
+        raise ValueError(
+            "no AWS region: pass --region, set AWS_REGION, or add `region = ...` "
+            f"to the [{'profile ' + profile if profile != 'default' else 'default'}] "
+            "section of ~/.aws/config"
+        )
+    return session.client(service)
 
 
 def iam_database(
     database: str, cluster: str | None = None, workgroup: str | None = None
 ) -> Database:
     """Connect to Redshift with temporary credentials AWS issues for this identity."""
-    boto3 = _boto3()
     if workgroup:
-        serverless = boto3.client("redshift-serverless")
+        serverless = _client("redshift-serverless")
         creds = serverless.get_credentials(workgroupName=workgroup, dbName=database)
         endpoint = serverless.get_workgroup(workgroupName=workgroup)["workgroup"][
             "endpoint"
         ]
         user, password = creds["dbUser"], creds["dbPassword"]
     elif cluster:
-        redshift = boto3.client("redshift")
+        redshift = _client("redshift")
         creds = redshift.get_cluster_credentials_with_iam(
             ClusterIdentifier=cluster, DbName=database
         )
@@ -102,7 +135,7 @@ class DataApiDatabase:
         """Address a cluster or workgroup; authenticate with a secret, a DB user or IAM."""
         if not (cluster or workgroup):
             raise ValueError("--data-api needs --cluster or --workgroup")
-        self.client = client or _boto3().client("redshift-data")
+        self.client = client or _client("redshift-data")
         self._database = database
         self._where: dict[str, str] = {"Database": database}
         if workgroup:
@@ -141,14 +174,37 @@ class DataApiDatabase:
         """Run a catalog query and return its rows."""
         if params:
             raise ValueError("the Data API path takes no parameters")
-        started = self.client.execute_statement(Sql=query, **self._where)
-        described = self._wait(started["Id"])
+        return self.rows_many([query])[0]
+
+    def rows_many(self, queries: list[str]) -> list[list[tuple[Any, ...]]]:
+        """Run catalog queries at the same time and return each one's rows.
+
+        Every statement is submitted first, then each is waited for: over the
+        Data API a query is an HTTP round trip plus polling, so running them one
+        after another costs the sum of those, and together about the slowest.
+        ``durations`` keeps each statement's time as Redshift reports it.
+        """
+        ids = [
+            self.client.execute_statement(Sql=query, **self._where)["Id"]
+            for query in queries
+        ]
+        out: list[list[tuple[Any, ...]]] = []
+        self.durations: list[float] = []
+        for statement_id in ids:
+            described = self._wait(statement_id)
+            self.durations.append(described.get("Duration", 0) / 1e9)
+            out.append(self._result(statement_id, described))
+        return out
+
+    def _result(
+        self, statement_id: str, described: dict[str, Any]
+    ) -> list[tuple[Any, ...]]:
         if not described.get("HasResultSet"):
             return []
         out: list[tuple[Any, ...]] = []
         token = None
         while True:
-            kwargs = {"Id": started["Id"]}
+            kwargs = {"Id": statement_id}
             if token:
                 kwargs["NextToken"] = token
             page = self.client.get_statement_result(**kwargs)
@@ -220,7 +276,7 @@ def describe_rds(rds: str, client: Any = None) -> RdsEndpoint:
     """
     if "." in rds:
         return RdsEndpoint(rds)
-    client = client or _boto3().client("rds")
+    client = client or _client("rds")
     try:
         cluster = client.describe_db_clusters(DBClusterIdentifier=rds)["DBClusters"][0]
         return RdsEndpoint(
@@ -258,7 +314,7 @@ def rds_iam_database(
     ``db_user`` defaults to the cluster's or instance's admin user; it must be a
     member of ``rds_iam``, and the caller needs ``rds-db:connect`` for it.
     """
-    client = client or _boto3().client("rds")
+    client = client or _client("rds")
     endpoint = describe_rds(rds, client)
     user = db_user or endpoint.master_user
     if not user:
@@ -294,7 +350,7 @@ class RdsDataApiDatabase:
         client: Any = None,
     ):
         """Address a cluster by ARN; the Data API signs in with the secret's user."""
-        self.client = client or _boto3().client("rds-data")
+        self.client = client or _client("rds-data")
         self._database = database
         self._where = {
             "resourceArn": resource_arn,
