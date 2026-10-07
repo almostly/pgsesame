@@ -246,8 +246,12 @@ sesame plan permissions.yaml --target dwh        # ✓ nothing to do
 ```
 
 It writes every role but superusers and the platform's own (or only those named
-with `--prefix`), their memberships, grants, column grants and default
-privileges; never passwords. A role they refer to but that wasn't selected is
+with `--prefix`), their memberships, grants, column grants, default privileges,
+ownership and, on Redshift, masking; never passwords. Masking is written in
+pgsesame's model (the PUBLIC mask, roles in priority order, unmasked roles), so
+where policies were attached another way, the first plan shows the correction;
+the import's notes say what changes. Without superuser or `sys:secadmin` it says
+it couldn't see the policies, rather than writing none. A role they refer to but that wasn't selected is
 written as `type: builtin`: referred to, never managed. The flags become the
 spec's `manage:` section, which also works on its own:
 

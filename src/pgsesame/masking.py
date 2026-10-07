@@ -113,12 +113,32 @@ def read(db: Connection, spec: Spec, state: State) -> None:
         queries["columns"] = db.render(sql.SQL(COLUMNS).format(where))
     rows = redshift.fetch(db, queries)
 
-    allowed = rows["can_manage"]
-    if not (allowed and allowed[0][0]):
+    if not _store(rows, state):
         raise MaskingError(
             "masking: this user can't see masking policies (Redshift shows them to "
             "superusers and the sys:secadmin role only), so it can't plan them"
         )
+    for schema, table, column, type_name in rows.get("columns", []):
+        state.column_types[f"{schema}.{table}.{column}"] = type_name
+
+
+def read_policies(db: Connection, state: State) -> bool:
+    """Add every masking policy and attachment to ``state`` (for sesame import).
+
+    Return whether this user can see them: without superuser or sys:secadmin
+    Redshift's views are empty, which must not read as "nothing is masked".
+    """
+    rows = redshift.fetch(
+        db, {"can_manage": CAN_MANAGE, "policies": POLICIES, "attached": ATTACHED}
+    )
+    return _store(rows, state)
+
+
+def _store(rows: dict[str, list[tuple[Any, ...]]], state: State) -> bool:
+    """Keep the policies and attachments read; return whether they could be seen."""
+    allowed = rows["can_manage"]
+    if not (allowed and allowed[0][0]):
+        return False
     for name, inputs, expression in rows["policies"]:
         state.mask_policies[name] = _policy(name, inputs, expression)
     for policy, schema, table, grantee, gtype, priority, inputs, outputs in rows[
@@ -135,8 +155,19 @@ def read(db: Connection, spec: Spec, state: State) -> None:
                 priority=int(priority),
             )
         )
-    for schema, table, column, type_name in rows.get("columns", []):
-        state.column_types[f"{schema}.{table}.{column}"] = type_name
+    return True
+
+
+def passes_through(policy: MaskPolicy) -> bool:
+    """Return whether a policy returns its one input unchanged (shows the raw value)."""
+    if len(policy.inputs) != 1:
+        return False
+    name = policy.inputs[0][0]
+    expr = policy.expression.strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        expr = expr[1:-1].strip()
+    candidates = {name, f'"{name}"', f"masked_table.{name}", f'"masked_table"."{name}"'}
+    return expr in candidates or expr.lower() in {c.lower() for c in candidates}
 
 
 def unmasked_policy(type_name: str) -> str:
