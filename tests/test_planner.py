@@ -342,15 +342,31 @@ def test_masking_converges_and_compares_normalized_expressions():
     assert ops == [AlterMaskingPolicy(name="redact", using="'***'::varchar(64)")]
 
 
-def test_a_moved_priority_is_a_reattach_not_a_revoke():
+def test_priorities_are_compared_by_order_not_number():
     policies, attachments = _converged()
+    # fraud from 30 to 40: still above support (20), below unmasked (1000)
     attachments[2] = _attachment("redact", "fraud", 40)
     state = _masked_state(attachments, policies)
+    assert planner.make(_masking_spec(), state, masks={}).operations == []
+    # every number different, the same order: what each user reads is the same
+    renumbered = [
+        _attachment("redact", "public", 0, "public"),
+        _attachment("domain", "support", 5),
+        _attachment("redact", "fraud", 6),
+        _attachment("sesame_unmasked_varchar_64", "pii", 50),
+    ]
+    state = _masked_state(renumbered, policies)
+    assert planner.make(_masking_spec(), state, masks={}).operations == []
+
+
+def test_a_changed_order_is_a_reattach_not_a_revoke():
+    policies, attachments = _converged()
+    # fraud below support: support would win for a user in both, the spec says fraud
+    attachments[2] = _attachment("redact", "fraud", 15)
+    state = _masked_state(attachments, policies)
     ops = planner.make(_masking_spec(), state, masks={}).operations
-    assert [type(op) for op in ops] == [ReattachMaskingPolicy, AttachMaskingPolicy]
-    detach, attach = ops
-    assert detach.needs is None
-    assert isinstance(attach, AttachMaskingPolicy) and attach.priority == 30
+    assert ReattachMaskingPolicy in [type(op) for op in ops]
+    assert all(op.needs is None for op in ops)  # a change, not a revoke
 
 
 def test_attachments_the_spec_drops_are_revokes():

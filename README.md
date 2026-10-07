@@ -61,6 +61,9 @@ uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```
 
+To upgrade, `uv tool install --force --refresh 'pgsesame[redshift]'`: without
+`--refresh` uv can reuse the version it has cached.
+
 In CI without Python, use the image (amd64 and arm64):
 
 ```bash
@@ -208,6 +211,14 @@ Redshift stores them; moving a role's priority is a change, taking a role off a
 column needs `--allow-revoke`, and a policy whose type changes is replaced only
 with `--allow-drop`. Planning masking needs a superuser or the `sys:secadmin`
 role, as Redshift shows policies to no one else.
+
+Priorities are compared by order, not number: where a column's attachments
+already rank everyone as the spec does (the mask below the roles, the roles in
+the order written, the unmasked above), the plan keeps the database's numbers.
+Expressions are compared in the form Redshift stores them, read back from probe
+policies: rolled back over a direct connection; over the Data API created, read
+and dropped in the same plan (never attached), which needs
+`redshift-data:BatchExecuteStatement`.
 
 Ownership is declared on the owner, and planned as `ALTER ... OWNER TO` for the
 objects it lists (`schema.*` for every table in a schema). Objects the spec

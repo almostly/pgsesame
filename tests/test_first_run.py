@@ -1,5 +1,6 @@
 """First-run rough edges: messages, help, AWS region, Data API speed (no services)."""
 
+import json
 import re
 
 import pytest
@@ -149,3 +150,88 @@ def test_masking_reads_run_together_over_the_data_api():
     )
     with pytest.raises(masking.MaskingError, match="can't see masking policies"):
         masking.read(refused, _masking_spec(), State())
+
+
+class ProbingDataApi:
+    """A Data API that keeps masking probes, as Redshift's would for one plan."""
+
+    def __init__(self, deny_batch=False, fail_read=False):
+        self.deny_batch, self.fail_read = deny_batch, fail_read
+        self.probes: list[str] = []
+        self.dropped: list[str] = []
+        self.statements: dict[str, str] = {}
+
+    def batch_execute_statement(self, Sqls, **kwargs):
+        if self.deny_batch:
+            raise RuntimeError("AccessDenied: BatchExecuteStatement")
+        for text in Sqls:
+            name = text.split('"')[1]
+            if text.startswith("CREATE MASKING POLICY"):
+                self.probes.append(name)
+            elif text.startswith("DROP MASKING POLICY"):
+                self.dropped.append(name)
+        return {"Id": "batch"}
+
+    def execute_statement(self, Sql, **kwargs):
+        self.statements["read"] = Sql
+        return {"Id": "read"}
+
+    def describe_statement(self, Id):
+        if Id == "read" and self.fail_read:
+            return {"Status": "FAILED", "Error": "boom"}
+        return {"Status": "FINISHED", "HasResultSet": Id == "read", "Duration": 0}
+
+    def get_statement_result(self, Id, NextToken=None):
+        return {
+            "Records": [
+                [
+                    {"stringValue": probe},
+                    {
+                        "stringValue": '[{"colname":"value","type":"character varying(9)"}]'
+                    },
+                    {
+                        "stringValue": json.dumps(
+                            [
+                                {
+                                    "expr": "CAST('*' AS VARCHAR(9))",
+                                    "type": "character varying(9)",
+                                }
+                            ]
+                        )
+                    },
+                ]
+                for probe in self.probes
+            ]
+        }
+
+
+def test_masking_expressions_compared_over_the_data_api_with_probes():
+    from pgsesame import masking
+    from pgsesame.state import State
+
+    client = ProbingDataApi()
+    db = DataApiDatabase("dev", workgroup="wg", client=client)
+    found = masking.normalize(db, _masking_spec(), State())
+    assert found is not None and found["p"].expression == "CAST('*' AS VARCHAR(9))"
+    assert client.probes and client.dropped == client.probes  # created, then dropped
+    assert all(p.startswith("pgsesame_probe_") for p in client.probes)
+
+
+def test_masking_probes_are_dropped_even_when_the_read_fails():
+    from pgsesame import masking
+    from pgsesame.aws import DataApiError
+    from pgsesame.state import State
+
+    client = ProbingDataApi(fail_read=True)
+    db = DataApiDatabase("dev", workgroup="wg", client=client)
+    with pytest.raises(DataApiError):
+        masking.normalize(db, _masking_spec(), State())
+    assert client.dropped == client.probes
+
+
+def test_without_batch_rights_expressions_simply_arent_compared():
+    from pgsesame import masking
+    from pgsesame.state import State
+
+    db = DataApiDatabase("dev", workgroup="wg", client=ProbingDataApi(deny_batch=True))
+    assert masking.normalize(db, _masking_spec(), State()) is None
