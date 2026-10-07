@@ -314,3 +314,27 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
             "ORDER BY 1"
         ).fetchall()
     assert grants == [(f"{P}analysts", "SELECT"), (f"{P}reader", "SELECT")]
+
+
+def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
+    env = {"RS_TEST_ALICE_PASSWORD": "Alice-pw-1"}
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("apply", _spec(tmp_path, DEFAULTS), "--dsn", dsn)[0] == 0
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        dsn,
+        "--engine",
+        "redshift",
+        "--prefix",
+        P,
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    assert f"{P}analysts:\n    type: group" in text and "groups:" in text
+    assert "default_privileges:" in text and "password" not in text
+    code, out = _sesame("plan", str(imported), "--dsn", dsn)
+    assert code == 0, out

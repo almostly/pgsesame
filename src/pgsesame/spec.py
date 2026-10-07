@@ -381,7 +381,8 @@ def _check(spec: Spec) -> list[str]:
                 problems.append(f"{where}.member_of: {parent} is a group; use groups")
         for group in p.groups:
             target = principals.get(group)
-            if target is None or target.type != "group":
+            # a builtin principal may be a group the spec refers to, not manages
+            if target is None or target.type not in ("group", "builtin"):
                 problems.append(f"{where}.groups: {group} is not a declared group")
     for i, rule in enumerate(spec.default_privileges):
         where = f"default_privileges[{i}]"

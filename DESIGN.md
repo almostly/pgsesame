@@ -439,19 +439,20 @@ Done in 0.2.0 (2026-10-07), masking, Supabase and RDS:
   ADMIN OPTION are noted, not attempted); tested on oblako, PostgreSQL 16 and an
   Aurora cluster made with express configuration.
 
+0.2.1, adoption:
+
+- Done: default privileges, planned and applied; `sesame import`, which writes the
+  spec a database has today; `manage.schemas` and `manage.prefixes`.
+
 0.3:
 
-- Ownership (`owns`) and default privileges, planned and applied.
-- Checked against Redshift Serverless, where redshift-local now assumes: whether a
-  filter on a masked column compares the masked value, and whether a PUBLIC
-  attachment masks superusers.
+- Ownership (`owns`), planned and applied.
 - The RDS tests in CI (they need oblako's RDS services).
 - More built-in roles (from 0.2's mechanism): Supabase's `anon`,
   `authenticated`, `service_role`, AlloyDB's `alloydbsuperuser`, Cloud SQL's
   `cloudsqlsuperuser`.
 - Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
   the platform's admin role.
-- `manage.prefixes`.
 
 0.4:
 

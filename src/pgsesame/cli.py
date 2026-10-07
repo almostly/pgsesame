@@ -529,6 +529,82 @@ def apply(
         console.print(f"[change]{len(skipped)} statement(s) skipped[/change]")
 
 
+@app.command(name="import")
+def import_spec(
+    target: str | None = TargetOption,
+    dsn: str = DsnOption,
+    cluster: str | None = ClusterOption,
+    workgroup: str | None = WorkgroupOption,
+    database: str | None = DatabaseOption,
+    iam: bool = IamOption,
+    data_api: bool = DataApiOption,
+    secret_arn: str | None = SecretArnOption,
+    db_user: str | None = DbUserOption,
+    rds: str | None = RdsOption,
+    engine: str | None = typer.Option(
+        None,
+        "--engine",
+        help="postgres or redshift (default: the target's, else postgres).",
+    ),
+    schema: list[str] = typer.Option(
+        [],
+        "--schema",
+        help="Only grants in this schema (repeat); written as manage.schemas.",
+    ),
+    prefix: list[str] = typer.Option(
+        [], "--prefix", help="Only roles named so (repeat); written as manage.prefixes."
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        "-o",
+        dir_okay=False,
+        help="Write the spec here (default: stdout).",
+    ),
+) -> None:
+    """Write a spec from what the database grants today, so a first plan is empty."""
+    from pgsesame import importer
+
+    options = ConnectOptions(
+        dsn,
+        cluster,
+        workgroup,
+        database,
+        iam,
+        data_api,
+        secret_arn,
+        db_user,
+        target,
+        rds,
+    )
+    db = _connect(options)
+    if engine is None:
+        saved = targets.get(options.label).engine if options.label else None
+        engine = saved or ("redshift" if cluster or workgroup else "postgres")
+    if engine not in ("postgres", "redshift"):
+        err.print("[error]✗[/error] --engine is postgres or redshift")
+        raise typer.Exit(1)
+    reader = redshift.read if engine == "redshift" else postgres.read
+    state = reader(db)
+    (me,) = db.rows("select current_user")[0]
+    spec_data, notes = importer.build(state, engine, schema, prefix, me)
+    text = importer.dump(spec_data, _where(options, db))
+    try:
+        spec.parse(spec_data)  # what it writes, it can read
+    except spec.SpecError as e:
+        for problem in e.problems:
+            err.print(f"[error]✗[/error] {problem}")
+        raise typer.Exit(1) from None
+    for note in notes:
+        err.print(f"[muted]note: {note}[/muted]")
+    count = len(spec_data["principals"])
+    if out is None:
+        sys.stdout.write(text)
+    else:
+        out.write_text(text)
+        err.print(f"[ok]✓[/ok] wrote {count} principal(s) to {out}")
+
+
 # ---------------------------------------------------------------------------
 # Saved targets: sesame login, targets, use, logout
 # ---------------------------------------------------------------------------

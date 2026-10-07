@@ -11,6 +11,17 @@ versioned entries below.
 
 ## Unreleased
 
+### Added
+
+- **Spec**: default privileges planned and applied (`ALTER DEFAULT PRIVILEGES`, `FOR ROLE` on PostgreSQL, `FOR USER` on Redshift) for the spec's grantees; the owner needn't be declared (often the ETL or admin user); a default privilege the spec doesn't list is drift, revoked with `--allow-revoke`
+- **CLI**: `sesame import` writes the spec that reproduces what a database grants today (roles, memberships, grants, column grants, default privileges; no passwords), so a first plan is empty; `--schema` and `--prefix` narrow it and become the spec's `manage:`
+- **Spec**: `manage.schemas` compares grants only in the named schemas, so a team adopts pgsesame one area at a time; `manage.prefixes` also manages undeclared roles by name (their grants become drift; never dropped, never a superuser)
+
+### Changed
+
+- **Spec**: a Redshift principal's `groups` may name a `builtin` principal (a group the spec refers to, not manages)
+- **CI**: the Redshift job runs on oblako 0.2.0's redshift-local
+
 ## v0.2.0 (2026-10-07)
 
 Platforms' own roles and row-level security, a login instead of a DSN, Redshift

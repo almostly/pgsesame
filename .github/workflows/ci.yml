@@ -69,8 +69,8 @@ jobs:
       redshift:
         # pinned by digest: :16 moves with every oblako image change. To update,
         # docker buildx imagetools inspect public.ecr.aws/oblako/redshift-local:16
-        # (oblako d1c52c2: masking policies and svv_column_privileges)
-        image: public.ecr.aws/oblako/redshift-local:16@sha256:01a3e02b31db79a9e374c0670592a3a381a0359700d9fcfe4104e80f4b99fb81
+        # (oblako 0.2.0: masking as on Redshift Serverless, svv_column_privileges)
+        image: public.ecr.aws/oblako/redshift-local:16@sha256:5c61fe25ff7f2b3eb23fc1e261f9cb3e8420f6f1373a6b661644a20215e36f21
         env:
           POSTGRES_USER: oblako
           POSTGRES_PASSWORD: oblako

@@ -510,3 +510,55 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
     # what the spec stops wanting is revoked too, so the owner can be dropped
     empty = _spec(tmp_path, DEFAULTS.split("default_privileges:")[0])
     assert _sesame("apply", empty, "--dsn", dsn, "--allow-revoke")[0] == 0
+
+
+def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-4"}
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("apply", _spec(tmp_path, DEFAULTS), "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"GRANT SELECT (amount) ON marts.sales TO {P}reader")
+        conn.execute(f"CREATE ROLE {P}outside")
+        conn.execute(f"GRANT {P}outside TO {P}reader")
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        dsn,
+        "--prefix",
+        P + "r",
+        "--prefix",
+        P + "w",
+        "--prefix",
+        P + "a",
+        "--prefix",
+        P + "e",
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    assert "password" not in text
+    assert f"{P}outside:\n    type: builtin" in text  # referred to, not managed
+    assert "marts.sales.amount" in text and "default_privileges:" in text
+    code, out = _sesame("plan", str(imported), "--dsn", dsn)
+    assert code == 0, out  # the database as it is: nothing to do
+
+    # --schema: only that schema's grants, and the spec says so (manage.schemas)
+    scoped = tmp_path / "scoped.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        dsn,
+        "--prefix",
+        P,
+        "--schema",
+        "analytics",
+        "-o",
+        str(scoped),
+    )
+    assert code == 0, out
+    text = scoped.read_text()
+    assert "manage:\n  schemas:\n  - analytics" in text and "marts." not in text
+    code, out = _sesame("plan", str(scoped), "--dsn", dsn)
+    assert code == 0, out  # marts' grants are outside: not drift
