@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
+import sys
+
 import psycopg
 import typer
+from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 from typer import rich_utils
 
-from pgsesame import __version__, planner, postgres, redshift, spec
+from pgsesame import __version__, planner, postgres, redshift, spec, targets
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
 from pgsesame.db import Connection, Database
@@ -115,8 +119,13 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         raise typer.Exit(1) from None
 
 
-class Target:
-    """Where to connect, from the command line: a DSN, IAM credentials or the Data API."""
+class ConnectOptions:
+    """Where to connect: flags, a saved target, or the standard PG* variables.
+
+    In order: explicit flags (--dsn, --iam, --data-api); a saved target (--target,
+    then SESAME_TARGET, then the default set by sesame use); and last libpq's own
+    PGHOST, PGUSER, PGPASSWORD, ~/.pgpass and pg_service.conf.
+    """
 
     def __init__(
         self,
@@ -128,17 +137,29 @@ class Target:
         data_api: bool,
         secret_arn: str | None,
         db_user: str | None,
+        target: str | None = None,
     ):
         """Keep the options; the DSN as a SecretStr, as it may carry a password."""
         self.dsn = SecretStr(dsn)
         self.cluster, self.workgroup, self.database = cluster, workgroup, database
         self.iam, self.data_api = iam, data_api
         self.secret_arn, self.db_user = secret_arn, db_user
+        self.target = target
+        self.label: str | None = None  # the saved target's name, for the header
 
     def connect(self) -> Connection:
         """Open the connection these options describe."""
         if self.iam and self.data_api:
             raise ValueError("choose --iam or --data-api, not both")
+        if self.dsn.get_secret_value() or self.iam or self.data_api:
+            return self._from_flags()
+        name = self.target or os.environ.get("SESAME_TARGET") or targets.default_name()
+        if name:
+            self.label = name
+            return _from_target(targets.get(name), name)
+        return Database(self.dsn)  # libpq's PG* variables, ~/.pgpass, services
+
+    def _from_flags(self) -> Connection:
         if (self.iam or self.data_api) and not (self.cluster or self.workgroup):
             raise ValueError("--iam and --data-api need --cluster or --workgroup")
         if self.data_api:
@@ -156,6 +177,42 @@ class Target:
 
             return iam_database(self.database, self.cluster, self.workgroup)
         return Database(self.dsn)
+
+
+def _from_target(
+    target: targets.Target, name: str, password: SecretStr | None = None
+) -> Connection:
+    """Open a saved target's connection, its password from the keychain (or given)."""
+    if target.region:
+        os.environ.setdefault("AWS_DEFAULT_REGION", target.region)
+    if target.method == "data-api":
+        from pgsesame.aws import DataApiDatabase
+
+        return DataApiDatabase(
+            target.database,
+            cluster=target.cluster,
+            workgroup=target.workgroup,
+            secret_arn=target.secret_arn,
+            db_user=target.db_user,
+        )
+    if target.method == "iam":
+        from pgsesame.aws import iam_database
+
+        return iam_database(target.database, target.cluster, target.workgroup)
+    secret = password or (targets.password(name) if target.has_password else None)
+    if target.has_password and secret is None:
+        raise targets.TargetError(
+            f"the keychain has no password for {name!r}; run sesame login {name} again"
+        )
+    dsn = make_conninfo(
+        host=target.host,
+        port=target.port,
+        dbname=target.database,
+        user=target.user,
+        sslmode=target.sslmode,
+        **({"password": secret.get_secret_value()} if secret else {}),
+    )
+    return Database(SecretStr(dsn))
 
 
 ClusterOption = typer.Option(
@@ -183,10 +240,29 @@ DbUserOption = typer.Option(
 )
 
 
-def _connect(target: Target) -> Connection:
+TargetOption = typer.Option(
+    None,
+    "--target",
+    "-t",
+    help="A saved target (sesame login); default: SESAME_TARGET, then sesame use.",
+    show_default=False,
+)
+
+
+def _where(options: ConnectOptions, db: Connection) -> str:
+    """Return the header's target: the saved name, then where it connects."""
+    return f"{options.label} ({db.target})" if options.label else db.target
+
+
+def _connect(target: ConnectOptions) -> Connection:
     try:
         return target.connect()
-    except (psycopg.OperationalError, ValueError, RuntimeError) as e:
+    except (
+        psycopg.OperationalError,
+        ValueError,
+        RuntimeError,
+        targets.TargetError,
+    ) as e:
         err.print(f"[error]can't connect:[/error] {str(e).strip()}")
         raise typer.Exit(1) from None
     except Exception as e:  # botocore's errors: no credentials, access denied, ...
@@ -216,6 +292,7 @@ def _summary(result: planner.Plan) -> str:
 @app.command()
 def plan(
     path: Path = SpecPath,
+    target: str | None = TargetOption,
     dsn: str = DsnOption,
     cluster: str | None = ClusterOption,
     workgroup: str | None = WorkgroupOption,
@@ -238,10 +315,11 @@ def plan(
     errors, like ``terraform plan -detailed-exitcode``.
     """
     loaded = _load(path)
-    db = _connect(
-        Target(dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user)
+    options = ConnectOptions(
+        dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user, target
     )
-    header("plan", db.target)
+    db = _connect(options)
+    header("plan", _where(options, db))
     result = _plan(loaded, db)
     if not result.operations:
         console.print("[ok]✓[/ok] the database matches the spec; nothing to do")
@@ -287,6 +365,7 @@ def apply(
     path: Path = typer.Argument(
         ..., exists=True, dir_okay=False, help="A spec (YAML) or a saved change set."
     ),
+    target: str | None = TargetOption,
     dsn: str = DsnOption,
     cluster: str | None = ClusterOption,
     workgroup: str | None = WorkgroupOption,
@@ -307,10 +386,11 @@ def apply(
     """
     saved = _load_changeset(path) if is_changeset(path) else None
     loaded = saved.parsed_spec() if saved else _load(path)
-    db = _connect(
-        Target(dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user)
+    options = ConnectOptions(
+        dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user, target
     )
-    header("apply", db.target)
+    db = _connect(options)
+    header("apply", _where(options, db))
     result = _plan(loaded, db)
     if saved is not None:
         if saved.target != db.target:
@@ -348,3 +428,216 @@ def apply(
                 op.kind, db.render(op.display()), f"skipped: needs --allow-{op.gate}"
             )
         console.print(f"[change]{len(skipped)} statement(s) skipped[/change]")
+
+
+# ---------------------------------------------------------------------------
+# Saved targets: sesame login, targets, use, logout
+# ---------------------------------------------------------------------------
+@app.command()
+def login(
+    name: str = typer.Argument(
+        ..., help="A name for the target: prod, staging, local ..."
+    ),
+    engine: str = typer.Option("postgres", "--engine", help="postgres or redshift."),
+    host: str | None = typer.Option(
+        None, "--host", help="Server host (password logins)."
+    ),
+    port: int | None = typer.Option(
+        None, "--port", help="Server port (5432; Redshift 5439)."
+    ),
+    database: str | None = typer.Option(None, "--database", help="Database to manage."),
+    user: str | None = typer.Option(None, "--user", help="Who pgsesame connects as."),
+    sslmode: str = typer.Option(
+        "prefer", "--sslmode", help="libpq sslmode (require, verify-full ...)."
+    ),
+    iam: bool = typer.Option(
+        False, "--iam", help="Redshift: temporary IAM credentials, no password."
+    ),
+    data_api: bool = typer.Option(
+        False, "--data-api", help="Redshift: through the Data API."
+    ),
+    cluster: str | None = typer.Option(
+        None, "--cluster", help="Redshift cluster (--iam, --data-api)."
+    ),
+    workgroup: str | None = typer.Option(
+        None, "--workgroup", help="Redshift Serverless workgroup."
+    ),
+    secret_arn: str | None = typer.Option(
+        None, "--secret-arn", help="Data API: a Secrets Manager secret."
+    ),
+    db_user: str | None = typer.Option(
+        None, "--db-user", help="Data API on a cluster: the database user."
+    ),
+    region: str | None = typer.Option(
+        None, "--region", help="AWS region (IAM, Data API)."
+    ),
+    password_stdin: bool = typer.Option(
+        False, "--password-stdin", help="Read the password from stdin (scripts)."
+    ),
+    make_default: bool = typer.Option(
+        False, "--default", help="Make it the default target."
+    ),
+    check: bool = typer.Option(
+        True, "--check/--no-check", help="Connect before saving."
+    ),
+) -> None:
+    """Save a target: where to connect and how, the password in the OS keychain."""
+    try:
+        name = _valid_name(name)
+    except ValueError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
+    if engine not in ("postgres", "redshift"):
+        err.print("[error]✗[/error] --engine is postgres or redshift")
+        raise typer.Exit(1)
+    method = "iam" if iam else "data-api" if data_api else "password"
+    if method != "password" and engine != "redshift":
+        err.print(
+            "[error]✗[/error] --iam and --data-api are for Redshift (RDS comes next)"
+        )
+        raise typer.Exit(1)
+    interactive = sys.stdin.isatty() and not password_stdin
+    secret: SecretStr | None = None
+    if method == "password":
+        host = host or _ask("Host", interactive)
+        user = user or _ask("User", interactive)
+        database = database or (
+            _ask("Database", interactive, "postgres" if engine == "postgres" else "dev")
+        )
+        port = port or (5439 if engine == "redshift" else 5432)
+        if password_stdin:
+            secret = SecretStr(sys.stdin.readline().rstrip("\n"))
+        elif interactive:
+            typed = typer.prompt(
+                "Password (empty for none)",
+                hide_input=True,
+                default="",
+                show_default=False,
+            )
+            secret = SecretStr(typed) if typed else None
+    else:
+        if not (cluster or workgroup):
+            workgroup = _ask(
+                "Redshift Serverless workgroup (or pass --cluster)", interactive
+            )
+        database = database or _ask("Database", interactive, "dev")
+    target = targets.Target(
+        engine="redshift" if engine == "redshift" else "postgres",
+        method=method,
+        host=host,
+        port=port or 5432,
+        database=database or "postgres",
+        user=user,
+        sslmode=sslmode,
+        cluster=cluster,
+        workgroup=workgroup,
+        secret_arn=secret_arn,
+        db_user=db_user,
+        region=region,
+    )
+    header("login", name)
+    if check:
+        _check_target(target, name, secret)
+    try:
+        targets.save(name, target, secret, make_default)
+    except targets.TargetError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
+    where = "the keychain" if secret is not None else "nowhere (no password)"
+    console.print(f"[ok]✓[/ok] saved [accent]{name}[/accent]; password kept in {where}")
+    if targets.default_name() == name:
+        console.print(
+            f"[muted]{name} is the default: sesame plan spec.yaml uses it[/muted]"
+        )
+
+
+def _valid_name(name: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
+        raise ValueError(
+            "a target name is letters, digits, _ . - (prod, staging, eu-1)"
+        )
+    return name
+
+
+def _ask(label: str, interactive: bool, default: str | None = None) -> str:
+    if not interactive:
+        if default is not None:
+            return default
+        err.print(
+            f"[error]✗[/error] missing {label.split(' (')[0].lower()}: pass it as an option"
+        )
+        raise typer.Exit(1)
+    return typer.prompt(label, default=default) if default else typer.prompt(label)
+
+
+def _check_target(target: targets.Target, name: str, secret: SecretStr | None) -> None:
+    """Connect once, show who pgsesame is there, and whether it can manage roles."""
+    try:
+        db = _from_target(target, name, secret)
+        if target.engine == "postgres":
+            user, superuser, createrole, version = db.rows(
+                "select current_user, rolsuper, rolcreaterole, current_setting('server_version') "
+                "from pg_roles where rolname = current_user"
+            )[0]
+            can_manage = superuser or createrole
+            server = f"PostgreSQL {version}"
+        else:
+            user, superuser = db.rows(
+                "select current_user, usesuper from pg_user where usename = current_user"
+            )[0]
+            can_manage = superuser
+            server = "Redshift"
+        db.close()
+    except Exception as e:  # any failure to connect: say it, save nothing
+        err.print(f"[error]✗ can't connect:[/error] {str(e).strip()}")
+        err.print("[muted]nothing saved; fix the details, or pass --no-check[/muted]")
+        raise typer.Exit(1) from None
+    console.print(
+        f"[ok]✓[/ok] connected as [accent]{user}[/accent] to {target.describe()} ({server})"
+    )
+    if not can_manage:
+        console.print(
+            "[change]~ this user can't create roles: plan works, apply needs a "
+            "superuser or CREATEROLE[/change]"
+        )
+
+
+@app.command(name="targets")
+def list_targets() -> None:
+    """List the saved targets."""
+    saved = targets.all_targets()
+    default = targets.default_name()
+    header("targets", str(targets.config_dir() / "targets.toml"))
+    if not saved:
+        console.print("[muted]none yet: sesame login <name>[/muted]")
+        return
+    for name, target in sorted(saved.items()):
+        mark = "[accent]*[/accent]" if name == default else " "
+        secret = "keychain" if target.has_password else "no password"
+        console.print(
+            f"{mark} [accent]{name}[/accent]  {target.engine}  {target.describe()}  [muted]{target.method}, {secret}[/muted]"
+        )
+
+
+@app.command()
+def use(name: str = typer.Argument(..., help="A saved target.")) -> None:
+    """Make a saved target the default for plan and apply."""
+    try:
+        targets.use(name)
+    except targets.TargetError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
+    console.print(f"[ok]✓[/ok] [accent]{name}[/accent] is the default target")
+
+
+@app.command()
+def logout(name: str = typer.Argument(..., help="A saved target.")) -> None:
+    """Forget a saved target and its password."""
+    try:
+        targets.remove(name)
+    except targets.TargetError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
+    console.print(f"[ok]✓[/ok] forgot [accent]{name}[/accent] and its keychain entry")

@@ -75,6 +75,22 @@ principals:
     member_of: [reader]
 ```
 
+Connect once with `sesame login`, then plan and apply by name. The password goes
+to the operating system's keychain, never to a file; a Redshift target with IAM or
+the Data API keeps no secret at all:
+
+```bash
+sesame login prod --host db.example.com --user admin --database app   # asks for the password
+sesame login analytics --engine redshift --iam --workgroup analytics --database dev
+sesame targets                     # the saved targets; * marks the default
+sesame use prod                    # the default for plan and apply
+sesame plan permissions.yaml --target analytics
+sesame logout prod                 # forget it and its password
+```
+
+In CI, where nothing can type a password, set `SESAME_DSN` (or the standard
+`PG*` variables), or `SESAME_TARGET` with the target's settings checked in.
+
 ```bash
 sesame validate permissions.yaml
 sesame plan permissions.yaml       # exit code 2 when there are changes
