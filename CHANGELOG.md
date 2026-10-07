@@ -11,6 +11,10 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.4 (2026-10-07)
+
+Safety on Redshift without a superuser, and RDS sign-in as the user you name.
+
 ### Fixed
 
 - **RDS**: an explicit user now wins over the instance's or cluster's admin user (`sesame login --rds ... --iam --user X` signed in as the admin), so IAM sign-in can use a least-privilege database user; `--rds` with a password looks the endpoint up and saves a server target
