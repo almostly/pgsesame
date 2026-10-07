@@ -390,6 +390,18 @@ def _connect(target: ConnectOptions) -> Connection:
         raise typer.Exit(1) from None
 
 
+PARTIAL = (
+    "this user isn't a superuser, and Redshift shows a non-superuser only its own "
+    "grants: this plan can't see the rest, so grants it adds may already exist and "
+    "drift elsewhere goes unseen. Plan as a superuser to see everything."
+)
+
+
+def _warn_if_partial(result: planner.Plan) -> None:
+    if result.partial:
+        err.print(f"[change]! {escape(PARTIAL)}[/change]")
+
+
 def _show(result: planner.Plan, db: Connection) -> None:
     for note in result.notes:
         console.print(f"[muted]note: {escape(note)}[/muted]")
@@ -455,6 +467,7 @@ def plan(
     db = _connect(options)
     header("plan", _where(options, db))
     result = _plan(loaded, db)
+    _warn_if_partial(result)
     if not result.operations:
         console.print("[ok]✓[/ok] the database matches the spec; nothing to do")
         raise typer.Exit(0)
@@ -540,6 +553,7 @@ def apply(
     db = _connect(options)
     header("apply", _where(options, db))
     result = _plan(loaded, db)
+    _warn_if_partial(result)
     if saved is not None:
         if saved.target != db.target:
             err.print(
@@ -641,6 +655,17 @@ def import_spec(
         raise typer.Exit(1)
     reader = redshift.read if engine == "redshift" else postgres.read
     state = reader(db, False)  # column grants come from their own view
+    if not state.sees_everything:
+        # what it can't see would be missing from the spec, and a superuser's plan
+        # of that spec would revoke it: write nothing
+        err.print(
+            "[error]✗[/error] import needs a superuser on Redshift: it shows a "
+            "non-superuser only its own grants, so the spec would leave out everyone "
+            "else's memberships and grants, and a superuser's plan of it would revoke "
+            "them. Connect as a superuser (an IAM user is one after ALTER USER "
+            "\"IAM:...\" PASSWORD '...' CREATEUSER)."
+        )
+        raise typer.Exit(1)
     (me,) = db.rows("select current_user")[0]
     visible = masking.read_policies(db, state) if engine == "redshift" else None
     spec_data, notes = importer.build(state, engine, schema, prefix, me, visible)

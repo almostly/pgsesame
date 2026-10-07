@@ -249,7 +249,12 @@ default_privileges:
 ### Adopting an existing database
 
 `sesame import` writes the spec that reproduces what the database grants today,
-so a first plan has nothing to do, and the spec is edited from there:
+so a first plan has nothing to do, and the spec is edited from there. On Redshift
+it needs a superuser: Redshift shows anyone else only their own grants, and a
+spec missing the rest would have a superuser's plan revoke them, so import
+refuses rather than write it (an IAM user becomes a superuser with
+`ALTER USER "IAM:..." PASSWORD '...' CREATEUSER`, and IAM sign-in keeps working).
+Plan and apply as a non-superuser say so before anything else:
 
 ```bash
 sesame import --target dwh --schema collections --schema risk_engine -o permissions.yaml

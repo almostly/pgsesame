@@ -53,6 +53,7 @@ class Plan:
 
     operations: list[Operation] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    partial: bool = False  # read by a user the catalog shows only part of
 
     def allowed(self, allow_revoke: bool, allow_drop: bool) -> list[Operation]:
         """Return the operations apply may run with these flags."""
@@ -113,7 +114,7 @@ def make(
     compared as written. ``masks`` does the same for Redshift masking policies
     (see ``masking.normalize``); without it their expressions aren't compared.
     """
-    plan = Plan()
+    plan = Plan(partial=not current.sees_everything)
     redshift = spec.engine == "redshift"
     managed = set(spec.principals)
     want_members, want_privileges = desired(spec, current)
