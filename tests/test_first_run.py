@@ -18,11 +18,11 @@ def test_brackets_in_output_are_text_not_markup():
     assert "pgsesame[aws]" in out and "ARRAY[value]" in out
 
 
-def test_help_names_the_aws_extra():
+def test_help_groups_the_aws_options():
     result = CliRunner().invoke(
         app, ["import", "--help"], env={"NO_COLOR": "1", "COLUMNS": "120"}
     )
-    assert "AWS (needs pgsesame[aws])" in result.stdout
+    assert "AWS: Redshift, RDS and Aurora" in result.stdout
     assert "--region" in result.stdout and "--profile" in result.stdout
 
 
