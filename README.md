@@ -88,8 +88,35 @@ sesame plan permissions.yaml --target analytics
 sesame logout prod                 # forget it and its password
 ```
 
-In CI, where nothing can type a password, set `SESAME_DSN` (or the standard
-`PG*` variables), or `SESAME_TARGET` with the target's settings checked in.
+A target can instead take its password from an environment variable when it
+connects, so a `.env` file or a CI secret supplies it and nothing is stored:
+
+```bash
+sesame login staging --host db.staging.example.com --user admin --password-env STAGING_DB_PASSWORD
+uv run --env-file .env sesame plan permissions.yaml -t staging
+```
+
+Targets to share go in the project, committed next to the spec: `sesame login
+--project` writes `sesame.toml` (or put the same tables under `[tool.sesame]` in
+`pyproject.toml`). sesame looks for it from the current directory up to the
+repository root; a project target wins over your own of the same name, and your
+`sesame use` wins over the project's `default`. A project target takes no typed
+password, only `--password-env`, so the file stays free of secrets:
+
+```toml
+# sesame.toml
+default = "staging"
+
+[targets.staging]
+host = "db.staging.example.com"
+user = "admin"
+database = "app"
+sslmode = "require"
+password_env = "STAGING_DB_PASSWORD"
+```
+
+The same file then serves CI, with `STAGING_DB_PASSWORD` as a repository secret.
+`SESAME_DSN` and the standard `PG*` variables keep working too.
 
 ```bash
 sesame validate permissions.yaml
