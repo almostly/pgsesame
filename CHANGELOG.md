@@ -20,10 +20,12 @@ versioned entries below.
 
 - **Install**: the `rds` and `aurora` extras, beside `redshift`: each brings boto3, for IAM sign-in and the Data APIs; the message without it names the extra for the path used
 - **CLI**: the AWS options are grouped in `--help` under "AWS (needs pgsesame[redshift], [rds] or [aurora])"
+- **Redshift**: masking's reads (who may see policies, the policies, attachments, column types) run together over the Data API
 - **Redshift**: reading the catalog is faster: over the Data API the queries run at the same time, tables and columns come from the catalog rather than svv_tables and svv_columns (which also reach external schemas), and every column is read only when the spec grants on columns
 
 ### Fixed
 
+- **Redshift**: a default privilege pgsesame doesn't model (a `P` in Redshift's default ACLs) made `sesame import` write a spec that failed its own validation, and a plan revoke it: it is now noted and left alone, as for grants
 - **CLI**: text in square brackets was dropped from messages and plans (`pgsesame[redshift]` printed as `pgsesame`, `ARRAY[x]` lost its index): output now prints data as text, not markup
 
 ## v0.2.1 (2026-10-07)

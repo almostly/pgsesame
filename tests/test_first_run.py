@@ -103,3 +103,49 @@ def test_without_boto3_the_hint_names_the_extra(service, extra, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_boto3)
     with pytest.raises(RuntimeError, match=rf"pgsesame\[{extra}\]"):
         aws._client(service)
+
+
+class MaskingDataApi(RecordingDataApi):
+    """Answers the masking reads: allowed or not, and nothing attached yet."""
+
+    def __init__(self, allowed=True):
+        super().__init__()
+        self.allowed = allowed
+
+    def get_statement_result(self, Id, NextToken=None):
+        if Id == "1":  # can this user see masking policies
+            return {"Records": [[{"booleanValue": self.allowed}]]}
+        return {"Records": []}
+
+
+def _masking_spec():
+    from pgsesame import spec
+
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "redshift",
+            "principals": {"r": {"type": "role"}},
+            "masking": {
+                "policies": {"p": {"type": "varchar(9)", "using": "'*'::varchar(9)"}},
+                "columns": {"s.t.c": {"mask": "p"}},
+            },
+        }
+    )
+
+
+def test_masking_reads_run_together_over_the_data_api():
+    from pgsesame import masking
+    from pgsesame.state import State
+
+    client = MaskingDataApi()
+    db = DataApiDatabase("dev", workgroup="wg", client=client)
+    masking.read(db, _masking_spec(), State())
+    # the permission check, policies, attachments and column types: one round
+    assert client.calls[:4] == ["execute 1", "execute 2", "execute 3", "execute 4"]
+
+    refused = DataApiDatabase(
+        "dev", workgroup="wg", client=MaskingDataApi(allowed=False)
+    )
+    with pytest.raises(masking.MaskingError, match="can't see masking policies"):
+        masking.read(refused, _masking_spec(), State())

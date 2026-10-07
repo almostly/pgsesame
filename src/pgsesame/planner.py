@@ -305,7 +305,7 @@ def make(
         )
 
     plan.operations += _plan_defaults(
-        spec, current, identity, problems, managed - builtins
+        spec, current, identity, problems, managed - builtins, plan.notes
     )
     plan.operations += _plan_rls(spec, current, normalized or {}, problems)
     if spec.masking is not None:
@@ -447,7 +447,12 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
 
 
 def _plan_defaults(
-    spec: Spec, current: State, identity, problems: list[str], managed: set[str]
+    spec: Spec,
+    current: State,
+    identity,
+    problems: list[str],
+    managed: set[str],
+    notes: list[str],
 ) -> list[Operation]:
     """Plan default privileges: what the spec's principals get on future objects.
 
@@ -480,6 +485,15 @@ def _plan_defaults(
         for d in have
         if d.object_type in ("tables", "sequences", "functions", "schemas")
     }
+    # a default privilege pgsesame doesn't model is reported and left in place,
+    # never revoked (there's no keyword for it), as for grants
+    known = PRIVILEGES[spec.engine]
+    for d in sorted(d for d in have if d.privilege not in known.get(d.object_type, ())):
+        notes.append(
+            f"{d.grantee} gets {d.privilege.upper()} on {d.object_type} {d.owner} "
+            "creates, which pgsesame doesn't manage; left as it is"
+        )
+    have = {d for d in have if d.privilege in known.get(d.object_type, ())}
 
     def op(cls, d: DefaultGrant) -> Operation:
         return cls(
