@@ -11,13 +11,18 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.0 (2026-10-07)
+
+Platforms' own roles and row-level security, a login instead of a DSN, Redshift
+masking and column privileges, and Amazon RDS and Aurora.
+
 ### Added
 
 - **Spec**: built-in roles (`type: builtin`): a platform's own roles (Supabase's `authenticated`, `anon`, `service_role`; RDS's `rds_iam`) can be granted to and joined, are never created or altered, and have their privileges managed only in the schemas the spec names for them
 - **Postgres**: row-level security per table: enabled and forced, and its policies (command, roles, USING, WITH CHECK, permissive or restrictive); expressions compared in PostgreSQL's stored form by a rolled-back round trip; dropping a policy or disabling RLS needs `--allow-drop`
 - **CLI**: `sesame login <name>` saves a target (where to connect and how), its password in the OS keychain, after connecting once to show who pgsesame is there and whether it can manage roles; `sesame targets`, `sesame use`, `sesame logout`; plan and apply take `--target`, `SESAME_TARGET`, or the default target, so no DSN is needed. CI keeps `SESAME_DSN` and the `PG*` variables
 - **CLI**: a target can take its password from an environment variable (`sesame login --password-env`), for `.env` files and CI secrets; project targets in `sesame.toml` or `[tool.sesame]` in `pyproject.toml`, committed with the spec (`sesame login --project`), found up to the repository root, ahead of your own; the plan header and `sesame targets` show where each password comes from
-- **Redshift**: dynamic data masking by column and role (`masking:`): what everyone sees (`mask`), roles with their own mask in priority order (`roles`), roles that see the raw value through pass-through policies of pgsesame's own (`unmasked`); expressions compared in Redshift's stored form by a rolled-back round trip; a priority move is a change, a detach needs `--allow-revoke`, replacing a policy whose type changed needs `--allow-drop`; tested on oblako's redshift-local
+- **Redshift**: dynamic data masking by column and role (`masking:`): what everyone sees (`mask`), roles with their own mask in priority order (`roles`), roles that see the raw value through pass-through policies of pgsesame's own (`unmasked`); expressions compared in Redshift's stored form by a rolled-back round trip; a priority move is a change, a detach needs `--allow-revoke`, replacing a policy whose type changed needs `--allow-drop`; tested on oblako's redshift-local and Redshift Serverless
 - **Spec**: column privileges (`columns: {select: [schema.table.column]}`): `select`, `insert`, `update` and `references` on PostgreSQL (read from column ACLs), `select` and `update` on Redshift (read from `svv_column_privileges`); drift is revoked with `--allow-revoke`
 - **RDS**: Amazon RDS and Aurora PostgreSQL by `--rds <instance or cluster>`: `--iam` signs an IAM authentication token (the admin user by default; the way into an Aurora cluster made with express configuration), `--data-api` goes through the RDS Data API with apply in one transaction; `sesame login --rds` saves either
 - **Postgres**: the roles a user can't change (without ADMIN OPTION on them, PostgreSQL 16+, as an RDS admin user or Supabase's `postgres`) are noted in the plan, not attempted
