@@ -11,8 +11,8 @@ with ``prefixes``, those named so. A role one of them refers to (a membership)
 but that isn't selected is written as ``type: builtin``: referred to, never
 managed. With ``schemas``, only grants on objects in those schemas are written,
 and the spec says ``manage: {schemas: ...}``, so grants elsewhere stay out of
-its plans. Passwords are never written; masking policies and row-level security
-are not imported yet.
+its plans. Passwords are never written. On Redshift masking is written in
+pgsesame's model (see ``_masking``); row-level security is not imported yet.
 """
 
 from __future__ import annotations
@@ -23,7 +23,13 @@ from typing import Any
 import yaml
 
 from pgsesame.planner import _system_role
-from pgsesame.spec import DEFAULT_PRIVILEGE_TYPES, OWNABLE, PRIVILEGES
+from pgsesame.masking import passes_through
+from pgsesame.spec import (
+    DEFAULT_PRIVILEGE_TYPES,
+    OWNABLE,
+    PRIVILEGES,
+    UNMASKED_PREFIX,
+)
 from pgsesame.state import Privilege, State
 
 
@@ -42,6 +48,7 @@ def build(
     schemas: list[str] | None = None,
     prefixes: list[str] | None = None,
     me: str | None = None,
+    masking_visible: bool | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Return the spec (as data) that reproduces ``state``, and notes on what was left out."""
     redshift = engine == "redshift"
@@ -163,11 +170,125 @@ def build(
     spec["principals"] = principals
     if default_privileges:
         spec["default_privileges"] = default_privileges
-    if state.policies or state.attachments:
+    if masking_visible is False:
         notes.append(
-            "row-level security and masking aren't imported yet; add them by hand"
+            "masking: this user can't see masking policies (needs superuser or "
+            "sys:secadmin), so none were imported; that says nothing about whether "
+            "there are any"
         )
+    elif masking_visible:
+        section = _masking(state, in_scope, notes)
+        if section["columns"]:
+            spec["masking"] = section
+            for column in section["columns"].values():
+                for name in [*column.get("unmasked", []), *column.get("roles", {})]:
+                    if name not in principals:
+                        principals[name] = {"type": "builtin"}  # referred to
+    if state.policies:
+        notes.append("row-level security isn't imported yet; add it by hand")
     return spec, sorted(set(notes))
+
+
+def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, Any]:
+    """Return the masking section pgsesame's model gives what the database has.
+
+    Per column: the PUBLIC attachment is ``mask``; a role or user whose winning
+    attachment passes the value through is ``unmasked``; any other is in
+    ``roles``, ordered by its priority so the same one wins. pgsesame's own
+    priorities (10, 20 ..., 1000) and pass-through policies replace the
+    database's, so where those differ the first plan shows the correction.
+    Anything the model can't say is noted, not guessed.
+    """
+    policies = state.mask_policies
+
+    def raw(name: str) -> bool:
+        return name in policies and passes_through(policies[name])
+
+    by_column: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for a in state.attachments:
+        if in_scope and a.table.split(".", 1)[0] not in in_scope:
+            continue
+        if len(a.columns) != 1 or a.inputs != a.columns:
+            notes.append(
+                f"masking: {a.policy} on {a.table} ({', '.join(a.columns)}) reads "
+                "other columns than it masks; not imported"
+            )
+            continue
+        by_column[(a.table, a.columns[0])].append(a)
+
+    columns: dict[str, dict[str, Any]] = {}
+    used: set[str] = set()
+    for (table, column), attached in sorted(by_column.items()):
+        where = f"masking: {table}.{column}"
+        public = sorted(
+            (a for a in attached if a.grantee_type == "public"),
+            key=lambda a: a.priority,
+        )
+        if len({a.policy for a in public}) > 1:
+            notes.append(f"{where}: several policies for PUBLIC; the highest kept")
+        entry: dict[str, Any] = {}
+        if public:
+            if raw(public[-1].policy):
+                notes.append(f"{where}: PUBLIC sees the raw value; no mask imported")
+            else:
+                entry["mask"] = public[-1].policy
+                used.add(public[-1].policy)
+        # each grantee's highest-priority attachment decides what it sees
+        winning: dict[str, Any] = {}
+        others = (a for a in attached if a.grantee_type != "public")
+        for a in sorted(others, key=lambda a: a.priority):
+            winning[a.grantee] = a
+        unmasked = sorted(g for g, a in winning.items() if raw(a.policy))
+        roles = {
+            g: a.policy
+            for g, a in sorted(winning.items(), key=lambda kv: kv[1].priority)
+            if g not in unmasked
+        }
+        if unmasked and "mask" not in entry:
+            notes.append(
+                f"{where}: {', '.join(unmasked)} see the raw value, but there's no "
+                "mask to see past; left out"
+            )
+            unmasked = []
+        if unmasked:
+            entry["unmasked"] = unmasked
+        if roles:
+            entry["roles"] = roles
+            used |= set(roles.values())
+        if not entry:
+            continue
+        expected = {10} if "mask" in entry else set()
+        expected |= {20 + 10 * i for i in range(len(roles))}
+        expected |= {1000} if unmasked else set()
+        have = {a.priority for a in attached}
+        if have != expected:
+            notes.append(
+                f"{where}: priorities {sorted(have)} become pgsesame's "
+                f"{sorted(expected)}; the plan shows the change"
+            )
+        columns[f"{table}.{column}"] = entry
+
+    written: dict[str, dict[str, Any]] = {}
+    for name in sorted(used):
+        policy = policies.get(name)
+        if policy is None or name.startswith(UNMASKED_PREFIX):
+            continue
+        if len(policy.inputs) == 1 and policy.inputs[0][0] == "value":
+            written[name] = {"type": policy.inputs[0][1], "using": policy.expression}
+        else:
+            written[name] = {"input": dict(policy.inputs), "using": policy.expression}
+    attached_names = {a.policy for a in state.attachments}
+    for name in sorted(policies):
+        if (
+            raw(name)
+            and name in attached_names
+            and not name.startswith(UNMASKED_PREFIX)
+        ):
+            notes.append(
+                f"masking: {name} passes values through; its grantees are written as "
+                "unmasked, where pgsesame uses its own sesame_unmasked_* policies"
+            )
+    return {"policies": written, "columns": columns}
 
 
 def dump(spec: dict[str, Any], source: str) -> str:

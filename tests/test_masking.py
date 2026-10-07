@@ -68,6 +68,19 @@ def _cleanup(conn) -> None:
         "where policy_name like 'sesame%' or policy_name like 'pgsesame%'"
     ).fetchall()
     for (name,) in policies:
+        # detach first: a policy attached elsewhere (a test's own) can't be dropped
+        for table, grantee, gtype, cols in conn.execute(
+            "select schema_name || '.' || table_name, grantee, grantee_type, output_columns "
+            "from svv_attached_masking_policy where policy_name = %s",
+            (name,),
+        ).fetchall():
+            who = (
+                "PUBLIC"
+                if gtype == "public"
+                else (f'ROLE "{grantee}"' if gtype == "role" else f'"{grantee}"')
+            )
+            col = cols.strip("[]").replace('"', "")
+            conn.execute(f'DETACH MASKING POLICY "{name}" ON {table}({col}) FROM {who}')
         conn.execute(f'DROP MASKING POLICY "{name}"')
     for role in ROLES:
         try:
@@ -222,3 +235,73 @@ def test_a_missing_column_stops_the_plan(db, tmp_path):
     spec = SPEC.replace("sesame_ddm.customers.email:", "sesame_ddm.customers.nope:")
     code, out = _sesame("plan", _spec(tmp_path, spec))
     assert code == 1 and "sesame_ddm.customers.nope: the column does not exist" in out
+
+
+def test_import_writes_masking_in_pgsesames_model_and_the_plan_corrects_it(
+    db, tmp_path
+):
+    # set up by hand, not as pgsesame would: odd priorities and a pass-through
+    # policy of its own, as on a cluster masked before pgsesame
+    for stmt in [
+        "CREATE ROLE sesame_ddm_support",
+        "CREATE ROLE sesame_ddm_pii",
+        "CREATE MASKING POLICY sesame_redact WITH (email varchar(64)) "
+        "USING ('***'::varchar(64))",
+        "CREATE MASKING POLICY sesame_domain WITH (email varchar(64)) "
+        "USING (regexp_replace(email, '^[^@]+', '***'))",
+        "CREATE MASKING POLICY sesame_raw WITH (email varchar(64)) USING (email)",
+        "ATTACH MASKING POLICY sesame_redact ON sesame_ddm.customers(email) TO PUBLIC PRIORITY 5",
+        "ATTACH MASKING POLICY sesame_domain ON sesame_ddm.customers(email) "
+        "TO ROLE sesame_ddm_support PRIORITY 30",
+        "ATTACH MASKING POLICY sesame_raw ON sesame_ddm.customers(email) "
+        "TO ROLE sesame_ddm_pii PRIORITY 50",
+    ]:
+        db.execute(stmt)
+    imported = tmp_path / "imported.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "import",
+            "--dsn",
+            DSN,
+            "--engine",
+            "redshift",
+            "--prefix",
+            "sesame_ddm_",
+            "--schema",
+            "sesame_ddm",
+            "-o",
+            str(imported),
+        ],
+        env={"NO_COLOR": "1"},
+    )
+    out = result.stdout + result.stderr
+    assert result.exit_code == 0, out
+    assert "sesame_raw passes values through" in out
+    assert "priorities [5, 30, 50] become pgsesame's [10, 20, 1000]" in out
+    import yaml
+
+    written = yaml.safe_load(imported.read_text())
+    assert written["masking"]["columns"] == {
+        "sesame_ddm.customers.email": {
+            "mask": "sesame_redact",
+            "unmasked": ["sesame_ddm_pii"],
+            "roles": {"sesame_ddm_support": "sesame_domain"},
+        }
+    }
+    assert set(written["masking"]["policies"]) == {"sesame_redact", "sesame_domain"}
+
+    # the first plan is the correction to pgsesame's model
+    code, out = _sesame("plan", str(imported))
+    assert code == 2, out
+    assert 'CREATE MASKING POLICY "sesame_unmasked_varchar_64"' in out
+    assert "TO PUBLIC PRIORITY 10" in out and "PRIORITY 1000" in out
+    code, out = _sesame("apply", str(imported), "--allow-revoke")
+    assert code == 0, out
+    code, out = _sesame("plan", str(imported))
+    assert code == 0, out
+    assert _attached(db) == {
+        ("sesame_redact", "public", "public", 10, '["email"]'),
+        ("sesame_domain", "sesame_ddm_support", "role", 20, '["email"]'),
+        ("sesame_unmasked_varchar_64", "sesame_ddm_pii", "role", 1000, '["email"]'),
+    }

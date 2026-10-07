@@ -642,7 +642,8 @@ def import_spec(
     reader = redshift.read if engine == "redshift" else postgres.read
     state = reader(db, False)  # column grants come from their own view
     (me,) = db.rows("select current_user")[0]
-    spec_data, notes = importer.build(state, engine, schema, prefix, me)
+    visible = masking.read_policies(db, state) if engine == "redshift" else None
+    spec_data, notes = importer.build(state, engine, schema, prefix, me, visible)
     text = importer.dump(spec_data, _where(options, db))
     try:
         spec.parse(spec_data)  # what it writes, it can read

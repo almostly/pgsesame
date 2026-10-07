@@ -675,3 +675,15 @@ def test_import_leaves_out_a_default_privilege_the_spec_cant_name():
     ]
     assert any("default P on tables from etl" in n for n in notes)
     spec.parse(written)  # what import writes, the spec accepts
+
+
+def test_import_says_when_masking_couldnt_be_seen():
+    from pgsesame import importer
+
+    state = _state(Role("reader", False, False, "role"))
+    written, notes = importer.build(state, "redshift", masking_visible=False)
+    assert "masking" not in written
+    assert any(
+        "can't see masking policies" in n and "says nothing about whether" in n
+        for n in notes
+    )
