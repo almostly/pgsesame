@@ -125,6 +125,13 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {problem}")
         raise typer.Exit(1) from None
+    except Exception as e:
+        # a Data API's error while reading (access denied, the API not enabled
+        # yet ...): said plainly; anything else is a bug and keeps its traceback
+        if not type(e).__module__.startswith(("botocore", "pgsesame.aws")):
+            raise
+        err.print(f"[error]✗ reading the database through AWS failed:[/error] {e}")
+        raise typer.Exit(1) from None
 
 
 class ConnectOptions:

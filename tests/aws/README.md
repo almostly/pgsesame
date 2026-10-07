@@ -36,3 +36,32 @@ Last run, 2026-10-06 (us-east-1): every test in `test_redshift.py` and
 2026-10-07 (us-east-1): every test in `test_masking.py` passed against
 Serverless, once the tests cast their constant (`'***'::varchar(64)`), which
 Redshift requires.
+
+## Aurora PostgreSQL, express configuration
+
+A cluster made with express configuration needs no VPC or template: it is
+reachable over the internet through its gateway, with IAM authentication only.
+
+```bash
+aws rds create-db-cluster --db-cluster-identifier pgsesame-express \
+  --engine aurora-postgresql --with-express-configuration      # available in ~20 s
+sesame plan spec.yaml --iam --rds pgsesame-express             # as its admin, postgres
+```
+
+- The caller needs `rds-db:connect` on the cluster's database users; the free-tier
+  `admin` user has `AmazonRDSFullAccess`, which doesn't include it, so the run used
+  a temporary role with only that (and the Data API's actions), deleted afterwards.
+- The gateway accepts IAM tokens only: a test that signs in as one of its own users
+  with a password is refused (`PAM authentication failed`). The rest of
+  `test_postgres.py` passes.
+- The Data API is off on an express cluster and can't use the admin user: enable it
+  (`aws rds enable-http-endpoint`, ready about 20 s later) and give it a user with a
+  password in Secrets Manager. It returns arrays as `arrayValue` lists.
+
+Last run, 2026-10-07 (us-east-1, Aurora PostgreSQL 17.9): `test_rds.py` passed
+through the Data API; 18 of `test_postgres.py` passed and the 4 that sign in with a
+password were refused by the gateway, as above; a spec granting `rds_iam` was
+applied as `postgres` (not a superuser: ADMIN OPTION on the `rds_*` roles, none
+on `rdsadmin`, which the plan left alone) and the user it made then signed in with
+its own token. Then the cluster, the secret and the role were deleted.
+
