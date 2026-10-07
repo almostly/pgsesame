@@ -11,6 +11,11 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.3 (2026-10-07)
+
+Masking compared by order and over the Data API, so importing an already-masked
+schema plans nothing that changes what anyone reads.
+
 ### Changed
 
 - **Redshift**: masking priorities are compared by order, not number: where a column's attachments already rank everyone as the spec does, the plan keeps the database's numbers, so `sesame import` then `plan` is empty for masking set up in the right order; an order that differs is still corrected, and import notes only the columns the plan will change
