@@ -1,5 +1,7 @@
 """First-run rough edges: messages, help, AWS region, Data API speed (no services)."""
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
@@ -22,8 +24,10 @@ def test_help_groups_the_aws_options():
     result = CliRunner().invoke(
         app, ["import", "--help"], env={"NO_COLOR": "1", "COLUMNS": "120"}
     )
-    assert "AWS: Redshift, RDS and Aurora" in result.stdout
-    assert "--region" in result.stdout and "--profile" in result.stdout
+    # on GitHub Actions Rich colours the help even with NO_COLOR: read the text
+    text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "AWS: Redshift, RDS and Aurora" in text
+    assert "--region" in text and "--profile" in text
 
 
 def test_no_region_says_where_to_set_one(tmp_path, monkeypatch):
