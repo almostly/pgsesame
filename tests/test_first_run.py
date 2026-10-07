@@ -14,10 +14,11 @@ from pgsesame.console import console, operation
 def test_brackets_in_output_are_text_not_markup():
     with console.capture() as captured:
         operation(
-            "create", "GRANT SELECT ON t TO x -- see pgsesame[aws] and ARRAY[value]"
+            "create",
+            "GRANT SELECT ON t TO x -- see pgsesame[redshift] and ARRAY[value]",
         )
     out = captured.get()
-    assert "pgsesame[aws]" in out and "ARRAY[value]" in out
+    assert "pgsesame[redshift]" in out and "ARRAY[value]" in out
 
 
 def test_help_groups_the_aws_options():
@@ -26,7 +27,7 @@ def test_help_groups_the_aws_options():
     )
     # on GitHub Actions Rich colours the help even with NO_COLOR: read the text
     text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-    assert "AWS: Redshift, RDS and Aurora" in text
+    assert "AWS (needs pgsesame[redshift], [rds] or [aurora])" in text
     assert "--region" in text and "--profile" in text
 
 
@@ -78,3 +79,27 @@ def test_catalog_queries_run_together_over_the_data_api(monkeypatch, capsys):
     assert client.calls[:3] == ["execute 1", "execute 2", "execute 3"]
     err = capsys.readouterr().err
     assert "sesame: a: 1 rows, 2.00s" in err and "catalog read in" in err
+
+
+@pytest.mark.parametrize(
+    ("service", "extra"),
+    [
+        ("redshift-data", "redshift"),
+        ("redshift-serverless", "redshift"),
+        ("rds", "rds"),
+        ("rds-data", "rds"),
+    ],
+)
+def test_without_boto3_the_hint_names_the_extra(service, extra, monkeypatch):
+    import builtins
+
+    real = builtins.__import__
+
+    def no_boto3(name, *args, **kwargs):
+        if name == "boto3":
+            raise ImportError("no boto3")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_boto3)
+    with pytest.raises(RuntimeError, match=rf"pgsesame\[{extra}\]"):
+        aws._client(service)

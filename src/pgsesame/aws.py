@@ -1,6 +1,7 @@
 """Connections through AWS: Redshift and RDS/Aurora, by IAM or a Data API.
 
-Both use boto3 (a dependency of pgsesame) and take AWS credentials
+These need boto3, from the ``redshift``, ``rds`` or ``aurora`` extra (the same
+in each: ``pip install "pgsesame[redshift]"``), and take AWS credentials
 from the usual chain (environment, profile, instance role).
 
 * ``iam_database``: ask AWS for temporary database credentials
@@ -50,13 +51,15 @@ def configure_defaults(profile: str | None, region: str | None) -> None:
     _SESSION["region"] = _SESSION["region"] or region
 
 
-def _boto3():
+def _boto3(service: str = ""):
     try:
         import boto3
     except ImportError as e:
+        extra = "rds" if service.startswith("rds") else "redshift"
         raise RuntimeError(
-            "connecting through AWS needs boto3, which pgsesame installs: reinstall "
-            "it (uv tool install --force pgsesame, or pip install pgsesame)"
+            f"connecting through AWS needs boto3, which comes with the {extra} extra: "
+            f"uv tool install --force 'pgsesame[{extra}]' (or pip install "
+            f"'pgsesame[{extra}]'; for Aurora, pgsesame[aurora] is the same)"
         ) from e
     return boto3
 
@@ -67,7 +70,7 @@ def _client(service: str) -> Any:
     The region comes from --region, else AWS_REGION / AWS_DEFAULT_REGION, else the
     profile's ``region`` in ~/.aws/config; without one, say where to set it.
     """
-    session = _boto3().session.Session(
+    session = _boto3(service).session.Session(
         profile_name=_SESSION["profile"], region_name=_SESSION["region"]
     )
     if not session.region_name:
