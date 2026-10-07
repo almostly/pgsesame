@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 
 from pgsesame.ops import (
     AddMember,
+    AlterPolicy,
+    CreatePolicy,
+    DisableRowSecurity,
+    DropPolicy,
+    EnableRowSecurity,
+    ForceRowSecurity,
     AlterLogin,
     CreateRole,
     Grant,
@@ -87,8 +93,16 @@ def _expand(pattern: str, existing: set[str]) -> set[str]:
     return {pattern} & existing
 
 
-def make(spec: Spec, current: State) -> Plan:
-    """Compare the spec with the current state and return the plan."""
+Normalized = dict[tuple[str, str], tuple[str | None, str | None]]
+
+
+def make(spec: Spec, current: State, normalized: Normalized | None = None) -> Plan:
+    """Compare the spec with the current state and return the plan.
+
+    ``normalized`` holds each declared policy's USING / WITH CHECK in the server's
+    own form (see ``postgres.normalize_policies``); without it the spec's text is
+    compared as written.
+    """
     plan = Plan()
     redshift = spec.engine == "redshift"
     managed = set(spec.principals)
@@ -98,16 +112,29 @@ def make(spec: Spec, current: State) -> Plan:
         """Return the kind of identity a name is: the spec's word, else the database's."""
         if not redshift:
             return "pg"
-        if name in spec.principals:
-            return spec.principals[name].type
-        role = current.roles.get(name)
+        declared = spec.principals[name].type if name in spec.principals else None
+        if declared == "user" or declared == "group" or declared == "role":
+            return declared
+        role = current.roles.get(
+            name
+        )  # undeclared, or built-in: as the database has it
         if role is not None and role.identity != "pg":
             return role.identity
         return "user"
 
     problems: list[str] = []
+    builtins = {name for name, p in spec.principals.items() if p.type == "builtin"}
     for name, p in sorted(spec.principals.items()):
         role = current.roles.get(name)
+        if p.type == "builtin":
+            if role is None:
+                problems.append(
+                    f"principals.{name}: the built-in role doesn't exist on this server"
+                )
+            elif role.superuser:
+                plan.notes.append(f"{name} is a superuser; pgsesame leaves it alone")
+                managed.discard(name)
+            continue
         if role is None:
             password = os.environ.get(p.password_env) if p.password_env else None
             if p.password_env and password is None:
@@ -143,8 +170,10 @@ def make(spec: Spec, current: State) -> Plan:
     if problems:
         raise PlanError(problems)
 
-    want_members = {m for m in want_members if m.member in managed}
-    have_members = {m for m in current.memberships if m.member in managed}
+    # a built-in role's own memberships are the platform's: never managed
+    members = managed - builtins
+    want_members = {m for m in want_members if m.member in members}
+    have_members = {m for m in current.memberships if m.member in members}
     for m in sorted(want_members - have_members):
         plan.operations.append(
             AddMember(
@@ -172,12 +201,22 @@ def make(spec: Spec, current: State) -> Plan:
     # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
     # is reported and left in place: never planned, never revoked, never fatal
     known = PRIVILEGES[spec.engine]
-    have_privileges = {p for p in held if p.privilege in known.get(p.object_type, ())}
-    for p in sorted(held - have_privileges):
+    unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
+    for p in sorted(unknown):
         plan.notes.append(
             f"{p.grantee} holds {p.privilege.upper()} on {p.object_name}, which "
             "pgsesame doesn't manage; left as it is"
         )
+    # a built-in role's privileges are managed only where the spec speaks for it:
+    # the schemas (and databases) its privileges name. Elsewhere they are the
+    # platform's (Supabase grants anon and authenticated a lot in public), and
+    # left alone without a word
+    scope = {name: _scope(spec.principals[name]) for name in builtins}
+    have_privileges = {
+        p
+        for p in held - unknown
+        if p.grantee not in scope or _in_scope(p, scope[p.grantee])
+    }
     want_privileges = {p for p in want_privileges if p.grantee in managed}
     for p in sorted(want_privileges - have_privileges):
         plan.operations.append(
@@ -200,6 +239,10 @@ def make(spec: Spec, current: State) -> Plan:
             )
         )
 
+    plan.operations += _plan_rls(spec, current, normalized or {}, problems)
+    if problems:
+        raise PlanError(problems)
+
     for name, p in spec.principals.items():
         if p.owns:
             plan.notes.append(f"{name}: ownership is planned from a later milestone")
@@ -213,3 +256,83 @@ def make(spec: Spec, current: State) -> Plan:
         plan.notes.append("default privileges are planned from a later milestone")
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     return plan
+
+
+def _scope(principal) -> tuple[set[str], set[str]]:
+    """Return the schemas and databases a built-in role's privileges name."""
+    schemas: set[str] = set()
+    databases: set[str] = set()
+    for kind, grants in principal.privileges.items():
+        for patterns in grants.values():
+            for pattern in patterns:
+                if kind == "databases":
+                    databases.add(pattern)
+                elif kind == "schemas":
+                    schemas.add(pattern)
+                else:
+                    schemas.add(pattern.split(".", 1)[0])
+    return schemas, databases
+
+
+def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
+    schemas, databases = scope
+    if p.object_type == "databases":
+        return p.object_name in databases
+    if p.object_type == "schemas":
+        return p.object_name in schemas
+    return p.object_name.split(".", 1)[0] in schemas
+
+
+def _plan_rls(
+    spec: Spec, current: State, normalized: Normalized, problems: list[str]
+) -> list[Operation]:
+    """Plan row-level security for the tables the spec lists; others are left alone."""
+    ops: list[Operation] = []
+    for table, rls in sorted(spec.row_level_security.items()):
+        if table not in current.rls:
+            problems.append(f"row_level_security.{table}: the table does not exist")
+            continue
+        enabled, forced = current.rls[table]
+        if rls.enabled and not enabled:
+            ops.append(EnableRowSecurity(table=table))
+        elif enabled and not rls.enabled:
+            ops.append(DisableRowSecurity(table=table))
+        if rls.force != forced:
+            ops.append(ForceRowSecurity(table=table, force=rls.force))
+        for name, p in sorted(rls.policies.items()):
+            roles = tuple(sorted(p.to))
+            using, check = normalized.get((table, name), (p.using, p.with_check))
+            create = CreatePolicy(
+                table=table,
+                name=name,
+                command=p.command,
+                permissive=p.permissive,
+                roles=roles,
+                using=p.using,
+                with_check=p.with_check,
+            )
+            have = current.policies.get((table, name))
+            if have is None:
+                ops.append(create)
+            elif (
+                have.command != p.command
+                or have.permissive != p.permissive
+                or (have.using and not using)
+                or (have.with_check and not check)
+            ):
+                # ALTER POLICY can't change these, or remove a clause: replace it
+                ops += [DropPolicy(table=table, name=name), create]
+            elif have.roles != roles or have.using != using or have.with_check != check:
+                ops.append(
+                    AlterPolicy(
+                        table=table,
+                        name=name,
+                        roles=roles,
+                        using=p.using,
+                        with_check=p.with_check,
+                    )
+                )
+        for (policy_table, name), _ in sorted(current.policies.items()):
+            if policy_table == table and name not in rls.policies:
+                ops.append(DropPolicy(table=table, name=name))
+    return ops

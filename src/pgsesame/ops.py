@@ -9,13 +9,16 @@ into SQL text.
 
 from __future__ import annotations
 
-from typing import Annotated, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, cast
 
 from psycopg import sql
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pgsesame.spec import PRIVILEGES
 from pgsesame.state import Identity
+
+if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
+    from typing_extensions import LiteralString
 
 Kind = Literal["create", "change", "remove"]
 Gate = Literal["revoke", "drop"]
@@ -262,8 +265,166 @@ class RemoveMember(Operation):
         )
 
 
+def _table(name: str) -> sql.Composed:
+    schema, table = name.split(".", 1)
+    return sql.SQL("{}").format(sql.Identifier(schema, table))
+
+
+def _roles(roles: tuple[str, ...]) -> sql.Composed:
+    return sql.SQL(", ").join(
+        sql.SQL("PUBLIC") if r == "public" else sql.Identifier(r) for r in roles
+    )
+
+
+def _expression(text: str) -> sql.SQL:
+    # a policy's USING / WITH CHECK is SQL by design: it comes from the reviewed
+    # spec, and goes into the statement as written
+    return sql.SQL(cast("LiteralString", text))
+
+
+_COMMAND = {
+    "all": sql.SQL("ALL"),
+    "select": sql.SQL("SELECT"),
+    "insert": sql.SQL("INSERT"),
+    "update": sql.SQL("UPDATE"),
+    "delete": sql.SQL("DELETE"),
+}
+
+
+def _clauses(using: str | None, with_check: str | None) -> list[sql.Composable]:
+    parts: list[sql.Composable] = []
+    if using:
+        parts.append(sql.SQL("USING ({})").format(_expression(using)))
+    if with_check:
+        parts.append(sql.SQL("WITH CHECK ({})").format(_expression(with_check)))
+    return parts
+
+
+class CreatePolicy(Operation):
+    """Create a row-level security policy."""
+
+    order: ClassVar[int] = 42
+    op: Literal["create_policy"] = "create_policy"
+    table: str
+    name: str
+    command: str
+    permissive: bool
+    roles: tuple[str, ...]
+    using: str | None = None
+    with_check: str | None = None
+
+    def statement(self) -> sql.Composed:
+        """Return CREATE POLICY ... ON table AS ... FOR ... TO ... USING/WITH CHECK."""
+        parts: list[sql.Composable] = [
+            sql.SQL("CREATE POLICY {} ON {} AS {} FOR {} TO {}").format(
+                sql.Identifier(self.name),
+                _table(self.table),
+                sql.SQL("PERMISSIVE" if self.permissive else "RESTRICTIVE"),
+                _COMMAND[self.command],
+                _roles(self.roles),
+            )
+        ]
+        return sql.SQL(" ").join(parts + _clauses(self.using, self.with_check))
+
+
+class AlterPolicy(Operation):
+    """Change a policy's roles or expressions (ALTER POLICY)."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 43
+    op: Literal["alter_policy"] = "alter_policy"
+    table: str
+    name: str
+    roles: tuple[str, ...]
+    using: str | None = None
+    with_check: str | None = None
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER POLICY ... ON table TO ... USING/WITH CHECK."""
+        parts: list[sql.Composable] = [
+            sql.SQL("ALTER POLICY {} ON {} TO {}").format(
+                sql.Identifier(self.name), _table(self.table), _roles(self.roles)
+            )
+        ]
+        return sql.SQL(" ").join(parts + _clauses(self.using, self.with_check))
+
+
+class DropPolicy(Operation):
+    """Drop a policy (also the first half of replacing one ALTER can't change)."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "drop"
+    order: ClassVar[int] = 41  # before the creates: a replaced policy keeps its name
+    op: Literal["drop_policy"] = "drop_policy"
+    table: str
+    name: str
+
+    def statement(self) -> sql.Composed:
+        """Return DROP POLICY ... ON table."""
+        return sql.SQL("DROP POLICY {} ON {}").format(
+            sql.Identifier(self.name), _table(self.table)
+        )
+
+
+class EnableRowSecurity(Operation):
+    """Turn row-level security on for a table."""
+
+    order: ClassVar[int] = 44
+    op: Literal["enable_row_security"] = "enable_row_security"
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER TABLE ... ENABLE ROW LEVEL SECURITY."""
+        return sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(
+            _table(self.table)
+        )
+
+
+class ForceRowSecurity(Operation):
+    """Apply a table's policies to its owner too (FORCE), or stop (NO FORCE)."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 45
+    op: Literal["force_row_security"] = "force_row_security"
+    table: str
+    force: bool
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER TABLE ... FORCE / NO FORCE ROW LEVEL SECURITY."""
+        return sql.SQL("ALTER TABLE {} {} ROW LEVEL SECURITY").format(
+            _table(self.table), sql.SQL("FORCE" if self.force else "NO FORCE")
+        )
+
+
+class DisableRowSecurity(Operation):
+    """Turn row-level security off for a table: every row visible again."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "drop"
+    order: ClassVar[int] = 46
+    op: Literal["disable_row_security"] = "disable_row_security"
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER TABLE ... DISABLE ROW LEVEL SECURITY."""
+        return sql.SQL("ALTER TABLE {} DISABLE ROW LEVEL SECURITY").format(
+            _table(self.table)
+        )
+
+
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
-    CreateRole | AlterLogin | AddMember | Grant | Revoke | RemoveMember,
+    CreateRole
+    | AlterLogin
+    | AddMember
+    | Grant
+    | Revoke
+    | RemoveMember
+    | CreatePolicy
+    | AlterPolicy
+    | DropPolicy
+    | EnableRowSecurity
+    | ForceRowSecurity
+    | DisableRowSecurity,
     Field(discriminator="op"),
 ]

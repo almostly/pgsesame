@@ -30,11 +30,9 @@ revokes and drops but applies them only when you ask.
 ## Where it runs
 
 PostgreSQL 14 to 18 and Amazon Redshift (provisioned or Serverless). PostgreSQL
-services work through the same connection: Supabase, Google's AlloyDB, Amazon RDS
-and Aurora, Cloud SQL, Neon; connect as the platform's admin role. Referring to a
-platform's built-in roles (`authenticated`, `alloydbsuperuser`, ...) without
-managing them, and Supabase's row-level security policies, are on the
-[roadmap](DESIGN.md#roadmap).
+services work through the same connection, as the platform's admin role: Supabase
+(tested, with its built-in roles and row-level security), Google's AlloyDB, Amazon
+RDS and Aurora, Cloud SQL, Neon.
 
 ## Install
 
@@ -89,6 +87,32 @@ sesame apply changes.json                      # run exactly that, or refuse if 
 
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
+
+A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
+builtin`: granted to and joined, never created or altered, and their privileges are
+managed only in the schemas the spec names for them. Row-level security is
+declared per table:
+
+```yaml
+principals:
+  authenticated:
+    type: builtin
+    privileges:
+      schemas: {usage: [app]}
+      tables: {select: [app.notes]}
+
+row_level_security:
+  app.notes:
+    policies:
+      own_notes:
+        command: select          # all, select, insert, update, delete
+        to: [authenticated]
+        using: "auth.uid() = owner"
+```
+
+Policy expressions are compared in the form PostgreSQL stores them, so a re-plan
+after apply is empty; dropping a policy or disabling row-level security needs
+`--allow-drop`.
 
 A first plan creates the roles and grants the spec declares:
 
