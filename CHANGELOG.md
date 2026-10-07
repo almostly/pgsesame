@@ -18,13 +18,13 @@ versioned entries below.
 
 ### Changed
 
-- **Install**: the extra is `pgsesame[aws]` (Redshift and RDS through AWS); `pgsesame[redshift]` keeps working
-- **CLI**: the AWS options are grouped in `--help` as "AWS (needs pgsesame[aws])"
+- **Install**: boto3 is a dependency, so Redshift, RDS and Aurora through AWS (IAM sign-in, the Data APIs) work from a plain `pip install pgsesame`; the `pgsesame[redshift]` and `pgsesame[aws]` extras stay, empty, so existing install commands keep working
+- **CLI**: the AWS options are grouped in `--help`
 - **Redshift**: reading the catalog is faster: over the Data API the queries run at the same time, tables and columns come from the catalog rather than svv_tables and svv_columns (which also reach external schemas), and every column is read only when the spec grants on columns
 
 ### Fixed
 
-- **CLI**: text in square brackets was dropped from messages and plans (`pgsesame[aws]` printed as `pgsesame`, `ARRAY[x]` lost its index): output now prints data as text, not markup
+- **CLI**: text in square brackets was dropped from messages and plans (`pgsesame[redshift]` printed as `pgsesame`, `ARRAY[x]` lost its index): output now prints data as text, not markup
 
 ## v0.2.1 (2026-10-07)
 

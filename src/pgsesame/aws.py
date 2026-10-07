@@ -1,6 +1,6 @@
 """Connections through AWS: Redshift and RDS/Aurora, by IAM or a Data API.
 
-Both need ``pip install "pgsesame[redshift]"`` (boto3) and take AWS credentials
+Both use boto3 (a dependency of pgsesame) and take AWS credentials
 from the usual chain (environment, profile, instance role).
 
 * ``iam_database``: ask AWS for temporary database credentials
@@ -55,8 +55,8 @@ def _boto3():
         import boto3
     except ImportError as e:
         raise RuntimeError(
-            "connecting through AWS needs boto3, which comes with the aws extra: "
-            "uv tool install --force 'pgsesame[aws]' (or pip install 'pgsesame[aws]')"
+            "connecting through AWS needs boto3, which pgsesame installs: reinstall "
+            "it (uv tool install --force pgsesame, or pip install pgsesame)"
         ) from e
     return boto3
 
