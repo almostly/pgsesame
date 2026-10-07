@@ -355,7 +355,37 @@ it briefly leaves the columns unmasked within the transaction). A grant without
 a mask (`select` on a table with a masked column) is still a grant: masking
 decides what a reader sees, privileges decide whether they read at all.
 
-### Testing
+### Amazon RDS and Aurora PostgreSQL (0.2)
+
+RDS and Aurora run PostgreSQL, so the reader, planner and SQL are the ones
+pgsesame already has. What is AWS's own:
+
+- **IAM authentication.** `--iam --rds-host <endpoint> --db-user <user>`: boto3
+  signs a short-lived authentication token (`generate_db_auth_token`) that is the
+  password, over TLS. Aurora takes its cluster endpoint the same way.
+- **The RDS Data API** for Aurora: `--data-api --resource-arn <cluster arn>
+  --secret-arn <secret>`. Unlike Redshift's, it has transactions
+  (`BeginTransaction`, `ExecuteStatement` with the transaction id,
+  `CommitTransaction`), so apply stays one transaction.
+- **Built-in roles, brought forward from 0.3.** A user signs in with IAM once it
+  is a member of `rds_iam`, so a spec writes `member_of: [rds_iam]` without
+  declaring `rds_iam`. Built-in roles (`rds_iam`, `rds_superuser`,
+  `rds_password`, `rds_replication`, and Redshift's `sys:*`, which masking needs
+  for `sys:secadmin`) can be referenced and are never created, altered or
+  dropped. Memberships in them are managed like any other.
+- **The master user isn't a superuser.** It belongs to `rds_superuser` and has
+  CREATEROLE. pgsesame runs as it, and on PostgreSQL 16+ it manages only the roles
+  it created (or holds ADMIN OPTION on); a role it can't manage is reported in the
+  plan, not attempted.
+
+Testing: locally, oblako's RDS (a real PostgreSQL per instance, and its RDS Data
+API) covers the reader, the planner and the Data API path. IAM tokens can't be
+checked locally, so they, and an Aurora cluster's configuration (cluster
+endpoint, Data API, IAM authentication on, the master user's rights), are tested
+on AWS with a short-lived Aurora Serverless v2 cluster, in the same session as
+Redshift masking.
+
+## Testing
 
 Against Redshift Serverless, as the identity views were. For local runs and CI,
 oblako's redshift-local gains masking in two steps: first the catalog (the DDL
@@ -392,14 +422,17 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
   Redshift Serverless.
 - Column privileges on PostgreSQL and Redshift.
 - In oblako: masking policies in redshift-local, catalog first, then queries.
+- RDS and Aurora PostgreSQL: IAM authentication tokens, the RDS Data API with
+  transactions, built-in roles (`rds_iam`, `rds_superuser`, `sys:*`) a spec can
+  refer to, and the master user's limits; tested on oblako and on Aurora
+  Serverless v2.
 
 0.3:
 
 - Ownership (`owns`) and default privileges, planned and applied.
-- Built-in roles a spec can refer to without managing them: Redshift Serverless's
-  `sys:*` (`sys:secadmin` for masking), Supabase's `anon`, `authenticated`,
-  `service_role`, AlloyDB's `alloydbsuperuser`, RDS's `rds_superuser`, Cloud
-  SQL's `cloudsqlsuperuser`.
+- More built-in roles (from 0.2's mechanism): Supabase's `anon`,
+  `authenticated`, `service_role`, AlloyDB's `alloydbsuperuser`, Cloud SQL's
+  `cloudsqlsuperuser`.
 - Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
   the platform's admin role.
 - `manage.prefixes`.
