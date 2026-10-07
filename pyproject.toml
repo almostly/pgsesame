@@ -1,6 +1,6 @@
 [project]
 name = "pgsesame"
-version = "0.2.3"
+version = "0.2.4"
 description = "Permissions as code for PostgreSQL and Amazon Redshift."
 readme = "README.md"
 license = "Apache-2.0"
