@@ -11,6 +11,11 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.2 (2026-10-07)
+
+Fixes from a first run against a production Redshift cluster over the Data API,
+and masking in `sesame import`.
+
 ### Added
 
 - **CLI**: `--region` and `--profile` on plan, apply and import (and `--profile` on `sesame login`, kept with the target); without a region anywhere, the message says where to set one
