@@ -30,10 +30,7 @@ SECRET = os.environ.get(
     "PGSESAME_TEST_RDS_SECRET_ARN",
     "arn:aws:secretsmanager:us-east-1:000000000000:secret:sesame-aurora",
 )
-pytestmark = pytest.mark.skipif(
-    not (DSN and os.environ.get("AWS_ENDPOINT_URL_RDS_DATA")),
-    reason="set PGSESAME_TEST_RDS_DSN and AWS_ENDPOINT_URL_RDS_DATA",
-)
+pytestmark = pytest.mark.skipif(not DSN, reason="set PGSESAME_TEST_RDS_DSN")
 P = "sesame_rds_"
 SPEC = f"""
 version: 1

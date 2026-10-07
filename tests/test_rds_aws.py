@@ -180,3 +180,27 @@ def test_a_text_array_read_either_way():
     assert _text_array('{public,"Read Only"}') == ["public", "Read Only"]
     assert _text_array("{}") == []
     assert _text_array(None) == []
+
+
+def test_an_aws_error_while_reading_is_said_plainly(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from pgsesame import cli
+
+    class HttpEndpointNotEnabledException(Exception):
+        """Shaped like botocore's: defined in a botocore module."""
+
+    HttpEndpointNotEnabledException.__module__ = "botocore.errorfactory"
+
+    class Failing(FakeRdsData):
+        def execute_statement(self, **kwargs):
+            raise HttpEndpointNotEnabledException("HttpEndpoint is being enabled")
+
+    monkeypatch.setattr(cli.ConnectOptions, "connect", lambda self: _db(Failing()))
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: postgres\nprincipals: {}\n")
+    result = CliRunner().invoke(cli.app, ["plan", str(spec)], env={"NO_COLOR": "1"})
+    out = result.stdout + result.stderr
+    assert result.exit_code == 1
+    assert "reading the database through AWS failed" in out
+    assert "HttpEndpoint is being enabled" in out

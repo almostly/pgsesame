@@ -43,7 +43,10 @@ sesame plan permissions.yaml --data-api --rds my-cluster --secret-arn arn:aws:se
 ```
 
 `--iam` signs an authentication token for the admin user (or `--db-user`), which
-is the only way into an Aurora cluster made with express configuration. The RDS
+is the only way into an Aurora cluster made with express configuration; the
+caller needs `rds-db:connect` on that database user, which `AmazonRDSFullAccess`
+doesn't include. A user the spec creates signs in the same way once it is a
+member of `rds_iam` (`member_of: [rds_iam]`, with `rds_iam: {type: builtin}`). The RDS
 Data API runs apply in one transaction. The admin user isn't a superuser: from
 PostgreSQL 16 on it changes only the roles it has ADMIN OPTION on, so a login or
 membership change it can't make is noted in the plan, not attempted.
