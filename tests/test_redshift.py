@@ -370,3 +370,27 @@ principals:
                     sql.Identifier(t), me
                 )
             )
+
+
+def test_a_user_that_sees_only_its_own_grants_imports_nothing(dsn, tmp_path):
+    # Redshift shows a non-superuser only its own rows in the SVV privilege views
+    # (dwhcluster1, 2026-10-07: an IAM user's import lost memberships and column
+    # grants, which a superuser's plan of it then revoked)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE USER {P}limited PASSWORD 'Limited-pw-1'")
+        conn.execute(f"GRANT USAGE ON SCHEMA rs_test TO {P}limited")
+    limited = make_conninfo(dsn, user=f"{P}limited", password="Limited-pw-1")
+    out_file = tmp_path / "partial.yaml"
+    code, out = _sesame(
+        "import", "--dsn", limited, "--engine", "redshift", "-o", str(out_file)
+    )
+    assert code == 1, out
+    assert "import needs a superuser on Redshift" in out
+    assert not out_file.exists()
+
+    spec = _spec(
+        tmp_path,
+        f"version: 1\nengine: redshift\nprincipals:\n  {P}limited: {{type: user}}\n",
+    )
+    code, out = _sesame("plan", spec, "--dsn", limited)
+    assert "this user isn't a superuser" in out, out

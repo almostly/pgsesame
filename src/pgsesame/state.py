@@ -95,6 +95,9 @@ class State:
     """What the database grants (read) or should grant (from the spec)."""
 
     roles: dict[str, Role] = field(default_factory=dict)
+    # False when the catalog shows this user only part of it: Redshift's SVV
+    # privilege views show a non-superuser its own grants only
+    sees_everything: bool = True
     memberships: set[Membership] = field(default_factory=set)
     privileges: set[Privilege] = field(default_factory=set)
     # every object the database has, by type: lets the planner expand schema.*

@@ -11,6 +11,10 @@ versioned entries below.
 
 ## Unreleased
 
+### Fixed
+
+- **Redshift**: as a non-superuser (an IAM user, say), Redshift's SVV views show only that user's own grants, so `sesame import` wrote a spec missing other memberships, column grants and the `sys:*` roles, which a superuser's plan then revoked; import now refuses on Redshift without a superuser, and plan and apply say up front that they see only part of the catalog
+
 ## v0.2.3 (2026-10-07)
 
 Masking compared by order and over the Data API, so importing an already-masked

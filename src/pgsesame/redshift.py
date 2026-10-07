@@ -106,6 +106,7 @@ def read(db: Connection, columns: bool = True) -> State:
     Data API they run at the same time, each an HTTP round trip.
     """
     queries = {
+        "me": "select usesuper from pg_user where usename = current_user",
         "users": USERS,
         "groups": GROUPS,
         "roles": ROLES,
@@ -125,6 +126,9 @@ def read(db: Connection, columns: bool = True) -> State:
     rows = fetch(db, queries)
 
     state = State()
+    me = rows["me"]
+    # a non-superuser sees only its own grants in the SVV views (and no masking)
+    state.sees_everything = bool(me and me[0][0])
     users: dict[int, str] = {}
     for sysid, name, superuser in rows["users"]:
         users[sysid] = name
