@@ -291,7 +291,8 @@ def _from_target(
     return Database(SecretStr(dsn))
 
 
-AWS_PANEL = "AWS: Redshift, RDS and Aurora"
+# Rich markup: an unescaped [redshift] would be read as a style and dropped
+AWS_PANEL = r"AWS (needs pgsesame\[redshift], \[rds] or \[aurora])"
 RegionOption = typer.Option(
     None,
     "--region",

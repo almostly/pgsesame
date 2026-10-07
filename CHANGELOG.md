@@ -18,8 +18,8 @@ versioned entries below.
 
 ### Changed
 
-- **Install**: boto3 is a dependency, so Redshift, RDS and Aurora through AWS (IAM sign-in, the Data APIs) work from a plain `pip install pgsesame`; the `pgsesame[redshift]` and `pgsesame[aws]` extras stay, empty, so existing install commands keep working
-- **CLI**: the AWS options are grouped in `--help`
+- **Install**: the `rds` and `aurora` extras, beside `redshift`: each brings boto3, for IAM sign-in and the Data APIs; the message without it names the extra for the path used
+- **CLI**: the AWS options are grouped in `--help` under "AWS (needs pgsesame[redshift], [rds] or [aurora])"
 - **Redshift**: reading the catalog is faster: over the Data API the queries run at the same time, tables and columns come from the catalog rather than svv_tables and svv_columns (which also reach external schemas), and every column is read only when the spec grants on columns
 
 ### Fixed

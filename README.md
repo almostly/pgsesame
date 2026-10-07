@@ -55,6 +55,8 @@ membership change it can't make is noted in the plan, not attempted.
 
 ```bash
 uv tool install pgsesame               # installs the `sesame` command
+uv tool install "pgsesame[redshift]"   # Redshift through IAM or the Data API
+uv tool install "pgsesame[rds]"        # RDS and Aurora through IAM or the Data API (or [aurora])
 uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```
@@ -69,10 +71,6 @@ pgsesame connects the way you already do: a DSN or the standard `PG*` variables
 with a password (PostgreSQL and Redshift), temporary credentials from IAM for a
 Redshift cluster or Serverless workgroup, or the Redshift Data API when the
 database isn't reachable over the network.
-
-It includes what Redshift, RDS and Aurora need through AWS (IAM sign-in and the
-Data APIs, with boto3); the `pgsesame[aws]` and `pgsesame[redshift]` extras of
-earlier versions still install it.
 
 ## A spec
 
