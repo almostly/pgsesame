@@ -6,6 +6,7 @@ config directory a temporary one. The login tests connect to the PostgreSQL in
 """
 
 import os
+import sys
 
 import keyring
 import pytest
@@ -16,6 +17,11 @@ from typer.testing import CliRunner
 
 from pgsesame import targets
 from pgsesame.cli import app
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 class MemoryKeyring(KeyringBackend):
@@ -115,7 +121,11 @@ def test_login_then_plan_by_name(keychain, tmp_path):
         and "saved local in" in out
         and "password from the keychain" in out
     )
-    assert password not in (targets.config_dir() / "targets.toml").read_text()
+    saved = tomllib.loads((targets.config_dir() / "targets.toml").read_text())
+    stored = saved["targets"]["local"]
+    # what is kept: settings and a flag, never the password itself
+    assert "password" not in stored and stored["has_password"] is True
+    assert keychain.items[("pgsesame", "local")] == password
 
     code, out = _sesame("targets")
     assert code == 0 and "* local  postgres" in out, out
