@@ -420,11 +420,12 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
 
 - Done: built-in roles (`type: builtin`) and PostgreSQL row-level security,
   tested on PostgreSQL 14 to 18 and on Supabase with `auth.uid()` policies.
-
-- Redshift dynamic data masking by column and role (above), checked against
-  Redshift Serverless.
+- Done: Redshift dynamic data masking by column and role (above), planned and
+  applied against oblako's redshift-local; still to run against Redshift
+  Serverless.
 - Column privileges on PostgreSQL and Redshift.
-- In oblako: masking policies in redshift-local, catalog first, then queries.
+- In oblako: masking policies in redshift-local, catalog first (done, on its
+  branch), then queries.
 - RDS and Aurora PostgreSQL: IAM authentication tokens, the RDS Data API with
   transactions, built-in roles (`rds_iam`, `rds_superuser`, `sys:*`) a spec can
   refer to, and the master user's limits; tested on oblako and on Aurora

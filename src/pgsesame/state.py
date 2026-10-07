@@ -56,6 +56,29 @@ class Policy:
     with_check: str | None
 
 
+@dataclass(frozen=True, order=True)
+class MaskPolicy:
+    """A Redshift masking policy, its expression and types in Redshift's own form."""
+
+    name: str
+    inputs: tuple[tuple[str, str], ...]  # (name, type), in order
+    expression: str
+    output_type: str
+
+
+@dataclass(frozen=True, order=True)
+class Attachment:
+    """A masking policy attached to columns of a table, for one grantee."""
+
+    policy: str
+    table: str  # schema.table
+    columns: tuple[str, ...]  # the masked (output) columns
+    inputs: tuple[str, ...]  # the columns the policy reads
+    grantee: str  # "public" for PUBLIC
+    grantee_type: str  # user, role, public
+    priority: int
+
+
 @dataclass
 class State:
     """What the database grants (read) or should grant (from the spec)."""
@@ -68,3 +91,7 @@ class State:
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     policies: dict[tuple[str, str], Policy] = field(default_factory=dict)
+    # Redshift masking: policies, attachments, and the masked columns' types
+    mask_policies: dict[str, MaskPolicy] = field(default_factory=dict)
+    attachments: set[Attachment] = field(default_factory=set)
+    column_types: dict[str, str] = field(default_factory=dict)

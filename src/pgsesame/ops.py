@@ -77,6 +77,11 @@ class Operation(BaseModel):
     gate: ClassVar[Gate | None] = None  # the flag apply needs to run it
     order: ClassVar[int] = 0  # position in the plan: dependencies first
 
+    @property
+    def needs(self) -> Gate | None:
+        """Return the flag apply needs to run this operation, if any."""
+        return self.gate
+
     def statement(self) -> sql.Composed:
         """Return the SQL to run."""
         raise NotImplementedError
@@ -412,6 +417,160 @@ class DisableRowSecurity(Operation):
         )
 
 
+# ---------------------------------------------------------------------------
+# Redshift dynamic data masking
+# ---------------------------------------------------------------------------
+def _type(text: str) -> sql.SQL:
+    # a policy input's type, from the spec (checked to be words and an optional
+    # (n) or (p, s)) or from Redshift's catalog
+    return sql.SQL(cast("LiteralString", text))
+
+
+def _mask_grantee(grantee: str, grantee_type: str) -> sql.Composable:
+    if grantee_type == "public":
+        return sql.SQL("PUBLIC")
+    if grantee_type == "role":
+        return sql.SQL("ROLE {}").format(sql.Identifier(grantee))
+    return sql.Identifier(grantee)
+
+
+def _columns(names: tuple[str, ...]) -> sql.Composed:
+    return sql.SQL(", ").join(sql.Identifier(n) for n in names)
+
+
+class _Replaceable(Operation):
+    # part of replacing a policy ALTER can't change (detach everywhere, drop,
+    # create, attach again): all of it needs --allow-drop, or none of it runs
+    replacing: bool = False
+
+    @property
+    def needs(self) -> Gate | None:
+        """Return drop while replacing a policy, else the operation's own gate."""
+        return "drop" if self.replacing else self.gate
+
+
+class CreateMaskingPolicy(_Replaceable):
+    """Create a masking policy."""
+
+    order: ClassVar[int] = 72
+    op: Literal["create_masking_policy"] = "create_masking_policy"
+    name: str
+    inputs: tuple[tuple[str, str], ...]
+    using: str
+
+    def statement(self) -> sql.Composed:
+        """Return CREATE MASKING POLICY ... WITH (inputs) USING (expression)."""
+        inputs = sql.SQL(", ").join(
+            sql.SQL("{} {}").format(sql.Identifier(n), _type(t)) for n, t in self.inputs
+        )
+        return sql.SQL("CREATE MASKING POLICY {} WITH ({}) USING ({})").format(
+            sql.Identifier(self.name), inputs, _expression(self.using)
+        )
+
+
+class AlterMaskingPolicy(Operation):
+    """Change a masking policy's expression (its output type stays)."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 73
+    op: Literal["alter_masking_policy"] = "alter_masking_policy"
+    name: str
+    using: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER MASKING POLICY ... USING (expression)."""
+        return sql.SQL("ALTER MASKING POLICY {} USING ({})").format(
+            sql.Identifier(self.name), _expression(self.using)
+        )
+
+
+class DropMaskingPolicy(Operation):
+    """Drop a masking policy (also the middle of replacing one ALTER can't change)."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "drop"
+    order: ClassVar[int] = 71
+    op: Literal["drop_masking_policy"] = "drop_masking_policy"
+    name: str
+
+    def statement(self) -> sql.Composed:
+        """Return DROP MASKING POLICY."""
+        return sql.SQL("DROP MASKING POLICY {}").format(sql.Identifier(self.name))
+
+
+class _Attachment(_Replaceable):
+    policy: str
+    table: str
+    columns: tuple[str, ...]
+    grantee: str
+    grantee_type: str
+
+
+class AttachMaskingPolicy(_Attachment):
+    """Attach a masking policy to columns, for a grantee, at a priority."""
+
+    order: ClassVar[int] = 74
+    op: Literal["attach_masking_policy"] = "attach_masking_policy"
+    inputs: tuple[str, ...]
+    priority: int
+
+    def statement(self) -> sql.Composed:
+        """Return ATTACH MASKING POLICY ... ON table (cols) [USING (...)] TO ... PRIORITY n."""
+        using = (
+            sql.SQL(" USING ({})").format(_columns(self.inputs))
+            if self.inputs != self.columns
+            else sql.SQL("")
+        )
+        return sql.SQL(
+            "ATTACH MASKING POLICY {} ON {} ({}){} TO {} PRIORITY {}"
+        ).format(
+            sql.Identifier(self.policy),
+            _table(self.table),
+            _columns(self.columns),
+            using,
+            _mask_grantee(self.grantee, self.grantee_type),
+            sql.Literal(self.priority),
+        )
+
+
+def _detach(op: _Attachment) -> sql.Composed:
+    return sql.SQL("DETACH MASKING POLICY {} ON {} ({}) FROM {}").format(
+        sql.Identifier(op.policy),
+        _table(op.table),
+        _columns(op.columns),
+        _mask_grantee(op.grantee, op.grantee_type),
+    )
+
+
+class DetachMaskingPolicy(_Attachment):
+    """Detach a masking policy from a grantee: the grantee sees the column as before."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 70  # first: frees a priority another policy moves into
+    op: Literal["detach_masking_policy"] = "detach_masking_policy"
+
+    def statement(self) -> sql.Composed:
+        """Return DETACH MASKING POLICY ... ON table (cols) FROM ..."""
+        return _detach(self)
+
+
+class ReattachMaskingPolicy(_Attachment):
+    """Detach before attaching again at other priorities: a change, not a revoke.
+
+    One DETACH removes every priority a grantee has for the policy on the column,
+    so changing a priority is a detach and the attaches that follow it.
+    """
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 70
+    op: Literal["reattach_masking_policy"] = "reattach_masking_policy"
+
+    def statement(self) -> sql.Composed:
+        """Return DETACH MASKING POLICY ... ON table (cols) FROM ..."""
+        return _detach(self)
+
+
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
     CreateRole
@@ -425,6 +584,12 @@ AnyOperation = Annotated[
     | DropPolicy
     | EnableRowSecurity
     | ForceRowSecurity
-    | DisableRowSecurity,
+    | DisableRowSecurity
+    | CreateMaskingPolicy
+    | AlterMaskingPolicy
+    | DropMaskingPolicy
+    | AttachMaskingPolicy
+    | DetachMaskingPolicy
+    | ReattachMaskingPolicy,
     Field(discriminator="op"),
 ]

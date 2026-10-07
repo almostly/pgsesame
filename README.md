@@ -157,6 +157,31 @@ Policy expressions are compared in the form PostgreSQL stores them, so a re-plan
 after apply is empty; dropping a policy or disabling row-level security needs
 `--allow-drop`.
 
+On Redshift, dynamic data masking is declared per column: what everyone sees,
+which roles see the raw value, and which see their own mask:
+
+```yaml
+masking:
+  policies:
+    redact: {type: varchar(256), using: "'***'"}
+    email_domain: {type: varchar(256), using: "regexp_replace(value, '^[^@]+', '***')"}
+  columns:
+    crm.customers.email:
+      mask: redact               # everyone else
+      unmasked: [pii_reader]     # the raw value
+      roles:
+        support: email_domain    # their own mask; later entries win
+```
+
+pgsesame works out Redshift's mechanics: the mask is attached to PUBLIC at
+priority 10, each role's policy at 20, 30 ... in the order written, and the
+unmasked roles get a pass-through policy of pgsesame's own
+(`sesame_unmasked_varchar_256`) at 1000. Expressions are compared in the form
+Redshift stores them; moving a role's priority is a change, taking a role off a
+column needs `--allow-revoke`, and a policy whose type changes is replaced only
+with `--allow-drop`. Planning masking needs a superuser or the `sys:secadmin`
+role, as Redshift shows policies to no one else.
+
 A first plan creates the roles and grants the spec declares:
 
 ![sesame plan: the roles and grants a spec needs](https://raw.githubusercontent.com/almostly/pgsesame/main/docs/images/plan.png)

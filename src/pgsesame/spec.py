@@ -176,6 +176,61 @@ class RlsTable(_Model):
     policies: dict[Identifier, RlsPolicy] = Field(default_factory=dict)
 
 
+# a column, schema.table.column
+ColumnName = Annotated[
+    str, StringConstraints(pattern=r"^[^.\x00]+\.[^.\x00*]+\.[^.\x00*]+$")
+]
+# a SQL type as a masking policy's input declares it: varchar(256), numeric(12, 2),
+# character varying, timestamp ... (words, then an optional (n) or (p, s))
+SqlType = Annotated[
+    str,
+    StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_ ]*(\(\s*\d+\s*(,\s*\d+\s*)?\))?$"),
+]
+# pgsesame's own pass-through policies, one per column type, are named so
+UNMASKED_PREFIX = "sesame_unmasked_"
+
+
+class MaskingPolicy(_Model):
+    """A reusable mask (CREATE MASKING POLICY): its inputs and expression."""
+
+    type: SqlType | None = Field(
+        None, description="One input, named value, of this type."
+    )
+    input: dict[Identifier, SqlType] | None = Field(
+        None, description="Several named inputs and their types, in order."
+    )
+    using: str = Field(..., description="The masked value, over the inputs.")
+
+    def inputs(self) -> list[tuple[str, str]]:
+        """Return the policy's inputs as (name, type), in order."""
+        if self.type is not None:
+            return [("value", self.type)]
+        return list((self.input or {}).items())
+
+
+class MaskedColumn(_Model):
+    """What each reader of one column sees."""
+
+    mask: Identifier | None = Field(None, description="The policy everyone sees.")
+    unmasked: list[Identifier] = Field(
+        default_factory=list, description="Roles that see the raw value."
+    )
+    roles: dict[Identifier, Identifier] = Field(
+        default_factory=dict,
+        description="Roles that see their own policy; later entries win.",
+    )
+    inputs: list[Identifier] | None = Field(
+        None, description="The columns a policy with several inputs reads, in order."
+    )
+
+
+class Masking(_Model):
+    """Redshift dynamic data masking: the policies, and the columns they mask."""
+
+    policies: dict[Identifier, MaskingPolicy] = Field(default_factory=dict)
+    columns: dict[ColumnName, MaskedColumn] = Field(default_factory=dict)
+
+
 class Spec(_Model):
     """A whole spec: the engine, the principals and default-privilege rules."""
 
@@ -186,6 +241,7 @@ class Spec(_Model):
     row_level_security: dict[TableName, RlsTable] = Field(
         default_factory=dict, description="Tables whose row-level security is managed."
     )
+    masking: Masking | None = Field(None, description="Redshift dynamic data masking.")
 
 
 def load(path: str | Path) -> Spec:
@@ -300,6 +356,7 @@ def _check(spec: Spec) -> list[str]:
                         f"privilege on {kind}"
                     )
     problems += _check_rls(spec)
+    problems += _check_masking(spec)
     return problems
 
 
@@ -322,4 +379,60 @@ def _check_rls(spec: Spec) -> list[str]:
                 problems.append(f"{where}: insert policies take no using")
             if not (policy.using or policy.with_check):
                 problems.append(f"{where}: needs using or with_check")
+    return problems
+
+
+def _check_masking(spec: Spec) -> list[str]:
+    """Check the masking section: engine, policies, and who sees what per column."""
+    masking = spec.masking
+    if masking is None:
+        return []
+    if spec.engine != "redshift":
+        return [
+            "masking: dynamic data masking is Redshift's; on PostgreSQL use column "
+            "privileges"
+        ]
+    problems: list[str] = []
+    for name, policy in masking.policies.items():
+        where = f"masking.policies.{name}"
+        if name.startswith(UNMASKED_PREFIX):
+            problems.append(f"{where}: {UNMASKED_PREFIX}* names are pgsesame's own")
+        if (policy.type is None) == (policy.input is None):
+            problems.append(f"{where}: give type (one input) or input (several)")
+        elif policy.input is not None and not policy.input:
+            problems.append(f"{where}.input: needs at least one input")
+    for column, c in masking.columns.items():
+        where = f"masking.columns.{column}"
+        if c.mask is None and not c.roles and not c.unmasked:
+            problems.append(f"{where}: masks nothing (give mask, roles or unmasked)")
+        if c.mask is None and c.unmasked:
+            problems.append(f"{where}.unmasked: there's no mask to see past")
+        used = [("mask", c.mask)] if c.mask else []
+        used += [(f"roles.{r}", p) for r, p in c.roles.items()]
+        for key, name in used:
+            policy = masking.policies.get(name)
+            if policy is None:
+                problems.append(f"{where}.{key}: {name} is not a declared policy")
+            elif len(policy.inputs()) > 1 and len(c.inputs or []) != len(
+                policy.inputs()
+            ):
+                problems.append(
+                    f"{where}.inputs: {name} reads {len(policy.inputs())} columns; "
+                    "list them in inputs"
+                )
+        for key, roles in (("unmasked", c.unmasked), ("roles", list(c.roles))):
+            for role in roles:
+                p = spec.principals.get(role)
+                if p is None:
+                    problems.append(f"{where}.{key}: {role} is not declared")
+                elif p.type == "group":
+                    problems.append(
+                        f"{where}.{key}: {role} is a group; Redshift masks for users "
+                        "and roles only"
+                    )
+        both = sorted(set(c.unmasked) & set(c.roles))
+        if both:
+            problems.append(
+                f"{where}: {', '.join(both)} can't be both unmasked and masked"
+            )
     return problems

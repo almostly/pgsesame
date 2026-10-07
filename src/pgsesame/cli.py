@@ -13,7 +13,7 @@ from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 from typer import rich_utils
 
-from pgsesame import __version__, planner, postgres, redshift, spec, targets
+from pgsesame import __version__, masking, planner, postgres, redshift, spec, targets
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
 from pgsesame.db import Connection, Database
@@ -112,7 +112,15 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
             if loaded.row_level_security and isinstance(db, Database)
             else {}
         )
-        return planner.make(loaded, reader(db), normalized)
+        current = reader(db)
+        masks = None
+        if loaded.masking is not None:
+            masking.read(db, loaded, current)
+            masks = masking.normalize(db, loaded, current)
+        return planner.make(loaded, current, normalized, masks)
+    except masking.MaskingError as e:
+        err.print(f"[error]✗[/error] {e}")
+        raise typer.Exit(1) from None
     except planner.PlanError as e:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {problem}")
@@ -273,7 +281,7 @@ def _show(result: planner.Plan, db: Connection) -> None:
     for note in result.notes:
         console.print(f"[muted]note: {note}[/muted]")
     for op in result.operations:
-        gate = f"needs --allow-{op.gate}" if op.gate else ""
+        gate = f"needs --allow-{op.needs}" if op.needs else ""
         operation(op.kind, db.render(op.display()), gate)
 
 
@@ -346,7 +354,7 @@ def show(
     )
     result = planner.Plan(list(changeset.operations))
     for op in result.operations:
-        gate = f"needs --allow-{op.gate}" if op.gate else ""
+        gate = f"needs --allow-{op.needs}" if op.needs else ""
         operation(op.kind, op.display().as_string(), gate)
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
 
@@ -424,7 +432,7 @@ def apply(
     if skipped:
         for op in skipped:
             operation(
-                op.kind, db.render(op.display()), f"skipped: needs --allow-{op.gate}"
+                op.kind, db.render(op.display()), f"skipped: needs --allow-{op.needs}"
             )
         console.print(f"[change]{len(skipped)} statement(s) skipped[/change]")
 

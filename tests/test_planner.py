@@ -3,8 +3,26 @@
 import pytest
 
 from pgsesame import planner, spec
-from pgsesame.ops import CreateRole, Grant, RemoveMember
-from pgsesame.state import Membership, Privilege, Role, State
+from pgsesame.masking import unmasked_policy
+from pgsesame.ops import (
+    AlterMaskingPolicy,
+    AttachMaskingPolicy,
+    CreateMaskingPolicy,
+    CreateRole,
+    DetachMaskingPolicy,
+    DropMaskingPolicy,
+    Grant,
+    ReattachMaskingPolicy,
+    RemoveMember,
+)
+from pgsesame.state import (
+    Attachment,
+    Membership,
+    MaskPolicy,
+    Privilege,
+    Role,
+    State,
+)
 
 
 def _spec(engine="postgres", **principals):
@@ -219,3 +237,149 @@ def test_row_level_security_problems():
     assert bad.value.problems == [
         "row_level_security.app.notes.policies.own: select policies take no with_check"
     ]
+
+
+# ---------------------------------------------------------------------------
+# Redshift masking
+# ---------------------------------------------------------------------------
+MASKING = {
+    "policies": {
+        "redact": {"type": "varchar(64)", "using": "'***'"},
+        "domain": {"type": "varchar(64)", "using": "regexp_replace(value, '@.*', '')"},
+    },
+    "columns": {
+        "crm.c.email": {
+            "mask": "redact",
+            "unmasked": ["pii"],
+            "roles": {"support": "domain", "fraud": "redact"},
+        }
+    },
+}
+
+
+def _masking_spec(masking=MASKING):
+    principals = {r: {"type": "role"} for r in ("pii", "support", "fraud")}
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "redshift",
+            "principals": principals,
+            "masking": masking,
+        }
+    )
+
+
+def _masked_state(attachments=(), policies=()):
+    roles = [Role(r, False, False, "role") for r in ("pii", "support", "fraud")]
+    return _state(
+        *roles,
+        column_types={"crm.c.email": "character varying(64)"},
+        attachments=set(attachments),
+        mask_policies={p.name: p for p in policies},
+    )
+
+
+def _attachment(policy, grantee, priority, gtype="role"):
+    return Attachment(policy, "crm.c", ("email",), ("email",), grantee, gtype, priority)
+
+
+def _policy(name, expression="x", type_name="character varying(64)"):
+    return MaskPolicy(name, (("value", type_name),), expression, type_name)
+
+
+def test_masking_priorities_follow_the_spec():
+    plan = planner.make(_masking_spec(), _masked_state(), masks={})
+    attaches = {
+        (op.policy, op.grantee, op.grantee_type, op.priority)
+        for op in plan.operations
+        if isinstance(op, AttachMaskingPolicy)
+    }
+    assert attaches == {
+        ("redact", "public", "public", 10),
+        ("domain", "support", "role", 20),
+        ("redact", "fraud", "role", 30),  # later entries win
+        ("sesame_unmasked_varchar_64", "pii", "role", 1000),
+    }
+    creates = [op.name for op in plan.operations if isinstance(op, CreateMaskingPolicy)]
+    assert creates == ["domain", "redact", "sesame_unmasked_varchar_64"]
+
+
+def test_pass_through_policy_names():
+    assert unmasked_policy("character varying(256)") == "sesame_unmasked_varchar_256"
+    assert unmasked_policy("numeric(12,2)") == "sesame_unmasked_numeric_12_2"
+    assert unmasked_policy("character(11)") == "sesame_unmasked_char_11"
+    assert unmasked_policy("timestamp without time zone") == "sesame_unmasked_timestamp"
+    assert unmasked_policy("timestamp with time zone") == "sesame_unmasked_timestamptz"
+
+
+def _converged():
+    policies = [
+        _policy("redact"),
+        _policy("domain"),
+        _policy("sesame_unmasked_varchar_64"),
+    ]
+    attachments = [
+        _attachment("redact", "public", 10, "public"),
+        _attachment("domain", "support", 20),
+        _attachment("redact", "fraud", 30),
+        _attachment("sesame_unmasked_varchar_64", "pii", 1000),
+    ]
+    return policies, attachments
+
+
+def test_masking_converges_and_compares_normalized_expressions():
+    policies, attachments = _converged()
+    state = _masked_state(attachments, policies)
+    same = {p.name: p for p in policies}
+    assert planner.make(_masking_spec(), state, masks=same).operations == []
+    changed = {**same, "redact": _policy("redact", "y")}
+    ops = planner.make(_masking_spec(), state, masks=changed).operations
+    assert ops == [AlterMaskingPolicy(name="redact", using="'***'")]
+
+
+def test_a_moved_priority_is_a_reattach_not_a_revoke():
+    policies, attachments = _converged()
+    attachments[2] = _attachment("redact", "fraud", 40)
+    state = _masked_state(attachments, policies)
+    ops = planner.make(_masking_spec(), state, masks={}).operations
+    assert [type(op) for op in ops] == [ReattachMaskingPolicy, AttachMaskingPolicy]
+    detach, attach = ops
+    assert detach.needs is None
+    assert isinstance(attach, AttachMaskingPolicy) and attach.priority == 30
+
+
+def test_attachments_the_spec_drops_are_revokes():
+    policies, attachments = _converged()
+    attachments.append(_attachment("redact", "support", 50))
+    state = _masked_state(attachments, policies)
+    ops = planner.make(_masking_spec(), state, masks={}).operations
+    assert [(type(op), op.needs) for op in ops] == [(DetachMaskingPolicy, "revoke")]
+
+
+def test_a_type_change_replaces_the_policy_behind_allow_drop():
+    policies, attachments = _converged()
+    state = _masked_state(attachments, policies)
+    masks = {p.name: p for p in policies}
+    masks["redact"] = _policy("redact", "x", "character varying(128)")
+    plan = planner.make(_masking_spec(), state, masks=masks)
+    kinds = [type(op).__name__ for op in plan.operations]
+    assert kinds == [
+        "ReattachMaskingPolicy",  # fraud's, then PUBLIC's: every attachment of it
+        "ReattachMaskingPolicy",
+        "DropMaskingPolicy",
+        "CreateMaskingPolicy",
+        "AttachMaskingPolicy",
+        "AttachMaskingPolicy",
+    ]
+    assert all(op.needs == "drop" for op in plan.operations)
+    assert plan.allowed(allow_revoke=True, allow_drop=False) == []
+
+
+def test_policies_outside_the_spec_are_left_alone():
+    policies, attachments = _converged()
+    policies.append(_policy("someone_elses"))
+    policies.append(_policy("sesame_unmasked_int"))
+    state = _masked_state(attachments, policies)
+    plan = planner.make(_masking_spec(), state, masks={})
+    assert "masking: policy someone_elses isn't in the spec; left alone" in plan.notes
+    assert plan.operations == [DropMaskingPolicy(name="sesame_unmasked_int")]
