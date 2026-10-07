@@ -208,6 +208,41 @@ column needs `--allow-revoke`, and a policy whose type changes is replaced only
 with `--allow-drop`. Planning masking needs a superuser or the `sys:secadmin`
 role, as Redshift shows policies to no one else.
 
+Default privileges give a role what an owner creates from now on, so a table
+made overnight is readable in the morning. The owner needn't be in the spec (it's
+often the ETL or admin user); pgsesame manages the entries whose grantee it does:
+
+```yaml
+default_privileges:
+  - owner: etl               # objects etl creates ...
+    schema: analytics        # ... in this schema (leave out for every schema) ...
+    grantee: analyst         # ... are readable by analyst
+    tables: [select]
+```
+
+### Adopting an existing database
+
+`sesame import` writes the spec that reproduces what the database grants today,
+so a first plan has nothing to do, and the spec is edited from there:
+
+```bash
+sesame import --target dwh --schema collections --schema risk_engine -o permissions.yaml
+sesame plan permissions.yaml --target dwh        # ✓ nothing to do
+```
+
+It writes every role but superusers and the platform's own (or only those named
+with `--prefix`), their memberships, grants, column grants and default
+privileges; never passwords. A role they refer to but that wasn't selected is
+written as `type: builtin`: referred to, never managed. The flags become the
+spec's `manage:` section, which also works on its own:
+
+```yaml
+manage:
+  schemas: [collections, risk_engine]   # grants elsewhere aren't compared (no drift)
+  prefixes: [svc_]                       # undeclared svc_* roles are managed too:
+                                         # what they hold is revoked with --allow-revoke
+```
+
 A first plan creates the roles and grants the spec declares:
 
 ![sesame plan: the roles and grants a spec needs](https://raw.githubusercontent.com/almostly/pgsesame/main/docs/images/plan.png)
