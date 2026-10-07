@@ -11,6 +11,11 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.1 (2026-10-07)
+
+Adoption: ownership and default privileges applied, and a way onto a database
+that already has roles and grants (`sesame import`, `manage:`).
+
 ### Added
 
 - **Spec**: ownership planned and applied (`owns`: `ALTER ... OWNER TO` for the objects a principal lists; databases, schemas, tables, views and sequences on PostgreSQL, schemas, tables and views on Redshift, where the owner is a user); objects the spec doesn't list keep their owner, an object has one owner, and an owner's privileges on its own objects are implied, never granted or revoked; `sesame import` writes `owns`
