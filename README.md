@@ -34,6 +34,20 @@ services work through the same connection, as the platform's admin role: Supabas
 (tested, with its built-in roles and row-level security), Google's AlloyDB, Amazon
 RDS and Aurora, Cloud SQL, Neon.
 
+On Amazon RDS and Aurora PostgreSQL, `--rds` names the instance or cluster and
+pgsesame finds the rest:
+
+```bash
+sesame plan permissions.yaml --iam --rds my-cluster        # a signed IAM token, over TLS
+sesame plan permissions.yaml --data-api --rds my-cluster --secret-arn arn:aws:secretsmanager:...
+```
+
+`--iam` signs an authentication token for the admin user (or `--db-user`), which
+is the only way into an Aurora cluster made with express configuration. The RDS
+Data API runs apply in one transaction. The admin user isn't a superuser: from
+PostgreSQL 16 on it changes only the roles it has ADMIN OPTION on, so a login or
+membership change it can't make is noted in the plan, not attempted.
+
 ## Install
 
 ```bash
@@ -89,6 +103,7 @@ the Data API keeps no secret at all:
 ```bash
 sesame login prod --host db.example.com --user admin --database app   # asks for the password
 sesame login analytics --engine redshift --iam --workgroup analytics --database dev
+sesame login aurora --iam --rds my-cluster            # RDS or Aurora: an IAM token
 sesame targets                     # the saved targets; * marks the default
 sesame use prod                    # the default for plan and apply
 sesame plan permissions.yaml --target analytics

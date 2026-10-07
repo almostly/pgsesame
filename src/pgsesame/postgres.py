@@ -106,12 +106,44 @@ where schemaname !~ '^pg_' and schemaname <> 'information_schema'
 """
 
 
+# whether the connected user may alter a role and grant it: a superuser always;
+# from PostgreSQL 16 on, only with ADMIN OPTION on it (the role's creator has it),
+# which is what an RDS or Aurora admin user, a member of rds_superuser, works with;
+# before 16, CREATEROLE covers every role but a superuser
+ADMINISTERS = """
+select r.rolname,
+       case when me.rolsuper then true
+            when current_setting('server_version_num')::int < 160000
+                 then me.rolcreaterole and not r.rolsuper
+            else pg_has_role(current_user, r.oid, 'MEMBER WITH ADMIN OPTION')
+                 and not r.rolsuper
+       end
+from pg_roles r, pg_roles me
+where me.rolname = current_user
+"""
+
+
+def _text_array(value: object) -> list[str]:
+    """Return a text[] column: a list over a driver, ``{a,"b c"}`` text over a Data API."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if not isinstance(value, str):
+        return []
+    import csv
+
+    inner = value.strip()[1:-1]
+    if not inner:
+        return []
+    return next(csv.reader([inner], quotechar='"', escapechar="\\"))
+
+
 def read(db: Connection) -> State:
     """Return the current state of the database ``db`` is connected to."""
     state = State()
     for name, login, superuser in db.rows(ROLES):
         state.roles[name] = Role(name, login, superuser)
     state.memberships = {Membership(m, r) for m, r in db.rows(MEMBERSHIPS)}
+    state.administers = {name for name, can in db.rows(ADMINISTERS) if can}
 
     state.objects = {"databases": {db.database}, "schemas": set()}
     state.objects["schemas"] = {name for (name,) in db.rows(SCHEMAS)}
@@ -131,7 +163,13 @@ def read(db: Connection) -> State:
         state.rls[table] = (enabled, forced)
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
         state.policies[(table, name)] = Policy(
-            table, name, command, permissive, tuple(sorted(roles)), using, check
+            table,
+            name,
+            command,
+            permissive,
+            tuple(sorted(_text_array(roles))),
+            using,
+            check,
         )
     return state
 

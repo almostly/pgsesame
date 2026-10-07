@@ -245,3 +245,15 @@ def test_redshift_grants_select_and_update_on_columns():
         "principals.u.privileges.columns.insert: not a redshift privilege on columns "
         "(select, update)"
     ]
+
+
+def test_a_policy_for_public_names_no_other_role():
+    problems = _problems(
+        principals={"r": {"type": "role"}},
+        row_level_security={
+            "s.t": {"policies": {"p": {"to": ["r", "public"], "using": "true"}}}
+        },
+    )
+    assert problems == [
+        "row_level_security.s.t.policies.p.to: public covers every role; list it alone"
+    ]
