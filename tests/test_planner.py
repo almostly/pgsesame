@@ -244,7 +244,7 @@ def test_row_level_security_problems():
 # ---------------------------------------------------------------------------
 MASKING = {
     "policies": {
-        "redact": {"type": "varchar(64)", "using": "'***'"},
+        "redact": {"type": "varchar(64)", "using": "'***'::varchar(64)"},
         "domain": {"type": "varchar(64)", "using": "regexp_replace(value, '@.*', '')"},
     },
     "columns": {
@@ -334,7 +334,7 @@ def test_masking_converges_and_compares_normalized_expressions():
     assert planner.make(_masking_spec(), state, masks=same).operations == []
     changed = {**same, "redact": _policy("redact", "y")}
     ops = planner.make(_masking_spec(), state, masks=changed).operations
-    assert ops == [AlterMaskingPolicy(name="redact", using="'***'")]
+    assert ops == [AlterMaskingPolicy(name="redact", using="'***'::varchar(64)")]
 
 
 def test_a_moved_priority_is_a_reattach_not_a_revoke():

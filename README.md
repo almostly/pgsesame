@@ -163,7 +163,7 @@ which roles see the raw value, and which see their own mask:
 ```yaml
 masking:
   policies:
-    redact: {type: varchar(256), using: "'***'"}
+    redact: {type: varchar(256), using: "'***'::varchar(256)"}
     email_domain: {type: varchar(256), using: "regexp_replace(value, '^[^@]+', '***')"}
   columns:
     crm.customers.email:
@@ -176,7 +176,8 @@ masking:
 pgsesame works out Redshift's mechanics: the mask is attached to PUBLIC at
 priority 10, each role's policy at 20, 30 ... in the order written, and the
 unmasked roles get a pass-through policy of pgsesame's own
-(`sesame_unmasked_varchar_256`) at 1000. Expressions are compared in the form
+(`sesame_unmasked_varchar_256`) at 1000. A constant needs its type (`'***'::varchar(256)`): Redshift
+refuses an expression of ambiguous type. Expressions are compared in the form
 Redshift stores them; moving a role's priority is a change, taking a role off a
 column needs `--allow-revoke`, and a policy whose type changes is replaced only
 with `--allow-drop`. Planning masking needs a superuser or the `sys:secadmin`
