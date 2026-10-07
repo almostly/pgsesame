@@ -226,3 +226,58 @@ def test_login_with_password_env_then_plan(keychain, tmp_path, monkeypatch):
     code, out = _sesame("plan", str(spec), "-t", "envpw")
     assert code == 1 and "PW_T is not set" in out, out
     assert keychain.items == {}
+
+
+def test_an_rds_login_keeps_the_user_given_and_the_engines_port(
+    keychain, tmp_path, monkeypatch
+):
+    from pgsesame import aws
+
+    class Endpoint:
+        host, port, master_user, name = (
+            "dwh.abc.rds.amazonaws.com",
+            5432,
+            "dwh_admin",
+            "dwh",
+        )
+
+    monkeypatch.setattr(aws, "describe_rds", lambda rds, client=None: Endpoint())
+    monkeypatch.chdir(tmp_path)
+    # IAM as a chosen database user, not the instance's admin
+    code, out = _sesame(
+        "login", "rdsiam", "--rds", "dwh", "--iam", "--user", "dburakov", "--no-check"
+    )
+    assert code == 0, out
+    assert targets.get("rdsiam").db_user == "dburakov"
+    # a password sign-in to an RDS instance: the endpoint is looked up
+    code, out = _sesame(
+        "login",
+        "rdspw",
+        "--rds",
+        "dwh",
+        "--user",
+        "dburakov",
+        "--password-env",
+        "PW",
+        "--no-check",
+    )
+    assert code == 0, out
+    saved = targets.get("rdspw")
+    assert (saved.host, saved.user, saved.rds) == (
+        "dwh.abc.rds.amazonaws.com",
+        "dburakov",
+        None,
+    )
+    # a Redshift target's port is Redshift's, whatever the sign-in
+    code, out = _sesame(
+        "login",
+        "rs",
+        "--engine",
+        "redshift",
+        "--iam",
+        "--workgroup",
+        "wg",
+        "--no-check",
+    )
+    assert code == 0, out
+    assert targets.get("rs").port == 5439

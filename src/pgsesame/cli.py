@@ -241,11 +241,16 @@ def _rds(
         if not secret_arn:
             raise ValueError("--data-api with --rds needs --secret-arn")
         endpoint = describe_rds(rds)
-        if not endpoint.arn:
+        if not endpoint.cluster:
             raise ValueError(
-                "--data-api needs an Aurora cluster identifier, not a host"
+                f"{endpoint.name} is an RDS instance or a host: the RDS Data API works "
+                "with Aurora clusters only; sign in with --iam or a password"
             )
-        return RdsDataApiDatabase(database, endpoint.arn, secret_arn, endpoint.name)
+        # a cluster with the Data API off: AWS says so itself
+        # (HttpEndpointNotEnabledException), and pgsesame passes it on plainly
+        return RdsDataApiDatabase(
+            database, str(endpoint.arn), secret_arn, endpoint.name
+        )
     raise ValueError("--rds goes with --iam or --data-api")
 
 
@@ -779,6 +784,20 @@ def login(
         )
         raise typer.Exit(1)
     secret: SecretStr | None = None
+    if method == "password" and rds and not host:
+        # --rds with a password: the endpoint is looked up, then it's a server
+        from pgsesame import aws
+        from pgsesame.aws import describe_rds
+
+        aws.configure(profile, region)
+        try:
+            endpoint = describe_rds(rds)
+        except Exception as e:  # not found, no credentials ...: say it, save nothing
+            err.print(f"[error]✗ can't look up {escape(rds)}:[/error] {escape(str(e))}")
+            raise typer.Exit(1) from None
+        host, port = endpoint.host, port or endpoint.port
+        user = user or endpoint.master_user
+        rds = None
     if method == "password":
         host = host or _ask("Host", interactive)
         user = user or _ask("User", interactive)
@@ -800,6 +819,9 @@ def login(
             secret = SecretStr(typed) if typed else None
     elif rds:
         database = database or "postgres"
+        db_user = (
+            db_user or user
+        )  # --user names the database user; the admin is a default
     else:
         if not (cluster or workgroup):
             workgroup = _ask(
@@ -810,7 +832,7 @@ def login(
         engine="redshift" if engine == "redshift" else "postgres",
         method=method,
         host=host,
-        port=port or 5432,
+        port=port or (5439 if engine == "redshift" else 5432),
         database=database or "postgres",
         user=user,
         sslmode=sslmode,

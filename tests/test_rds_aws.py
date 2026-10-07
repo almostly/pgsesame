@@ -43,7 +43,7 @@ class FakeRds:
         }
 
     def describe_db_instances(self, DBInstanceIdentifier):
-        if DBInstanceIdentifier != "legacy":
+        if DBInstanceIdentifier not in ("legacy", "no-iam"):
             raise NotFound()
         return {
             "DBInstances": [
@@ -53,7 +53,9 @@ class FakeRds:
                         "Port": 5433,
                     },
                     "MasterUsername": "admin",
-                    "DBInstanceArn": "arn:aws:rds:eu-west-1:1:db:legacy",
+                    "DBInstanceArn": f"arn:aws:rds:eu-west-1:1:db:{DBInstanceIdentifier}",
+                    "IAMDatabaseAuthenticationEnabled": DBInstanceIdentifier
+                    != "no-iam",
                 }
             ]
         }
@@ -204,3 +206,23 @@ def test_an_aws_error_while_reading_is_said_plainly(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "reading the database through AWS failed" in out
     assert "HttpEndpoint is being enabled" in out
+
+
+def test_iam_switched_off_is_said_before_connecting(monkeypatch):
+    monkeypatch.setattr(aws, "Database", lambda dsn: pytest.fail("connected"))
+    with pytest.raises(
+        ValueError, match="IAM database authentication is off on no-iam"
+    ):
+        rds_iam_database("app", "no-iam", client=FakeRds())
+
+
+def test_the_data_api_needs_an_aurora_cluster(monkeypatch):
+    from pgsesame import cli
+
+    monkeypatch.setattr(
+        aws, "describe_rds", lambda rds, client=None: describe_rds(rds, FakeRds())
+    )
+    with pytest.raises(ValueError, match="legacy is an RDS instance or a host"):
+        cli._rds("legacy", "app", False, True, None, "arn:secret")
+    with pytest.raises(ValueError, match="db.example.com is an RDS instance or a host"):
+        cli._rds("db.example.com", "app", False, True, None, "arn:secret")

@@ -13,6 +13,9 @@ versioned entries below.
 
 ### Fixed
 
+- **RDS**: an explicit user now wins over the instance's or cluster's admin user (`sesame login --rds ... --iam --user X` signed in as the admin), so IAM sign-in can use a least-privilege database user; `--rds` with a password looks the endpoint up and saves a server target
+- **RDS**: a sign-in that can't work is refused with the reason, not a server error: IAM authentication off on the instance or cluster, or the RDS Data API asked of an RDS instance (it needs an Aurora cluster with its HTTP endpoint on)
+- **Targets**: a Redshift target saved with IAM or the Data API keeps Redshift's port, 5439, not 5432
 - **Redshift**: as a non-superuser (an IAM user, say), Redshift's SVV views show only that user's own grants, so `sesame import` wrote a spec missing other memberships, column grants and the `sys:*` roles, which a superuser's plan then revoked; import now refuses on Redshift without a superuser, and plan and apply say up front that they see only part of the catalog
 
 ## v0.2.3 (2026-10-07)
