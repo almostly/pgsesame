@@ -9,6 +9,7 @@ import sys
 
 import psycopg
 import typer
+from rich.markup import escape
 from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 from typer import rich_utils
@@ -63,7 +64,7 @@ def validate(path: Path = SpecPath) -> None:
         loaded = spec.load(path)
     except spec.SpecError as e:
         for problem in e.problems:
-            err.print(f"[error]✗[/error] {problem}")
+            err.print(f"[error]✗[/error] {escape(problem)}")
         err.print(f"[error]{len(e.problems)} problem(s)[/error]")
         raise typer.Exit(1) from None
     kinds: dict[str, int] = {}
@@ -100,7 +101,7 @@ def _load(path: Path) -> spec.Spec:
         return spec.load(path)
     except spec.SpecError as e:
         for problem in e.problems:
-            err.print(f"[error]✗[/error] {problem}")
+            err.print(f"[error]✗[/error] {escape(problem)}")
         raise typer.Exit(1) from None
 
 
@@ -112,25 +113,30 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
             if loaded.row_level_security and isinstance(db, Database)
             else {}
         )
-        current = reader(db)
+        # every column only when the spec grants on columns: a large catalog
+        # makes it the biggest read
+        columns = any("columns" in p.privileges for p in loaded.principals.values())
+        current = reader(db, columns)
         masks = None
         if loaded.masking is not None:
             masking.read(db, loaded, current)
             masks = masking.normalize(db, loaded, current)
         return planner.make(loaded, current, normalized, masks)
     except masking.MaskingError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
     except planner.PlanError as e:
         for problem in e.problems:
-            err.print(f"[error]✗[/error] {problem}")
+            err.print(f"[error]✗[/error] {escape(problem)}")
         raise typer.Exit(1) from None
     except Exception as e:
         # a Data API's error while reading (access denied, the API not enabled
         # yet ...): said plainly; anything else is a bug and keeps its traceback
         if not type(e).__module__.startswith(("botocore", "pgsesame.aws")):
             raise
-        err.print(f"[error]✗ reading the database through AWS failed:[/error] {e}")
+        err.print(
+            f"[error]✗ reading the database through AWS failed:[/error] {escape(str(e))}"
+        )
         raise typer.Exit(1) from None
 
 
@@ -154,10 +160,13 @@ class ConnectOptions:
         db_user: str | None,
         target: str | None = None,
         rds: str | None = None,
+        region: str | None = None,
+        profile: str | None = None,
     ):
         """Keep the options; the DSN as a SecretStr, as it may carry a password."""
         self.dsn = SecretStr(dsn)
         self.rds = rds
+        self.region, self.profile = region, profile
         # Redshift's default database is dev, PostgreSQL's postgres
         database = database or ("postgres" if rds else "dev")
         self.cluster, self.workgroup, self.database = cluster, workgroup, database
@@ -168,6 +177,9 @@ class ConnectOptions:
 
     def connect(self) -> Connection:
         """Open the connection these options describe."""
+        from pgsesame import aws
+
+        aws.configure(self.profile, self.region)  # AWS paths; harmless for others
         if self.iam and self.data_api:
             raise ValueError("choose --iam or --data-api, not both")
         if self.dsn.get_secret_value() or self.iam or self.data_api:
@@ -241,8 +253,9 @@ def _from_target(
     target: targets.Target, name: str, password: SecretStr | None = None
 ) -> Connection:
     """Open a saved target's connection, its password from the keychain (or given)."""
-    if target.region:
-        os.environ.setdefault("AWS_DEFAULT_REGION", target.region)
+    from pgsesame import aws
+
+    aws.configure_defaults(target.profile, target.region)
     if target.rds:
         return _rds(
             target.rds,
@@ -278,41 +291,69 @@ def _from_target(
     return Database(SecretStr(dsn))
 
 
+# Rich markup: an unescaped [aws] would be read as a style and dropped
+AWS_PANEL = r"AWS (needs pgsesame\[aws])"
+RegionOption = typer.Option(
+    None,
+    "--region",
+    help="AWS region (default: AWS_REGION, then the profile's).",
+    rich_help_panel=AWS_PANEL,
+)
+ProfileOption = typer.Option(
+    None,
+    "--profile",
+    help="AWS profile from ~/.aws/config (default: AWS_PROFILE).",
+    rich_help_panel=AWS_PANEL,
+)
 ClusterOption = typer.Option(
-    None, "--cluster", help="Redshift cluster identifier (for --iam or --data-api)."
+    None,
+    "--cluster",
+    help="Redshift cluster identifier (for --iam or --data-api).",
+    rich_help_panel=AWS_PANEL,
 )
 WorkgroupOption = typer.Option(
-    None, "--workgroup", help="Redshift Serverless workgroup (for --iam or --data-api)."
+    None,
+    "--workgroup",
+    help="Redshift Serverless workgroup (for --iam or --data-api).",
+    rich_help_panel=AWS_PANEL,
 )
 DatabaseOption = typer.Option(
     None,
     "--database",
     help="Database, for --iam or --data-api (dev on Redshift, postgres on RDS).",
+    rich_help_panel=AWS_PANEL,
 )
 IamOption = typer.Option(
     False,
     "--iam",
     help="Connect with temporary credentials AWS issues (Redshift, RDS, Aurora).",
+    rich_help_panel=AWS_PANEL,
 )
 RdsOption = typer.Option(
     None,
     "--rds",
     help="Aurora cluster or RDS instance identifier (or endpoint), with --iam or "
     "--data-api.",
+    rich_help_panel=AWS_PANEL,
 )
 DataApiOption = typer.Option(
     False,
     "--data-api",
-    help="Go through the Redshift Data API (no network path needed).",
+    help="Go through the Redshift or RDS Data API (no network path needed).",
+    rich_help_panel=AWS_PANEL,
 )
 SecretArnOption = typer.Option(
-    None, "--secret-arn", help="Secrets Manager secret, for --data-api."
+    None,
+    "--secret-arn",
+    help="Secrets Manager secret, for --data-api.",
+    rich_help_panel=AWS_PANEL,
 )
 DbUserOption = typer.Option(
     None,
     "--db-user",
     help="Database user: --data-api on a Redshift cluster, or --iam on RDS (default: "
     "the admin user).",
+    rich_help_panel=AWS_PANEL,
 )
 
 
@@ -342,16 +383,16 @@ def _connect(target: ConnectOptions) -> Connection:
         RuntimeError,
         targets.TargetError,
     ) as e:
-        err.print(f"[error]can't connect:[/error] {str(e).strip()}")
+        err.print(f"[error]can't connect:[/error] {escape(str(e).strip())}")
         raise typer.Exit(1) from None
     except Exception as e:  # botocore's errors: no credentials, access denied, ...
-        err.print(f"[error]can't connect through AWS:[/error] {e}")
+        err.print(f"[error]can't connect through AWS:[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
 
 
 def _show(result: planner.Plan, db: Connection) -> None:
     for note in result.notes:
-        console.print(f"[muted]note: {note}[/muted]")
+        console.print(f"[muted]note: {escape(note)}[/muted]")
     for op in result.operations:
         gate = f"needs --allow-{op.needs}" if op.needs else ""
         operation(op.kind, db.render(op.display()), gate)
@@ -381,6 +422,8 @@ def plan(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    region: str | None = RegionOption,
+    profile: str | None = ProfileOption,
     out: Path | None = typer.Option(
         None,
         "--out",
@@ -406,6 +449,8 @@ def plan(
         db_user,
         target,
         rds,
+        region=region,
+        profile=profile,
     )
     db = _connect(options)
     header("plan", _where(options, db))
@@ -418,7 +463,7 @@ def plan(
     if out is not None:
         ChangeSet.build(loaded, db.target, result.operations).save(out)
         console.print(
-            f"[accent]Saved[/accent] to {out}; run it with: sesame apply {out}"
+            f"[accent]Saved[/accent] to {escape(str(out))}; run it with: sesame apply {escape(str(out))}"
         )
     raise typer.Exit(2)
 
@@ -445,7 +490,7 @@ def _load_changeset(path: Path) -> ChangeSet:
     try:
         return ChangeSet.load(path)
     except ChangeSetError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
 
 
@@ -464,6 +509,8 @@ def apply(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    region: str | None = RegionOption,
+    profile: str | None = ProfileOption,
     allow_revoke: bool = typer.Option(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
@@ -487,6 +534,8 @@ def apply(
         db_user,
         target,
         rds,
+        region=region,
+        profile=profile,
     )
     db = _connect(options)
     header("apply", _where(options, db))
@@ -518,7 +567,9 @@ def apply(
         except (
             Exception
         ) as e:  # psycopg's or the Data API's: the transaction rolled back
-            err.print(f"[error]apply failed, nothing was changed:[/error] {e}")
+            err.print(
+                f"[error]apply failed, nothing was changed:[/error] {escape(str(e))}"
+            )
             raise typer.Exit(1) from None
         console.print(f"\n[ok]✓[/ok] applied {len(runnable)} statement(s)")
     if skipped:
@@ -541,6 +592,8 @@ def import_spec(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    region: str | None = RegionOption,
+    profile: str | None = ProfileOption,
     engine: str | None = typer.Option(
         None,
         "--engine",
@@ -576,6 +629,8 @@ def import_spec(
         db_user,
         target,
         rds,
+        region=region,
+        profile=profile,
     )
     db = _connect(options)
     if engine is None:
@@ -585,7 +640,7 @@ def import_spec(
         err.print("[error]✗[/error] --engine is postgres or redshift")
         raise typer.Exit(1)
     reader = redshift.read if engine == "redshift" else postgres.read
-    state = reader(db)
+    state = reader(db, False)  # column grants come from their own view
     (me,) = db.rows("select current_user")[0]
     spec_data, notes = importer.build(state, engine, schema, prefix, me)
     text = importer.dump(spec_data, _where(options, db))
@@ -593,16 +648,16 @@ def import_spec(
         spec.parse(spec_data)  # what it writes, it can read
     except spec.SpecError as e:
         for problem in e.problems:
-            err.print(f"[error]✗[/error] {problem}")
+            err.print(f"[error]✗[/error] {escape(problem)}")
         raise typer.Exit(1) from None
     for note in notes:
-        err.print(f"[muted]note: {note}[/muted]")
+        err.print(f"[muted]note: {escape(note)}[/muted]")
     count = len(spec_data["principals"])
     if out is None:
         sys.stdout.write(text)
     else:
         out.write_text(text)
-        err.print(f"[ok]✓[/ok] wrote {count} principal(s) to {out}")
+        err.print(f"[ok]✓[/ok] wrote {count} principal(s) to {escape(str(out))}")
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +706,9 @@ def login(
         "--rds",
         help="Aurora cluster or RDS instance (with --iam or --data-api).",
     ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="AWS profile (IAM, Data API)."
+    ),
     password_stdin: bool = typer.Option(
         False, "--password-stdin", help="Read the password from stdin (scripts)."
     ),
@@ -676,7 +734,7 @@ def login(
     try:
         name = _valid_name(name)
     except ValueError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
     if engine not in ("postgres", "redshift"):
         err.print("[error]✗[/error] --engine is postgres or redshift")
@@ -737,6 +795,7 @@ def login(
         region=region,
         password_env=password_env,
         rds=rds,
+        profile=profile,
     )
     header("login", name)
     if check:
@@ -744,11 +803,11 @@ def login(
     try:
         path = targets.save(name, target, secret, make_default, project=project)
     except targets.TargetError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
     saved = target.model_copy(update={"has_password": secret is not None})
     console.print(
-        f"[ok]✓[/ok] saved [accent]{name}[/accent] in {path}; {saved.password_source()}"
+        f"[ok]✓[/ok] saved [accent]{name}[/accent] in {escape(str(path))}; {escape(saved.password_source())}"
     )
     if targets.default_name() == name:
         console.print(
@@ -796,11 +855,11 @@ def _check_target(target: targets.Target, name: str, secret: SecretStr | None) -
             server = "Redshift"
         db.close()
     except Exception as e:  # any failure to connect: say it, save nothing
-        err.print(f"[error]✗ can't connect:[/error] {str(e).strip()}")
+        err.print(f"[error]✗ can't connect:[/error] {escape(str(e).strip())}")
         err.print("[muted]nothing saved; fix the details, or pass --no-check[/muted]")
         raise typer.Exit(1) from None
     console.print(
-        f"[ok]✓[/ok] connected as [accent]{user}[/accent] to {target.describe()} ({server})"
+        f"[ok]✓[/ok] connected as [accent]{escape(str(user))}[/accent] to {escape(target.describe())} ({escape(server)})"
     )
     if not can_manage:
         console.print(
@@ -823,7 +882,7 @@ def list_targets() -> None:
     for name, target in sorted(saved.items()):
         mark = "[accent]*[/accent]" if name == default else " "
         console.print(
-            f"{mark} [accent]{name}[/accent]  {target.engine}  {target.describe()}  "
+            f"{mark} [accent]{name}[/accent]  {target.engine}  {escape(target.describe())}  "
             f"[muted]{target.password_source()}, {targets.origin(name)}[/muted]"
         )
 
@@ -834,7 +893,7 @@ def use(name: str = typer.Argument(..., help="A saved target.")) -> None:
     try:
         targets.use(name)
     except targets.TargetError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
     console.print(f"[ok]✓[/ok] [accent]{name}[/accent] is the default target")
 
@@ -845,6 +904,6 @@ def logout(name: str = typer.Argument(..., help="A saved target.")) -> None:
     try:
         targets.remove(name)
     except targets.TargetError as e:
-        err.print(f"[error]✗[/error] {e}")
+        err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
     console.print(f"[ok]✓[/ok] forgot [accent]{name}[/accent] and its keychain entry")

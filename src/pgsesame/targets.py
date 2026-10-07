@@ -68,6 +68,7 @@ class Target(BaseModel):
     secret_arn: str | None = None
     db_user: str | None = None
     region: str | None = None
+    profile: str | None = None  # AWS profile for IAM and the Data APIs
     has_password: bool = Field(False, description="A password is in the keychain")
 
     def describe(self) -> str:

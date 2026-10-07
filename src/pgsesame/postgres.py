@@ -172,8 +172,12 @@ def _text_array(value: object) -> list[str]:
     return next(csv.reader([inner], quotechar='"', escapechar="\\"))
 
 
-def read(db: Connection) -> State:
-    """Return the current state of the database ``db`` is connected to."""
+def read(db: Connection, columns: bool = True) -> State:
+    """Return the current state of the database ``db`` is connected to.
+
+    ``columns`` reads every column (to check the ones a spec grants on); without
+    it, column grants are still read.
+    """
     state = State()
     for name, login, superuser in db.rows(ROLES):
         state.roles[name] = Role(name, login, superuser)
@@ -191,7 +195,8 @@ def read(db: Connection) -> State:
         state.privileges.add(Privilege(grantee, "schemas", name, privilege))
     for grantee, kind, name, privilege in db.rows(RELATION_PRIVILEGES):
         state.privileges.add(Privilege(grantee, kind, name, privilege))
-    state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
+    if columns:
+        state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
     for grantee, name, privilege in db.rows(COLUMN_PRIVILEGES):
         state.privileges.add(Privilege(grantee, "columns", name, privilege))
     for kind, name, owner in db.rows(OWNERS):

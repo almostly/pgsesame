@@ -27,8 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# the Redshift Data API backend (no direct socket into the VPC)
-redshift = ["boto3>=1.34"]
+# connecting through AWS: Redshift and RDS by IAM, and their Data APIs
+aws = ["boto3>=1.34"]
+redshift = ["boto3>=1.34"]  # the extra's first name, kept for existing installs
 
 [project.scripts]
 sesame = "pgsesame.cli:app"

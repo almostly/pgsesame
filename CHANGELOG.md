@@ -11,6 +11,21 @@ versioned entries below.
 
 ## Unreleased
 
+### Added
+
+- **CLI**: `--region` and `--profile` on plan, apply and import (and `--profile` on `sesame login`, kept with the target); without a region anywhere, the message says where to set one
+- **CLI**: `SESAME_TIMING=1` prints each catalog query's time and row count
+
+### Changed
+
+- **Install**: the extra is `pgsesame[aws]` (Redshift and RDS through AWS); `pgsesame[redshift]` keeps working
+- **CLI**: the AWS options are grouped in `--help` as "AWS (needs pgsesame[aws])"
+- **Redshift**: reading the catalog is faster: over the Data API the queries run at the same time, tables and columns come from the catalog rather than svv_tables and svv_columns (which also reach external schemas), and every column is read only when the spec grants on columns
+
+### Fixed
+
+- **CLI**: text in square brackets was dropped from messages and plans (`pgsesame[aws]` printed as `pgsesame`, `ARRAY[x]` lost its index): output now prints data as text, not markup
+
 ## v0.2.1 (2026-10-07)
 
 Adoption: ownership and default privileges applied, and a way onto a database
