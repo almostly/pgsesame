@@ -5,7 +5,7 @@
 # pgsesame
 
 Declarative permission management for PostgreSQL and Amazon Redshift. Define
-roles, users, grants and ownership in YAML, then plan and apply changes like
+roles, users, groups and grants in YAML, then plan and apply changes like
 Terraform.
 
 > **Status: 0.1, alpha.** `validate`, `plan`, `apply` and change sets work for
