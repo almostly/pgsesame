@@ -27,6 +27,11 @@ ObjectType = Literal[
 OBJECT_TYPES: tuple[str, ...] = get_args(ObjectType)
 # the types a default privilege can cover (a column is never created on its own)
 DEFAULT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functions")
+# what ALTER ... OWNER TO is planned for, per engine
+OWNABLE = {
+    "postgres": ("databases", "schemas", "tables", "views", "sequences"),
+    "redshift": ("schemas", "tables", "views"),
+}
 # ... and the ones each engine's ALTER DEFAULT PRIVILEGES takes (views are tables)
 DEFAULT_PRIVILEGE_TYPES = {
     "postgres": ("tables", "sequences", "functions", "schemas"),
@@ -348,6 +353,15 @@ def _check(spec: Spec) -> list[str]:
             )
         if "columns" in p.owns:
             problems.append(f"{where}.owns.columns: a column is owned with its table")
+        ownable = OWNABLE[spec.engine]
+        for kind in p.owns:
+            if kind != "columns" and kind not in ownable:
+                problems.append(
+                    f"{where}.owns.{kind}: pgsesame plans ownership of "
+                    f"{', '.join(ownable)} on {spec.engine}"
+                )
+        if p.owns and redshift and p.type != "user":
+            problems.append(f"{where}.owns: on Redshift only a user owns objects")
         for kind, patterns in [
             *p.owns.items(),
             *(
@@ -419,6 +433,7 @@ def _check(spec: Spec) -> list[str]:
     problems += _check_rls(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
+    problems += _check_owners(spec)
     return problems
 
 
@@ -521,6 +536,16 @@ def _check_manage(spec: Spec) -> list[str]:
                             f"principals.{name}.privileges.{kind}: {pattern} is outside "
                             f"manage.schemas ({', '.join(sorted(schemas))})"
                         )
+        for kind, patterns in p.owns.items():
+            if kind == "databases":
+                continue
+            for pattern in patterns:
+                schema = pattern if kind == "schemas" else pattern.split(".", 1)[0]
+                if schema not in schemas:
+                    problems.append(
+                        f"principals.{name}.owns.{kind}: {pattern} is outside "
+                        f"manage.schemas ({', '.join(sorted(schemas))})"
+                    )
     for i, rule in enumerate(spec.default_privileges):
         if rule.in_schema not in schemas:
             where = rule.in_schema or "every schema"
@@ -528,4 +553,19 @@ def _check_manage(spec: Spec) -> list[str]:
                 f"default_privileges[{i}]: {where} is outside manage.schemas "
                 f"({', '.join(sorted(schemas))})"
             )
+    return problems
+
+
+def _check_owners(spec: Spec) -> list[str]:
+    """Check that an object has one owner: two principals can't both name it."""
+    claimed: dict[tuple[str, str], str] = {}
+    problems: list[str] = []
+    for name, p in spec.principals.items():
+        for kind, patterns in p.owns.items():
+            for pattern in patterns:
+                other = claimed.setdefault((kind, pattern), name)
+                if other != name:
+                    problems.append(
+                        f"principals.{name}.owns.{kind}: {pattern} is owned by {other} too"
+                    )
     return problems

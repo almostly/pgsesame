@@ -99,6 +99,8 @@ class State:
     privileges: set[Privilege] = field(default_factory=set)
     # every object the database has, by type: lets the planner expand schema.*
     objects: dict[str, set[str]] = field(default_factory=dict)
+    # who owns each object: (object type, name) -> owner
+    owners: dict[tuple[str, str], str] = field(default_factory=dict)
     # ALTER DEFAULT PRIVILEGES entries: grants on objects not created yet
     default_privileges: set[DefaultGrant] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies

@@ -13,6 +13,7 @@ versioned entries below.
 
 ### Added
 
+- **Spec**: ownership planned and applied (`owns`: `ALTER ... OWNER TO` for the objects a principal lists; databases, schemas, tables, views and sequences on PostgreSQL, schemas, tables and views on Redshift, where the owner is a user); objects the spec doesn't list keep their owner, an object has one owner, and an owner's privileges on its own objects are implied, never granted or revoked; `sesame import` writes `owns`
 - **Spec**: default privileges planned and applied (`ALTER DEFAULT PRIVILEGES`, `FOR ROLE` on PostgreSQL, `FOR USER` on Redshift) for the spec's grantees; the owner needn't be declared (often the ETL or admin user); a default privilege the spec doesn't list is drift, revoked with `--allow-revoke`
 - **CLI**: `sesame import` writes the spec that reproduces what a database grants today (roles, memberships, grants, column grants, default privileges; no passwords), so a first plan is empty; `--schema` and `--prefix` narrow it and become the spec's `manage:`
 - **Spec**: `manage.schemas` compares grants only in the named schemas, so a team adopts pgsesame one area at a time; `manage.prefixes` also manages undeclared roles by name (their grants become drift; never dropped, never a superuser)

@@ -50,6 +50,17 @@ COLUMNS = (
     "select table_schema, table_name, column_name from svv_columns where "
     + _USER_SCHEMA.format(col="table_schema")
 )
+# owners: Redshift's objects are owned by users (pg_user, not pg_roles)
+OWNERS = (
+    "select 'schemas', n.nspname, u.usename from pg_namespace n "
+    "join pg_user u on u.usesysid = n.nspowner where "
+    + _USER_SCHEMA.format(col="n.nspname")
+    + " union all select case c.relkind when 'v' then 'views' else 'tables' end, "
+    "n.nspname || '.' || c.relname, u.usename from pg_class c "
+    "join pg_namespace n on n.oid = c.relnamespace "
+    "join pg_user u on u.usesysid = c.relowner where c.relkind in ('r', 'v') and "
+    + _USER_SCHEMA.format(col="n.nspname")
+)
 DEFAULT_PRIVILEGES = """
 select owner_name, coalesce(schema_name, ''), object_type, grantee_name, grantee_type,
        lower(privilege_type)
@@ -116,6 +127,8 @@ def read(db: Connection) -> State:
     for grantee, identity, schema, relation, priv in db.rows(RELATION_PRIVILEGES):
         full = f"{schema}.{relation}"
         privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
+    for kind, name, owner in db.rows(OWNERS):
+        state.owners[(kind, name)] = owner
     for owner, schema, kind, grantee, gtype, priv in db.rows(DEFAULT_PRIVILEGES):
         if gtype != "public":  # PUBLIC isn't managed yet
             state.default_privileges.add(

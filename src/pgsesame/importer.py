@@ -5,7 +5,8 @@ first plan full of drift: every grant the spec doesn't list yet. ``build`` reads
 the database and writes the spec that reproduces it, so the first plan is empty
 and the spec is edited from there.
 
-Which principals: every role but superusers and the platform's system roles, or,
+Each selected principal gets the objects it owns (``owns``). Which principals:
+every role but superusers and the platform's system roles, or,
 with ``prefixes``, those named so. A role one of them refers to (a membership)
 but that isn't selected is written as ``type: builtin``: referred to, never
 managed. With ``schemas``, only grants on objects in those schemas are written,
@@ -22,7 +23,7 @@ from typing import Any
 import yaml
 
 from pgsesame.planner import _system_role
-from pgsesame.spec import DEFAULT_PRIVILEGE_TYPES, PRIVILEGES
+from pgsesame.spec import DEFAULT_PRIVILEGE_TYPES, OWNABLE, PRIVILEGES
 from pgsesame.state import Privilege, State
 
 
@@ -100,6 +101,15 @@ def build(
                 )
                 continue
             grants[p.object_type][p.privilege].add(p.object_name)
+        owned: dict[str, list[str]] = defaultdict(list)
+        for (kind, obj), owner in sorted(state.owners.items()):
+            if owner != name or kind not in OWNABLE[engine]:
+                continue
+            schema = obj if kind == "schemas" else obj.split(".", 1)[0]
+            if kind == "databases" or not in_scope or schema in in_scope:
+                owned[kind].append(obj)
+        if owned:
+            entry["owns"] = dict(sorted(owned.items()))
         if grants:
             entry["privileges"] = {
                 kind: {priv: sorted(objects) for priv, objects in sorted(by.items())}

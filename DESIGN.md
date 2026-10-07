@@ -441,12 +441,12 @@ Done in 0.2.0 (2026-10-07), masking, Supabase and RDS:
 
 0.2.1, adoption:
 
-- Done: default privileges, planned and applied; `sesame import`, which writes the
-  spec a database has today; `manage.schemas` and `manage.prefixes`.
+- Done: ownership and default privileges, planned and applied; `sesame import`,
+  which writes the spec a database has today; `manage.schemas` and
+  `manage.prefixes`.
 
 0.3:
 
-- Ownership (`owns`), planned and applied.
 - The RDS tests in CI (they need oblako's RDS services).
 - More built-in roles (from 0.2's mechanism): Supabase's `anon`,
   `authenticated`, `service_role`, AlloyDB's `alloydbsuperuser`, Cloud SQL's

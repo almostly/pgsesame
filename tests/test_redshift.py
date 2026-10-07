@@ -338,3 +338,34 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert "default_privileges:" in text and "password" not in text
     code, out = _sesame("plan", str(imported), "--dsn", dsn)
     assert code == 0, out
+
+
+def test_ownership(dsn, tmp_path):
+    owners = f"""
+version: 1
+engine: redshift
+principals:
+  {P}etl:
+    type: user
+    password: disabled
+    owns:
+      schemas: [rs_test]
+      tables: [rs_test.*]
+"""
+    spec = _spec(tmp_path, owners)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f'~ ALTER SCHEMA "rs_test" OWNER TO "{P}etl"' in out, out
+    assert f'~ ALTER TABLE "rs_test"."events" OWNER TO "{P}etl"' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # hand them back for cleanup
+        conn.execute("ALTER SCHEMA rs_test OWNER TO oblako")
+        for (t,) in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'rs_test'"
+        ).fetchall():
+            conn.execute(
+                sql.SQL("ALTER TABLE rs_test.{} OWNER TO oblako").format(
+                    sql.Identifier(t)
+                )
+            )

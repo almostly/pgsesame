@@ -91,6 +91,25 @@ where a.attnum > 0 and not a.attisdropped and {_USER_SCHEMA}
   and x.grantee <> c.relowner
 """
 
+# owners: the current database, the user schemas, and their relations and sequences
+OWNERS = f"""
+select 'databases', d.datname, r.rolname
+from pg_database d join pg_roles r on r.oid = d.datdba
+where d.datname = current_database()
+union all
+select 'schemas', n.nspname, r.rolname
+from pg_namespace n join pg_roles r on r.oid = n.nspowner
+where {_USER_SCHEMA}
+union all
+select case c.relkind when 'S' then 'sequences'
+                      when 'v' then 'views' when 'm' then 'views' else 'tables' end,
+       n.nspname || '.' || c.relname, r.rolname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+join pg_roles r on r.oid = c.relowner
+where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
+"""
+
 # default privileges: a global entry (no schema) holds the whole default ACL, the
 # owner's own privileges and PUBLIC's included, which are left out as implied
 DEFAULT_PRIVILEGES = """
@@ -175,6 +194,8 @@ def read(db: Connection) -> State:
     state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
     for grantee, name, privilege in db.rows(COLUMN_PRIVILEGES):
         state.privileges.add(Privilege(grantee, "columns", name, privilege))
+    for kind, name, owner in db.rows(OWNERS):
+        state.owners[(kind, name)] = owner
     for owner, schema, kind, grantee, privilege in db.rows(DEFAULT_PRIVILEGES):
         state.default_privileges.add(
             DefaultGrant(owner, schema, kind, grantee, privilege)

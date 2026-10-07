@@ -175,6 +175,38 @@ class AlterLogin(Operation):
         )
 
 
+_OWNED = {
+    "databases": sql.SQL("DATABASE"),
+    "schemas": sql.SQL("SCHEMA"),
+    "tables": sql.SQL("TABLE"),
+    "views": sql.SQL("TABLE"),  # ALTER TABLE ... OWNER TO takes a view on both engines
+    "sequences": sql.SQL("SEQUENCE"),
+}
+
+
+class AlterOwner(Operation):
+    """Give an object to the principal the spec says owns it."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 15  # after the owners exist, before grants
+    op: Literal["alter_owner"] = "alter_owner"
+    object_type: str
+    object_name: str
+    owner: str
+    owner_identity: Identity = "pg"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER {DATABASE|SCHEMA|TABLE|SEQUENCE} ... OWNER TO ..."""
+        parts = (
+            self.object_name.split(".", 1)
+            if self.object_type in ("tables", "views", "sequences")
+            else [self.object_name]
+        )
+        return sql.SQL("ALTER {} {} OWNER TO {}").format(
+            _OWNED[self.object_type], sql.Identifier(*parts), sql.Identifier(self.owner)
+        )
+
+
 def _membership(
     verb: Literal["add", "remove"],
     member: str,
@@ -654,6 +686,7 @@ class ReattachMaskingPolicy(_Attachment):
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
     CreateRole
+    | AlterOwner
     | AlterLogin
     | AddMember
     | Grant
