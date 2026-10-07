@@ -122,3 +122,29 @@ def test_row_level_security_sql():
     )
     assert DisableRowSecurity.gate == DropPolicy.gate == "drop"
     assert DropPolicy.order < CreatePolicy.order  # a replaced policy keeps its name
+
+
+def test_column_grants_name_the_column_and_its_table():
+    from pgsesame.ops import Grant, Revoke
+
+    grant = Grant(
+        grantee="bi",
+        object_type="columns",
+        object_name="crm.c.email",
+        privilege="select",
+    )
+    assert (
+        grant.statement().as_string(None)
+        == 'GRANT SELECT ("email") ON TABLE "crm"."c" TO "bi"'
+    )
+    revoke = Revoke(
+        grantee="bi",
+        object_type="columns",
+        object_name="crm.c.email",
+        privilege="update",
+        grantee_identity="role",
+    )
+    assert (
+        revoke.statement().as_string(None)
+        == 'REVOKE UPDATE ("email") ON TABLE "crm"."c" FROM ROLE "bi"'
+    )

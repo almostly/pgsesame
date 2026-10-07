@@ -192,3 +192,46 @@ def test_a_name_held_by_another_kind_of_identity_stops_the_plan(dsn, tmp_path):
         f"principals.{P}reader: the database has it as a group, the spec declares a role"
         in out
     )
+
+
+def test_column_privileges(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        found = conn.execute(
+            "select count(*) from pg_views where viewname = 'svv_column_privileges'"
+        ).fetchone()
+        if not (found and found[0]):
+            pytest.skip("this Redshift has no svv_column_privileges")
+        conn.execute(
+            "CREATE TABLE rs_test.people (id int, name varchar(32), ssn char(11))"
+        )
+    columns = f"""
+version: 1
+engine: redshift
+principals:
+  {P}support:
+    type: role
+    privileges:
+      schemas:
+        usage: [rs_test]
+      columns:
+        select: [rs_test.people.id, rs_test.people.name]
+        update: [rs_test.people.name]
+"""
+    spec = _spec(tmp_path, columns)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'+ GRANT SELECT ("name") ON TABLE "rs_test"."people" TO ROLE "{P}support"'
+        in out
+    )
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"GRANT SELECT (ssn) ON rs_test.people TO ROLE {P}support")
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert (
+        f'- REVOKE SELECT ("ssn") ON TABLE "rs_test"."people" FROM ROLE "{P}support"'
+        in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0

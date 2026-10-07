@@ -73,6 +73,13 @@ principals:
     type: user
     password_env: ALICE_PASSWORD
     member_of: [reader]
+
+  support:
+    type: role
+    privileges:
+      columns:                # some columns of a table, not all of it
+        select: [crm.customers.id, crm.customers.email]
+        update: [crm.customers.email]
 ```
 
 Connect once with `sesame login`, then plan and apply by name. The password goes

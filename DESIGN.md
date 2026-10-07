@@ -430,7 +430,8 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
   applied against oblako's redshift-local and Redshift Serverless (2026-10-07: the
   tests pass, and users read `***`, `***@example.com` or the raw value as the spec
   says).
-- Column privileges on PostgreSQL and Redshift.
+- Done: column privileges on PostgreSQL and Redshift (`columns:`, objects named
+  `schema.table.column`), tested on PostgreSQL 14 to 18 and redshift-local.
 - In oblako: masking policies in redshift-local, catalog first (done, on its
   branch), then queries.
 - RDS and Aurora PostgreSQL: IAM authentication tokens, the RDS Data API with

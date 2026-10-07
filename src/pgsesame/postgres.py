@@ -69,6 +69,28 @@ where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
 """
 
 
+# columns of tables and views (what column grants can name) and their grants
+COLUMNS = f"""
+select n.nspname || '.' || c.relname || '.' || a.attname
+from pg_attribute a
+join pg_class c on c.oid = a.attrelid
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p', 'v', 'm', 'f') and a.attnum > 0 and not a.attisdropped
+  and {_USER_SCHEMA}
+"""
+
+COLUMN_PRIVILEGES = f"""
+select g.rolname, n.nspname || '.' || c.relname || '.' || a.attname,
+       lower(x.privilege_type)
+from pg_attribute a
+join pg_class c on c.oid = a.attrelid
+join pg_namespace n on n.oid = c.relnamespace,
+     aclexplode(a.attacl) x
+join pg_roles g on g.oid = x.grantee
+where a.attnum > 0 and not a.attisdropped and {_USER_SCHEMA}
+  and x.grantee <> c.relowner
+"""
+
 RLS_TABLES = f"""
 select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
 from pg_class c
@@ -102,6 +124,9 @@ def read(db: Connection) -> State:
         state.privileges.add(Privilege(grantee, "schemas", name, privilege))
     for grantee, kind, name, privilege in db.rows(RELATION_PRIVILEGES):
         state.privileges.add(Privilege(grantee, kind, name, privilege))
+    state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
+    for grantee, name, privilege in db.rows(COLUMN_PRIVILEGES):
+        state.privileges.add(Privilege(grantee, "columns", name, privilege))
     for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
