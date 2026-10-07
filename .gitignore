@@ -9,3 +9,8 @@ build/
 .coverage
 .DS_Store
 .tmp/
+.env
+
+# local secrets (connection strings, API keys): never committed or packaged
+.env
+.env.*

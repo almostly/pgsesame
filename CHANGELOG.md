@@ -11,6 +11,17 @@ versioned entries below.
 
 ## Unreleased
 
+### Added
+
+- **Spec**: built-in roles (`type: builtin`): a platform's own roles (Supabase's `authenticated`, `anon`, `service_role`; RDS's `rds_iam`) can be granted to and joined, are never created or altered, and have their privileges managed only in the schemas the spec names for them
+- **Postgres**: row-level security per table: enabled and forced, and its policies (command, roles, USING, WITH CHECK, permissive or restrictive); expressions compared in PostgreSQL's stored form by a rolled-back round trip; dropping a policy or disabling RLS needs `--allow-drop`
+- **Tests**: on Supabase (`PGSESAME_TEST_SUPABASE_DSN`): built-in roles and an `auth.uid()` policy, read as Supabase's API does
+
+### Changed
+
+- **Docs**: the README's first line and the repository description promise what pgsesame does today: roles, users, groups and grants
+- **Repo**: `.env` files are ignored, so local secrets are never committed or packaged
+
 ## v0.1.1 (2026-10-06)
 
 ### Added
