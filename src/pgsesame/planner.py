@@ -270,6 +270,7 @@ def make(
             )
     if spec.default_privileges:
         plan.notes.append("default privileges are planned from a later milestone")
+    plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     return plan
 
@@ -352,3 +353,37 @@ def _plan_rls(
             if policy_table == table and name not in rls.policies:
                 ops.append(DropPolicy(table=table, name=name))
     return ops
+
+
+def _within_reach(plan: Plan, current: State) -> list[Operation]:
+    """Drop the role changes the connected user can't make; note each one.
+
+    An RDS or Aurora admin user (or Supabase's postgres) is not a superuser: from
+    PostgreSQL 16 on it alters and grants only the roles it has ADMIN OPTION on,
+    so a role someone else created is reported rather than failing the apply.
+    A role the plan creates is the user's own.
+    """
+    administers = current.administers
+    if administers is None:
+        return plan.operations
+    created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
+
+    def reachable(role: str) -> bool:
+        return role in created or role in administers
+
+    kept: list[Operation] = []
+    for op in plan.operations:
+        if isinstance(op, AlterLogin) and not reachable(op.name):
+            plan.notes.append(
+                f"{op.name}: can't change its login as this user: needs ADMIN "
+                "OPTION on it (or a superuser)"
+            )
+        elif isinstance(op, (AddMember, RemoveMember)) and not reachable(op.role):
+            verb = "grant" if isinstance(op, AddMember) else "revoke"
+            plan.notes.append(
+                f"{op.member}: can't {verb} {op.role} as this user: needs ADMIN "
+                f"OPTION on {op.role} (or a superuser)"
+            )
+        else:
+            kept.append(op)
+    return kept

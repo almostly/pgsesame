@@ -140,15 +140,19 @@ class ConnectOptions:
         dsn: str,
         cluster: str | None,
         workgroup: str | None,
-        database: str,
+        database: str | None,
         iam: bool,
         data_api: bool,
         secret_arn: str | None,
         db_user: str | None,
         target: str | None = None,
+        rds: str | None = None,
     ):
         """Keep the options; the DSN as a SecretStr, as it may carry a password."""
         self.dsn = SecretStr(dsn)
+        self.rds = rds
+        # Redshift's default database is dev, PostgreSQL's postgres
+        database = database or ("postgres" if rds else "dev")
         self.cluster, self.workgroup, self.database = cluster, workgroup, database
         self.iam, self.data_api = iam, data_api
         self.secret_arn, self.db_user = secret_arn, db_user
@@ -168,8 +172,20 @@ class ConnectOptions:
         return Database(self.dsn)  # libpq's PG* variables, ~/.pgpass, services
 
     def _from_flags(self) -> Connection:
+        if self.rds:
+            return _rds(
+                self.rds,
+                self.database,
+                self.iam,
+                self.data_api,
+                self.db_user,
+                self.secret_arn,
+            )
         if (self.iam or self.data_api) and not (self.cluster or self.workgroup):
-            raise ValueError("--iam and --data-api need --cluster or --workgroup")
+            raise ValueError(
+                "--iam and --data-api need --cluster or --workgroup (Redshift) or "
+                "--rds (RDS and Aurora)"
+            )
         if self.data_api:
             from pgsesame.aws import DataApiDatabase
 
@@ -187,12 +203,48 @@ class ConnectOptions:
         return Database(self.dsn)
 
 
+def _rds(
+    rds: str,
+    database: str,
+    iam: bool,
+    data_api: bool,
+    db_user: str | None,
+    secret_arn: str | None,
+) -> Connection:
+    """Open an RDS or Aurora connection: IAM token, or the RDS Data API."""
+    if iam:
+        from pgsesame.aws import rds_iam_database
+
+        return rds_iam_database(database, rds, db_user)
+    if data_api:
+        from pgsesame.aws import RdsDataApiDatabase, describe_rds
+
+        if not secret_arn:
+            raise ValueError("--data-api with --rds needs --secret-arn")
+        endpoint = describe_rds(rds)
+        if not endpoint.arn:
+            raise ValueError(
+                "--data-api needs an Aurora cluster identifier, not a host"
+            )
+        return RdsDataApiDatabase(database, endpoint.arn, secret_arn, endpoint.name)
+    raise ValueError("--rds goes with --iam or --data-api")
+
+
 def _from_target(
     target: targets.Target, name: str, password: SecretStr | None = None
 ) -> Connection:
     """Open a saved target's connection, its password from the keychain (or given)."""
     if target.region:
         os.environ.setdefault("AWS_DEFAULT_REGION", target.region)
+    if target.rds:
+        return _rds(
+            target.rds,
+            target.database,
+            target.method == "iam",
+            target.method == "data-api",
+            target.db_user,
+            target.secret_arn,
+        )
     if target.method == "data-api":
         from pgsesame.aws import DataApiDatabase
 
@@ -226,10 +278,20 @@ WorkgroupOption = typer.Option(
     None, "--workgroup", help="Redshift Serverless workgroup (for --iam or --data-api)."
 )
 DatabaseOption = typer.Option(
-    "dev", "--database", help="Database, for --iam or --data-api."
+    None,
+    "--database",
+    help="Database, for --iam or --data-api (dev on Redshift, postgres on RDS).",
 )
 IamOption = typer.Option(
-    False, "--iam", help="Connect with temporary credentials AWS issues (Redshift)."
+    False,
+    "--iam",
+    help="Connect with temporary credentials AWS issues (Redshift, RDS, Aurora).",
+)
+RdsOption = typer.Option(
+    None,
+    "--rds",
+    help="Aurora cluster or RDS instance identifier (or endpoint), with --iam or "
+    "--data-api.",
 )
 DataApiOption = typer.Option(
     False,
@@ -240,7 +302,10 @@ SecretArnOption = typer.Option(
     None, "--secret-arn", help="Secrets Manager secret, for --data-api."
 )
 DbUserOption = typer.Option(
-    None, "--db-user", help="Database user, for --data-api on a cluster."
+    None,
+    "--db-user",
+    help="Database user: --data-api on a Redshift cluster, or --iam on RDS (default: "
+    "the admin user).",
 )
 
 
@@ -303,11 +368,12 @@ def plan(
     dsn: str = DsnOption,
     cluster: str | None = ClusterOption,
     workgroup: str | None = WorkgroupOption,
-    database: str = DatabaseOption,
+    database: str | None = DatabaseOption,
     iam: bool = IamOption,
     data_api: bool = DataApiOption,
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
+    rds: str | None = RdsOption,
     out: Path | None = typer.Option(
         None,
         "--out",
@@ -323,7 +389,16 @@ def plan(
     """
     loaded = _load(path)
     options = ConnectOptions(
-        dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user, target
+        dsn,
+        cluster,
+        workgroup,
+        database,
+        iam,
+        data_api,
+        secret_arn,
+        db_user,
+        target,
+        rds,
     )
     db = _connect(options)
     header("plan", _where(options, db))
@@ -376,11 +451,12 @@ def apply(
     dsn: str = DsnOption,
     cluster: str | None = ClusterOption,
     workgroup: str | None = WorkgroupOption,
-    database: str = DatabaseOption,
+    database: str | None = DatabaseOption,
     iam: bool = IamOption,
     data_api: bool = DataApiOption,
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
+    rds: str | None = RdsOption,
     allow_revoke: bool = typer.Option(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
@@ -394,7 +470,16 @@ def apply(
     saved = _load_changeset(path) if is_changeset(path) else None
     loaded = saved.parsed_spec() if saved else _load(path)
     options = ConnectOptions(
-        dsn, cluster, workgroup, database, iam, data_api, secret_arn, db_user, target
+        dsn,
+        cluster,
+        workgroup,
+        database,
+        iam,
+        data_api,
+        secret_arn,
+        db_user,
+        target,
+        rds,
     )
     db = _connect(options)
     header("apply", _where(options, db))
@@ -478,6 +563,11 @@ def login(
     region: str | None = typer.Option(
         None, "--region", help="AWS region (IAM, Data API)."
     ),
+    rds: str | None = typer.Option(
+        None,
+        "--rds",
+        help="Aurora cluster or RDS instance (with --iam or --data-api).",
+    ),
     password_stdin: bool = typer.Option(
         False, "--password-stdin", help="Read the password from stdin (scripts)."
     ),
@@ -509,9 +599,10 @@ def login(
         err.print("[error]✗[/error] --engine is postgres or redshift")
         raise typer.Exit(1)
     method = "iam" if iam else "data-api" if data_api else "password"
-    if method != "password" and engine != "redshift":
+    if method != "password" and engine != "redshift" and not rds:
         err.print(
-            "[error]✗[/error] --iam and --data-api are for Redshift (RDS comes next)"
+            "[error]✗[/error] --iam and --data-api need --rds on PostgreSQL (an RDS "
+            "instance or Aurora cluster)"
         )
         raise typer.Exit(1)
     interactive = sys.stdin.isatty() and not password_stdin
@@ -540,6 +631,8 @@ def login(
                 show_default=False,
             )
             secret = SecretStr(typed) if typed else None
+    elif rds:
+        database = database or "postgres"
     else:
         if not (cluster or workgroup):
             workgroup = _ask(
@@ -560,6 +653,7 @@ def login(
         db_user=db_user,
         region=region,
         password_env=password_env,
+        rds=rds,
     )
     header("login", name)
     if check:

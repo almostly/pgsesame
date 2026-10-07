@@ -418,3 +418,41 @@ def test_column_privileges(dsn, tmp_path):
     ), out
     assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
+ADMIN_LIMITS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}foreign:
+    type: role
+    login: true
+  {P}mine:
+    type: role
+    member_of: [{P}foreign]
+"""
+
+
+def test_an_admin_user_that_is_not_a_superuser(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if conn.info.server_version < 160000:
+            pytest.skip("ADMIN OPTION limits a CREATEROLE user from PostgreSQL 16")
+        # like an RDS or Aurora admin user: CREATEROLE, not a superuser
+        conn.execute(f"CREATE ROLE {P}master LOGIN CREATEROLE PASSWORD 'master-pw-1'")
+        conn.execute(f"CREATE ROLE {P}foreign NOLOGIN")  # a superuser's role
+    master = make_conninfo(dsn, user=f"{P}master", password="master-pw-1")
+    spec = _spec(tmp_path, ADMIN_LIMITS)
+    code, out = _sesame("plan", spec, "--dsn", master)
+    assert code == 2, out
+    assert f'+ CREATE ROLE "{P}mine"' in out
+    assert "ALTER ROLE" not in out and "GRANT" not in out
+    assert f"{P}foreign: can't change its login as this user" in out
+    assert f"{P}mine: can't grant {P}foreign as this user" in out
+    code, out = _sesame("apply", spec, "--dsn", master)
+    assert code == 0, out  # what it can do, and nothing that would fail
+    # once it is given ADMIN OPTION on the role, the rest follows
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"GRANT {P}foreign TO {P}master WITH ADMIN OPTION")
+    code, out = _sesame("plan", spec, "--dsn", master)
+    assert f'~ ALTER ROLE "{P}foreign" LOGIN' in out, out
+    assert f'+ GRANT "{P}foreign" TO "{P}mine"' in out, out

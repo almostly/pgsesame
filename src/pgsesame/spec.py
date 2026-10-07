@@ -396,6 +396,9 @@ def _check_rls(spec: Spec) -> list[str]:
             for role in policy.to:
                 if role != "public" and role not in spec.principals:
                     problems.append(f"{where}.to: {role} is not declared")
+            if "public" in policy.to and len(policy.to) > 1:
+                # PostgreSQL keeps only PUBLIC, so the policy would never match
+                problems.append(f"{where}.to: public covers every role; list it alone")
             if policy.command in ("select", "delete") and policy.with_check:
                 problems.append(
                     f"{where}: {policy.command} policies take no with_check"

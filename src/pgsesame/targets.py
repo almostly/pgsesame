@@ -61,7 +61,8 @@ class Target(BaseModel):
         None,
         description="Environment variable with the password (wins over the keychain)",
     )
-    # iam / data-api: Redshift
+    # iam / data-api: an RDS instance or Aurora cluster, or Redshift's
+    rds: str | None = None
     cluster: str | None = None
     workgroup: str | None = None
     secret_arn: str | None = None
@@ -73,6 +74,8 @@ class Target(BaseModel):
         """Return where the target goes, the way the plan header shows it."""
         if self.method == "password":
             return f"{self.user}@{self.host}:{self.port}/{self.database}"
+        if self.rds:
+            return f"{self.method} rds {self.rds}/{self.database}"
         place = (
             f"workgroup {self.workgroup}"
             if self.workgroup

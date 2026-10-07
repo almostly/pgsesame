@@ -19,6 +19,9 @@ versioned entries below.
 - **CLI**: a target can take its password from an environment variable (`sesame login --password-env`), for `.env` files and CI secrets; project targets in `sesame.toml` or `[tool.sesame]` in `pyproject.toml`, committed with the spec (`sesame login --project`), found up to the repository root, ahead of your own; the plan header and `sesame targets` show where each password comes from
 - **Redshift**: dynamic data masking by column and role (`masking:`): what everyone sees (`mask`), roles with their own mask in priority order (`roles`), roles that see the raw value through pass-through policies of pgsesame's own (`unmasked`); expressions compared in Redshift's stored form by a rolled-back round trip; a priority move is a change, a detach needs `--allow-revoke`, replacing a policy whose type changed needs `--allow-drop`; tested on oblako's redshift-local
 - **Spec**: column privileges (`columns: {select: [schema.table.column]}`): `select`, `insert`, `update` and `references` on PostgreSQL (read from column ACLs), `select` and `update` on Redshift (read from `svv_column_privileges`); drift is revoked with `--allow-revoke`
+- **RDS**: Amazon RDS and Aurora PostgreSQL by `--rds <instance or cluster>`: `--iam` signs an IAM authentication token (the admin user by default; the way into an Aurora cluster made with express configuration), `--data-api` goes through the RDS Data API with apply in one transaction; `sesame login --rds` saves either
+- **Postgres**: the roles a user can't change (without ADMIN OPTION on them, PostgreSQL 16+, as an RDS admin user or Supabase's `postgres`) are noted in the plan, not attempted
+- **Spec**: a row-level security policy for `public` names no other role (PostgreSQL keeps only PUBLIC, so the plan would never settle)
 - **Tests**: on Supabase (`PGSESAME_TEST_SUPABASE_DSN`): built-in roles and an `auth.uid()` policy, read as Supabase's API does
 
 ### Changed

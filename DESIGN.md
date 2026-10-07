@@ -434,10 +434,10 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
   `schema.table.column`), tested on PostgreSQL 14 to 18 and redshift-local.
 - In oblako: masking policies in redshift-local, catalog first (done, on its
   branch), then queries.
-- RDS and Aurora PostgreSQL: IAM authentication tokens, the RDS Data API with
-  transactions, built-in roles (`rds_iam`, `rds_superuser`, `sys:*`) a spec can
-  refer to, and the master user's limits; tested on oblako and on Aurora
-  Serverless v2.
+- Done: RDS and Aurora PostgreSQL (`--rds`): IAM authentication tokens, the RDS
+  Data API with transactions, and the admin user's limits (role changes without
+  ADMIN OPTION are noted, not attempted); tested on oblako, PostgreSQL 16 and an
+  Aurora cluster made with express configuration.
 
 0.3:
 
