@@ -69,8 +69,8 @@ jobs:
       redshift:
         # pinned by digest: :16 moves with every oblako image change. To update,
         # docker buildx imagetools inspect public.ecr.aws/oblako/redshift-local:16
-        # (oblako d56528d: users, groups, roles and the SVV privilege views)
-        image: public.ecr.aws/oblako/redshift-local:16@sha256:3d2618b23e25ab76d4a2dbfb716f5066e8983d0865182eacec6ea215bb958f8b
+        # (oblako d1c52c2: masking policies and svv_column_privileges)
+        image: public.ecr.aws/oblako/redshift-local:16@sha256:01a3e02b31db79a9e374c0670592a3a381a0359700d9fcfe4104e80f4b99fb81
         env:
           POSTGRES_USER: oblako
           POSTGRES_PASSWORD: oblako
@@ -96,7 +96,7 @@ jobs:
           echo "redshift-local did not come up"; exit 1
 
       - name: Redshift tests
-        run: uv run pytest -q tests/test_redshift.py
+        run: uv run pytest -q tests/test_redshift.py tests/test_masking.py
 
   action:
     name: the GitHub Action (uses ./)
