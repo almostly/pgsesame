@@ -429,6 +429,75 @@ class DisableRowSecurity(Operation):
 
 
 # ---------------------------------------------------------------------------
+# Default privileges: grants on objects an owner creates from now on
+# ---------------------------------------------------------------------------
+_DEFAULT_ON = {
+    "tables": sql.SQL("TABLES"),
+    "sequences": sql.SQL("SEQUENCES"),
+    "functions": sql.SQL("FUNCTIONS"),
+    "schemas": sql.SQL("SCHEMAS"),
+}
+
+
+class _Default(Operation):
+    owner: str
+    schema: str  # "" for every schema
+    object_type: str
+    privilege: str
+    grantee: str
+    grantee_identity: Identity = "pg"
+    owner_identity: Identity = "pg"
+
+    def _alter(self, verb: str) -> sql.Composed:
+        # Redshift names an owner FOR USER; PostgreSQL FOR ROLE (any role)
+        target = sql.SQL("FOR {} {}").format(
+            sql.SQL("ROLE" if self.owner_identity == "pg" else "USER"),
+            sql.Identifier(self.owner),
+        )
+        where = (
+            sql.SQL(" IN SCHEMA {}").format(sql.Identifier(self.schema))
+            if self.schema
+            else sql.SQL("")
+        )
+        action = sql.SQL(
+            "GRANT {} ON {} TO {}" if verb == "grant" else "REVOKE {} ON {} FROM {}"
+        )
+        return sql.SQL("ALTER DEFAULT PRIVILEGES {}{} {}").format(
+            target,
+            where,
+            action.format(
+                _privilege(self.privilege),
+                _DEFAULT_ON[self.object_type],
+                _grantee(self.grantee, self.grantee_identity),
+            ),
+        )
+
+
+class GrantDefault(_Default):
+    """Grant a privilege on the objects an owner creates from now on."""
+
+    order: ClassVar[int] = 48
+    op: Literal["grant_default"] = "grant_default"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER DEFAULT PRIVILEGES FOR ... [IN SCHEMA ...] GRANT ... TO ..."""
+        return self._alter("grant")
+
+
+class RevokeDefault(_Default):
+    """Revoke a default privilege: objects created from now on don't get it."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 55
+    op: Literal["revoke_default"] = "revoke_default"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER DEFAULT PRIVILEGES FOR ... [IN SCHEMA ...] REVOKE ... FROM ..."""
+        return self._alter("revoke")
+
+
+# ---------------------------------------------------------------------------
 # Redshift dynamic data masking
 # ---------------------------------------------------------------------------
 def _type(text: str) -> sql.SQL:
@@ -596,6 +665,8 @@ AnyOperation = Annotated[
     | EnableRowSecurity
     | ForceRowSecurity
     | DisableRowSecurity
+    | GrantDefault
+    | RevokeDefault
     | CreateMaskingPolicy
     | AlterMaskingPolicy
     | DropMaskingPolicy

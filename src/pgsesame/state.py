@@ -57,6 +57,17 @@ class Policy:
 
 
 @dataclass(frozen=True, order=True)
+class DefaultGrant:
+    """``grantee`` gets ``privilege`` on objects of a type ``owner`` creates."""
+
+    owner: str
+    schema: str  # "" for every schema
+    object_type: str  # tables, sequences, functions, schemas
+    grantee: str
+    privilege: str
+
+
+@dataclass(frozen=True, order=True)
 class MaskPolicy:
     """A Redshift masking policy, its expression and types in Redshift's own form."""
 
@@ -88,6 +99,8 @@ class State:
     privileges: set[Privilege] = field(default_factory=set)
     # every object the database has, by type: lets the planner expand schema.*
     objects: dict[str, set[str]] = field(default_factory=dict)
+    # ALTER DEFAULT PRIVILEGES entries: grants on objects not created yet
+    default_privileges: set[DefaultGrant] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     policies: dict[tuple[str, str], Policy] = field(default_factory=dict)

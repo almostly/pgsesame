@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pgsesame.db import Connection, Database
 from pgsesame.spec import Spec
-from pgsesame.state import Membership, Policy, Privilege, Role, State
+from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
 
 ROLES = """
 select rolname, rolcanlogin, rolsuper from pg_roles
@@ -91,6 +91,22 @@ where a.attnum > 0 and not a.attisdropped and {_USER_SCHEMA}
   and x.grantee <> c.relowner
 """
 
+# default privileges: a global entry (no schema) holds the whole default ACL, the
+# owner's own privileges and PUBLIC's included, which are left out as implied
+DEFAULT_PRIVILEGES = """
+select o.rolname, coalesce(n.nspname, ''),
+       case d.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences'
+                            when 'f' then 'functions' when 'n' then 'schemas'
+                            else 'types' end,
+       g.rolname, lower(a.privilege_type)
+from pg_default_acl d
+join pg_roles o on o.oid = d.defaclrole
+left join pg_namespace n on n.oid = d.defaclnamespace,
+     aclexplode(d.defaclacl) a
+join pg_roles g on g.oid = a.grantee
+where a.grantee <> d.defaclrole
+"""
+
 RLS_TABLES = f"""
 select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
 from pg_class c
@@ -159,6 +175,10 @@ def read(db: Connection) -> State:
     state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
     for grantee, name, privilege in db.rows(COLUMN_PRIVILEGES):
         state.privileges.add(Privilege(grantee, "columns", name, privilege))
+    for owner, schema, kind, grantee, privilege in db.rows(DEFAULT_PRIVILEGES):
+        state.default_privileges.add(
+            DefaultGrant(owner, schema, kind, grantee, privilege)
+        )
     for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):

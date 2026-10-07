@@ -456,3 +456,57 @@ def test_an_admin_user_that_is_not_a_superuser(dsn, tmp_path):
     code, out = _sesame("plan", spec, "--dsn", master)
     assert f'~ ALTER ROLE "{P}foreign" LOGIN' in out, out
     assert f'+ GRANT "{P}foreign" TO "{P}mine"' in out, out
+
+
+DEFAULTS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}etl:
+    type: role
+  {P}reader:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+default_privileges:
+  - owner: {P}etl
+    schema: analytics
+    grantee: {P}reader
+    tables: [select]
+"""
+
+
+def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
+    spec = _spec(tmp_path, DEFAULTS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'+ ALTER DEFAULT PRIVILEGES FOR ROLE "{P}etl" IN SCHEMA "analytics" '
+        f'GRANT SELECT ON TABLES TO "{P}reader"' in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"GRANT CREATE ON SCHEMA analytics TO {P}etl")
+        conn.execute(f"SET ROLE {P}etl")
+        conn.execute("CREATE TABLE analytics.made_later (x int)")
+        conn.execute("RESET ROLE")
+        assert conn.execute(
+            "SELECT has_table_privilege(%s, 'analytics.made_later', 'SELECT')",
+            (f"{P}reader",),
+        ).fetchone() == (True,)
+        conn.execute("DROP TABLE analytics.made_later")
+        conn.execute(f"REVOKE CREATE ON SCHEMA analytics FROM {P}etl")
+        # a default privilege made by hand for a managed grantee is drift
+        conn.execute(
+            f"ALTER DEFAULT PRIVILEGES FOR ROLE {P}etl IN SCHEMA analytics "
+            f"GRANT INSERT ON TABLES TO {P}reader"
+        )
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert "REVOKE INSERT ON TABLES" in out and "needs --allow-revoke" in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    # what the spec stops wanting is revoked too, so the owner can be dropped
+    empty = _spec(tmp_path, DEFAULTS.split("default_privileges:")[0])
+    assert _sesame("apply", empty, "--dsn", dsn, "--allow-revoke")[0] == 0

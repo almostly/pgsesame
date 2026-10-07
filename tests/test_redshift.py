@@ -66,6 +66,29 @@ principals:
 
 
 def _cleanup(conn: psycopg.Connection) -> None:
+    # Redshift won't drop a user that has default privileges: revoke them first
+    defaults = conn.execute(
+        "SELECT owner_name, coalesce(schema_name, ''), object_type, privilege_type, "
+        "grantee_name, grantee_type FROM svv_default_privileges "
+        "WHERE owner_name LIKE 'rs\\_test\\_%' OR grantee_name LIKE 'rs\\_test\\_%'"
+    ).fetchall()
+    for owner, schema, kind, privilege, grantee, gtype in defaults:
+        conn.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR USER {}{} REVOKE {} ON {} FROM {}{}"
+            ).format(
+                sql.Identifier(owner),
+                sql.SQL(" IN SCHEMA {}").format(sql.Identifier(schema))
+                if schema
+                else sql.SQL(""),
+                sql.SQL(privilege),
+                sql.SQL("FUNCTIONS" if kind == "FUNCTION" else "TABLES"),
+                sql.SQL(
+                    "ROLE " if gtype == "role" else "GROUP " if gtype == "group" else ""
+                ),
+                sql.Identifier(grantee),
+            )
+        )
     conn.execute("DROP SCHEMA IF EXISTS rs_test CASCADE")
     users = conn.execute(
         "SELECT usename FROM pg_user WHERE usename LIKE 'rs\\_test\\_%'"
@@ -235,3 +258,59 @@ principals:
     ), out
     assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
+DEFAULTS = f"""
+version: 1
+engine: redshift
+principals:
+  {P}etl:
+    type: user
+    password: disabled
+    privileges:
+      schemas:
+        create: [rs_test]
+        usage: [rs_test]
+  {P}reader:
+    type: role
+    privileges:
+      schemas:
+        usage: [rs_test]
+  {P}analysts:
+    type: group
+default_privileges:
+  - owner: {P}etl
+    schema: rs_test
+    grantee: {P}reader
+    tables: [select]
+  - owner: {P}etl
+    grantee: {P}analysts
+    tables: [select]
+"""
+
+
+def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
+    spec = _spec(tmp_path, DEFAULTS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'+ ALTER DEFAULT PRIVILEGES FOR USER "{P}etl" IN SCHEMA "rs_test" '
+        f'GRANT SELECT ON TABLES TO ROLE "{P}reader"' in out
+    ), out
+    assert (
+        f'+ ALTER DEFAULT PRIVILEGES FOR USER "{P}etl" GRANT SELECT ON TABLES '
+        f'TO GROUP "{P}analysts"' in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"SET SESSION AUTHORIZATION {P}etl")
+        conn.execute("CREATE TABLE rs_test.made_later (x int)")
+        conn.execute("RESET SESSION AUTHORIZATION")
+        grants = conn.execute(
+            "SELECT identity_name, privilege_type FROM svv_relation_privileges "
+            "WHERE namespace_name = 'rs_test' AND relation_name = 'made_later' "
+            "ORDER BY 1"
+        ).fetchall()
+    assert grants == [(f"{P}analysts", "SELECT"), (f"{P}reader", "SELECT")]
