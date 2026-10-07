@@ -1,5 +1,7 @@
 """The planner on hand-built states (no database)."""
 
+import pytest
+
 from pgsesame import planner, spec
 from pgsesame.ops import CreateRole, Grant, RemoveMember
 from pgsesame.state import Membership, Privilege, Role, State
@@ -102,4 +104,118 @@ def test_a_privilege_pgsesame_does_not_model_is_noted_and_left_alone():
     assert plan.operations == []
     assert plan.notes == [
         "r holds RULE on s.t, which pgsesame doesn't manage; left as it is"
+    ]
+
+
+def test_a_builtin_role_is_referred_to_never_created():
+    loaded = _spec(
+        platform={"type": "builtin"}, app={"type": "user", "member_of": ["platform"]}
+    )
+    with pytest.raises(planner.PlanError) as err:
+        planner.make(loaded, _state())
+    assert err.value.problems == [
+        "principals.platform: the built-in role doesn't exist on this server"
+    ]
+    plan = planner.make(loaded, _state(Role("platform", False)))
+    assert [type(op).__name__ for op in plan.operations] == ["CreateRole", "AddMember"]
+    created = plan.operations[0]
+    assert isinstance(created, CreateRole) and created.name == "app"  # only the user
+
+
+def test_a_builtin_roles_privileges_are_managed_only_where_the_spec_speaks():
+    loaded = _spec(
+        authenticated={
+            "type": "builtin",
+            "privileges": {
+                "schemas": {"usage": ["app"]},
+                "tables": {"select": ["app.*"]},
+            },
+        }
+    )
+    current = _state(
+        Role("authenticated", False),
+        objects={"schemas": {"app", "public"}, "tables": {"app.t", "public.x"}},
+        memberships={Membership("authenticated", "something_else")},
+        privileges={
+            Privilege("authenticated", "tables", "app.t", "delete"),  # in scope: drift
+            Privilege(
+                "authenticated", "tables", "public.x", "select"
+            ),  # the platform's
+            Privilege("authenticated", "schemas", "public", "usage"),  # the platform's
+        },
+    )
+    plan = planner.make(loaded, current)
+    rendered = sorted(op.statement().as_string() for op in plan.operations)
+    assert rendered == [
+        'GRANT SELECT ON TABLE "app"."t" TO "authenticated"',
+        'GRANT USAGE ON SCHEMA "app" TO "authenticated"',
+        'REVOKE DELETE ON TABLE "app"."t" FROM "authenticated"',
+    ]  # nothing in public, and its own membership is left alone
+
+
+def test_a_builtin_role_takes_only_privileges():
+    with pytest.raises(spec.SpecError) as err:
+        _spec(platform={"type": "builtin", "login": True, "member_of": []})
+    assert err.value.problems[0].startswith(
+        "principals.platform: a built-in role is referred to, not managed"
+    )
+
+
+def _rls_spec(**policy):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {"reader": {"type": "role"}},
+            "row_level_security": {
+                "app.notes": {
+                    "policies": {"own": {"to": ["reader"], "using": "true", **policy}}
+                }
+            },
+        }
+    )
+
+
+def test_row_level_security_is_planned_per_table():
+    from pgsesame.state import Policy
+
+    loaded = _rls_spec()
+    fresh = planner.make(
+        loaded, _state(Role("reader", False), rls={"app.notes": (False, False)})
+    )
+    assert [type(op).__name__ for op in fresh.operations] == [
+        "CreatePolicy",
+        "EnableRowSecurity",
+    ]
+
+    have = Policy("app.notes", "own", "all", True, ("reader",), "true", None)
+    current = _state(Role("reader", False), rls={"app.notes": (True, False)})
+    current.policies = {("app.notes", "own"): have}
+    assert planner.make(loaded, current).operations == []  # converged
+
+    current.policies[("app.notes", "old")] = Policy(
+        "app.notes", "old", "all", True, ("public",), "true", None
+    )
+    (drop,) = planner.make(
+        loaded, current
+    ).operations  # undeclared policy on a managed table
+    assert type(drop).__name__ == "DropPolicy" and drop.gate == "drop"
+    del current.policies[("app.notes", "old")]
+
+    replaced = planner.make(_rls_spec(command="select"), current).operations
+    assert [type(op).__name__ for op in replaced] == ["DropPolicy", "CreatePolicy"]
+    altered = planner.make(_rls_spec(using="false"), current).operations
+    assert [type(op).__name__ for op in altered] == ["AlterPolicy"]
+
+
+def test_row_level_security_problems():
+    with pytest.raises(planner.PlanError) as err:
+        planner.make(_rls_spec(), _state(Role("reader", False)))
+    assert err.value.problems == [
+        "row_level_security.app.notes: the table does not exist"
+    ]
+    with pytest.raises(spec.SpecError) as bad:
+        _rls_spec(command="select", with_check="true")
+    assert bad.value.problems == [
+        "row_level_security.app.notes.policies.own: select policies take no with_check"
     ]

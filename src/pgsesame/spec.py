@@ -100,7 +100,9 @@ class _Model(BaseModel):
 class Principal(_Model):
     """A role, user or (Redshift) group, and what it is granted."""
 
-    type: Literal["role", "user", "group"]
+    # builtin: a role the platform owns (Supabase's authenticated, RDS's rds_iam,
+    # Redshift's sys:secadmin): referred to and granted to, never created or altered
+    type: Literal["role", "user", "group", "builtin"]
     login: bool | None = Field(None, description="Defaults to true for users.")
     member_of: list[Identifier] = Field(
         default_factory=list, description="Roles it belongs to."
@@ -150,6 +152,30 @@ class DefaultPrivilege(_Model):
         }
 
 
+# a table, schema-qualified: schema.table
+TableName = Annotated[str, StringConstraints(pattern=r"^[^.\x00]+\.[^.\x00*]+$")]
+
+
+class RlsPolicy(_Model):
+    """One row-level security policy (CREATE POLICY)."""
+
+    command: Literal["all", "select", "insert", "update", "delete"] = "all"
+    to: list[Identifier] = Field(
+        default_factory=lambda: ["public"], description="Roles, or public (default)."
+    )
+    using: str | None = Field(None, description="Which existing rows are visible.")
+    with_check: str | None = Field(None, description="Which new rows are allowed.")
+    permissive: bool = Field(True, description="false for RESTRICTIVE.")
+
+
+class RlsTable(_Model):
+    """Row-level security on one table: on or off, forced or not, its policies."""
+
+    enabled: bool = True
+    force: bool = Field(False, description="Apply the policies to the table owner too.")
+    policies: dict[Identifier, RlsPolicy] = Field(default_factory=dict)
+
+
 class Spec(_Model):
     """A whole spec: the engine, the principals and default-privilege rules."""
 
@@ -157,6 +183,9 @@ class Spec(_Model):
     engine: Engine
     principals: dict[Identifier, Principal] = Field(default_factory=dict)
     default_privileges: list[DefaultPrivilege] = Field(default_factory=list)
+    row_level_security: dict[TableName, RlsTable] = Field(
+        default_factory=dict, description="Tables whose row-level security is managed."
+    )
 
 
 def load(path: str | Path) -> Spec:
@@ -207,6 +236,25 @@ def _check(spec: Spec) -> list[str]:
         where = f"principals.{name}"
         if len(name.encode()) > limit:
             problems.append(f"{where}: longer than {spec.engine}'s {limit} bytes")
+        if p.type == "builtin":
+            owned = [
+                key
+                for key in (
+                    "login",
+                    "password",
+                    "password_env",
+                    "groups",
+                    "member_of",
+                    "owns",
+                )
+                if getattr(p, key)
+            ]
+            if owned:
+                problems.append(
+                    f"{where}: a built-in role is referred to, not managed; only "
+                    f"privileges can be declared for it ({', '.join(owned)})"
+                )
+            continue
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")
         if p.groups and not redshift:
@@ -251,4 +299,27 @@ def _check(spec: Spec) -> list[str]:
                         f"{where}.{kind}: {privilege} is not a {spec.engine} "
                         f"privilege on {kind}"
                     )
+    problems += _check_rls(spec)
+    return problems
+
+
+def _check_rls(spec: Spec) -> list[str]:
+    """Check the row-level security section: engine, roles and clauses per command."""
+    problems: list[str] = []
+    if spec.row_level_security and spec.engine == "redshift":
+        return ["row_level_security: Redshift's RLS policies come in a later version"]
+    for table, rls in spec.row_level_security.items():
+        for name, policy in rls.policies.items():
+            where = f"row_level_security.{table}.policies.{name}"
+            for role in policy.to:
+                if role != "public" and role not in spec.principals:
+                    problems.append(f"{where}.to: {role} is not declared")
+            if policy.command in ("select", "delete") and policy.with_check:
+                problems.append(
+                    f"{where}: {policy.command} policies take no with_check"
+                )
+            if policy.command == "insert" and policy.using:
+                problems.append(f"{where}: insert policies take no using")
+            if not (policy.using or policy.with_check):
+                problems.append(f"{where}: needs using or with_check")
     return problems
