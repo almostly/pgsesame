@@ -156,3 +156,53 @@ def test_the_json_schema_describes_the_spec():
     principal = schema["$defs"]["Principal"]
     assert principal["additionalProperties"] is False
     assert "schema" in schema["$defs"]["DefaultPrivilege"]["properties"]
+
+
+def test_masking_is_checked_whole():
+    principals = {"support": {"type": "role"}, "analysts": {"type": "group"}}
+    problems = _problems(
+        engine="redshift",
+        principals=principals,
+        masking={
+            "policies": {
+                "sesame_unmasked_x": {"type": "int", "using": "0"},
+                "both": {"type": "int", "input": {"a": "int"}, "using": "a"},
+                "pair": {"input": {"a": "int", "b": "int"}, "using": "a + b"},
+            },
+            "columns": {
+                "s.t.a": {"unmasked": ["support"]},
+                "s.t.b": {"mask": "pair", "roles": {"analysts": "missing"}},
+                "s.t.c": {
+                    "mask": "pair",
+                    "unmasked": ["support"],
+                    "roles": {"support": "pair"},
+                    "inputs": ["x", "y"],
+                },
+            },
+        },
+    )
+    assert problems == [
+        "masking.policies.sesame_unmasked_x: sesame_unmasked_* names are pgsesame's own",
+        "masking.policies.both: give type (one input) or input (several)",
+        "masking.columns.s.t.a.unmasked: there's no mask to see past",
+        "masking.columns.s.t.b.inputs: pair reads 2 columns; list them in inputs",
+        "masking.columns.s.t.b.roles.analysts: missing is not a declared policy",
+        "masking.columns.s.t.b.roles: analysts is a group; Redshift masks for users "
+        "and roles only",
+        "masking.columns.s.t.c: support can't be both unmasked and masked",
+    ]
+
+
+def test_masking_is_redshifts():
+    problems = _problems(masking={"policies": {}, "columns": {}})
+    assert problems == [
+        "masking: dynamic data masking is Redshift's; on PostgreSQL use column privileges"
+    ]
+
+
+def test_a_masking_type_is_a_type_not_sql():
+    problems = _problems(
+        engine="redshift",
+        masking={"policies": {"p": {"type": "int); drop table x; --", "using": "1"}}},
+    )
+    assert problems[0].startswith("masking.policies.p.type: string should match")

@@ -27,6 +27,7 @@ from pgsesame.ops import (
     RemoveMember,
     Revoke,
 )
+from pgsesame import masking
 from pgsesame.spec import PRIVILEGES, Spec
 from pgsesame.state import Identity, Membership, Privilege, State
 
@@ -53,7 +54,7 @@ class Plan:
     def allowed(self, allow_revoke: bool, allow_drop: bool) -> list[Operation]:
         """Return the operations apply may run with these flags."""
         gates = {"revoke": allow_revoke, "drop": allow_drop}
-        return [op for op in self.operations if op.gate is None or gates[op.gate]]
+        return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 
 def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]]:
@@ -96,12 +97,18 @@ def _expand(pattern: str, existing: set[str]) -> set[str]:
 Normalized = dict[tuple[str, str], tuple[str | None, str | None]]
 
 
-def make(spec: Spec, current: State, normalized: Normalized | None = None) -> Plan:
+def make(
+    spec: Spec,
+    current: State,
+    normalized: Normalized | None = None,
+    masks: masking.Normalized | None = None,
+) -> Plan:
     """Compare the spec with the current state and return the plan.
 
     ``normalized`` holds each declared policy's USING / WITH CHECK in the server's
     own form (see ``postgres.normalize_policies``); without it the spec's text is
-    compared as written.
+    compared as written. ``masks`` does the same for Redshift masking policies
+    (see ``masking.normalize``); without it their expressions aren't compared.
     """
     plan = Plan()
     redshift = spec.engine == "redshift"
@@ -240,6 +247,15 @@ def make(spec: Spec, current: State, normalized: Normalized | None = None) -> Pl
         )
 
     plan.operations += _plan_rls(spec, current, normalized or {}, problems)
+    if spec.masking is not None:
+        plan.operations += masking.plan(
+            spec,
+            current,
+            masks,
+            lambda name: "user" if identity(name) == "user" else "role",
+            problems,
+            plan.notes,
+        )
     if problems:
         raise PlanError(problems)
 
