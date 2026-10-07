@@ -236,6 +236,101 @@ use, and the integration tests can run the same scenarios over each.
   without removing any SQL. An adapter that accepts a SQLAlchemy engine as a
   connection can come later if users ask for it.
 
+## Masking (0.2, Redshift)
+
+What people decide about sensitive data is per column: which roles see the raw
+value, which see a partial mask, and what everyone else sees. Redshift's dynamic
+data masking can express that, but through mechanics that are easy to get wrong
+by hand: a policy per mask, an attachment per column and grantee, and a priority
+on each attachment that decides which policy wins. pgsesame takes the decision as
+written and works out the mechanics.
+
+```yaml
+masking:
+  policies:                      # reusable masks
+    redact:
+      type: varchar(256)         # one input, named value
+      using: "'***'::varchar(256)"
+    email_domain:
+      type: varchar(256)
+      using: "regexp_replace(value, '^[^@]+', '***')"
+    card_last4:
+      input: {card: varchar(19)} # or several named inputs
+      using: "'****-' || right(card, 4)"
+
+  columns:
+    crm.customers.email:
+      mask: redact               # what everyone sees
+      unmasked: [pii_reader]     # these see the raw value
+      roles:                     # these see their own mask
+        support: email_domain
+    crm.customers.phone:
+      mask: redact
+      unmasked: [pii_reader, fraud]
+```
+
+### How it maps onto Redshift
+
+Facts from Redshift's documentation (ATTACH MASKING POLICY, the policy
+hierarchy): the attachment with the highest priority applies; the default
+priority is 0; two different policies can't be attached to one column at the same
+priority, even for different grantees, though one policy can be attached to
+several grantees at one priority; a grantee is a user, a role or PUBLIC (not a
+group); ALTER MASKING POLICY changes only the expression; DROP MASKING POLICY
+refuses while the policy is attached; creating, attaching and reading policies
+needs a superuser or the `sys:secadmin` role.
+
+So, for each column:
+
+| Spec | Attachment | Priority |
+|---|---|---|
+| `mask` | the policy, `TO PUBLIC` | 10 |
+| `roles` | each role's policy, `TO ROLE r` | 20, 30, ... in the order written (later wins) |
+| `unmasked` | a pass-through policy, `TO ROLE r` for each | 1000, shared |
+
+The pass-through policy (`USING (value)`) is created by pgsesame, one per column
+type, named `sesame_unmasked_<type>` (`sesame_unmasked_varchar_256`), and
+marked as pgsesame's own. A role that is both `unmasked` and in `roles` is a
+validation error, and so is a group, a role the spec doesn't declare, a column
+whose type doesn't match its policy's input, and masking on PostgreSQL (use
+column privileges there).
+
+### Reading and diffing
+
+`svv_masking_policy` gives each policy's inputs and expression;
+`svv_attached_masking_policy` each attachment's table, columns, grantee, grantee
+type and priority. A user without the rights to see them gets zero rows, which
+would read as "nothing attached", so pgsesame checks first (superuser, or
+`sys:secadmin` in `svv_user_grants`) and stops with a clear message otherwise.
+
+Managed: the policies the spec declares, pgsesame's pass-through policies, and
+every attachment on the columns the spec lists. Attachments on other columns, and
+other policies, are reported in the plan and left alone.
+
+### The plan
+
+In order: create policies; alter a declared policy whose expression changed;
+attach; change an attachment's priority (detach, then attach); detach
+attachments the spec no longer wants (`--allow-revoke`); a policy whose inputs
+changed is detached everywhere, dropped and created again (`--allow-drop`, as
+it briefly leaves the columns unmasked within the transaction). A grant without
+a mask (`select` on a table with a masked column) is still a grant: masking
+decides what a reader sees, privileges decide whether they read at all.
+
+### Testing
+
+Against Redshift Serverless, as the identity views were. For local runs and CI,
+oblako's redshift-local gains masking in two steps: first the catalog (the DDL
+statements and the two SVV views, stored in pg_oblako), which is enough for
+plan, apply and an empty re-plan; then the effect on queries, so a test can
+also check what each role reads.
+
+### Column privileges (0.2, both engines)
+
+`select: ["crm.customers(id, name)"]` grants on columns, for both PostgreSQL and
+Redshift; read from the column ACLs (PostgreSQL) and the column privilege view
+(Redshift). On PostgreSQL this is the built-in way to hide a column from a role.
+
 ## Testing
 
 - Unit tests: spec validation, diff and plan ordering, SQL rendering, the ACL
@@ -250,23 +345,29 @@ use, and the integration tests can run the same scenarios over each.
 Done in 0.1: the spec and `sesame validate`; plan and apply for roles, users,
 groups, memberships and privileges on PostgreSQL (14 to 18) and Redshift (read
 through its SVV views); change sets; Redshift over IAM credentials and the Data
-API, each tested against oblako and Redshift Serverless.
+API, each tested against oblako and Redshift Serverless; the GitHub Action
+(0.1.1).
 
-0.2:
+0.2, masking:
 
-- Ownership (`owns`) and default privileges, planned and applied.
-- Built-in roles a spec can refer to without managing them: Redshift Serverless's
-  `sys:*`, Supabase's `anon`, `authenticated`, `service_role`, AlloyDB's
-  `alloydbsuperuser`, RDS's `rds_superuser`, Cloud SQL's `cloudsqlsuperuser`.
-- Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
-  the platform's admin role, which is not a superuser there (on PostgreSQL 16+
-  such a role manages only the roles it created).
-- A GitHub Action: plan on a pull request with the plan as a comment, apply the
-  reviewed change set on merge.
-- `manage.prefixes`.
+- Redshift dynamic data masking by column and role (above), checked against
+  Redshift Serverless.
+- Column privileges on PostgreSQL and Redshift.
+- In oblako: masking policies in redshift-local, catalog first, then queries.
 
 0.3:
 
-- Row-level security: `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in the
-  spec, planned and diffed like grants. On Supabase, policies are how data access
-  is controlled, more than grants.
+- Ownership (`owns`) and default privileges, planned and applied.
+- Built-in roles a spec can refer to without managing them: Redshift Serverless's
+  `sys:*` (`sys:secadmin` for masking), Supabase's `anon`, `authenticated`,
+  `service_role`, AlloyDB's `alloydbsuperuser`, RDS's `rds_superuser`, Cloud
+  SQL's `cloudsqlsuperuser`.
+- Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
+  the platform's admin role.
+- `manage.prefixes`.
+
+0.4:
+
+- Row-level security: PostgreSQL's `CREATE POLICY` and Redshift's RLS policies,
+  planned and diffed like grants. On Supabase, policies are how data access is
+  controlled, more than grants.
