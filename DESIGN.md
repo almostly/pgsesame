@@ -439,7 +439,7 @@ Done in 0.2.0 (2026-10-07), masking, Supabase and RDS:
   ADMIN OPTION are noted, not attempted); tested on oblako, PostgreSQL 16 and an
   Aurora cluster made with express configuration.
 
-0.2.1, adoption:
+Done in 0.2.1 (2026-10-07), adoption:
 
 - Done: ownership and default privileges, planned and applied; `sesame import`,
   which writes the spec a database has today; `manage.schemas` and
