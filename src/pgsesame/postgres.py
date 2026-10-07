@@ -8,8 +8,9 @@ out; so are grants to PUBLIC, which pgsesame does not manage yet. System schemas
 
 from __future__ import annotations
 
-from pgsesame.db import Connection
-from pgsesame.state import Membership, Privilege, Role, State
+from pgsesame.db import Connection, Database
+from pgsesame.spec import Spec
+from pgsesame.state import Membership, Policy, Privilege, Role, State
 
 ROLES = """
 select rolname, rolcanlogin, rolsuper from pg_roles
@@ -68,6 +69,21 @@ where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
 """
 
 
+RLS_TABLES = f"""
+select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p') and {_USER_SCHEMA}
+"""
+
+POLICIES = """
+select schemaname || '.' || tablename, policyname, lower(cmd), permissive = 'PERMISSIVE',
+       roles::text[], qual, with_check
+from pg_policies
+where schemaname !~ '^pg_' and schemaname <> 'information_schema'
+"""
+
+
 def read(db: Connection) -> State:
     """Return the current state of the database ``db`` is connected to."""
     state = State()
@@ -86,4 +102,54 @@ def read(db: Connection) -> State:
         state.privileges.add(Privilege(grantee, "schemas", name, privilege))
     for grantee, kind, name, privilege in db.rows(RELATION_PRIVILEGES):
         state.privileges.add(Privilege(grantee, kind, name, privilege))
+    for table, enabled, forced in db.rows(RLS_TABLES):
+        state.rls[table] = (enabled, forced)
+    for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
+        state.policies[(table, name)] = Policy(
+            table, name, command, permissive, tuple(sorted(roles)), using, check
+        )
     return state
+
+
+def normalize_policies(
+    db: Database, spec: Spec
+) -> dict[tuple[str, str], tuple[str | None, str | None]]:
+    """Return each declared policy's expressions in the server's own form.
+
+    PostgreSQL stores a policy's USING and WITH CHECK rewritten (casts spelt out,
+    names qualified as needed), so the spec's text can't be compared with the
+    catalog's. Each declared policy is created as a probe inside a transaction
+    that is always rolled back, and its stored form read back. A table the spec
+    names but the database doesn't have is skipped: the planner reports it.
+    """
+    from pgsesame.ops import CreatePolicy
+
+    out: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+    with db.conn.transaction(force_rollback=True), db.conn.cursor() as cur:
+        for table, rls in spec.row_level_security.items():
+            exists = cur.execute(
+                "select to_regclass(%s) is not null", (table,)
+            ).fetchone()
+            if not (exists and exists[0]):
+                continue
+            for name, p in rls.policies.items():
+                probe = f"pgsesame_probe_{len(out)}"
+                cur.execute(
+                    CreatePolicy(
+                        table=table,
+                        name=probe,
+                        command=p.command,
+                        permissive=p.permissive,
+                        roles=("public",),  # the roles may not exist yet
+                        using=p.using,
+                        with_check=p.with_check,
+                    ).statement()
+                )
+                schema, relname = table.split(".", 1)
+                row = cur.execute(
+                    "select qual, with_check from pg_policies "
+                    "where schemaname = %s and tablename = %s and policyname = %s",
+                    (schema, relname, probe),
+                ).fetchone()
+                out[(table, name)] = (row[0], row[1]) if row else (None, None)
+    return out

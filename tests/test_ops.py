@@ -80,3 +80,45 @@ def test_a_plan_never_shows_a_password():
 def test_removals_are_gated():
     assert Revoke.gate == RemoveMember.gate == "revoke"
     assert Grant.gate is None and CreateRole.gate is None
+
+
+def test_row_level_security_sql():
+    from pgsesame.ops import (
+        AlterPolicy,
+        CreatePolicy,
+        DisableRowSecurity,
+        DropPolicy,
+        EnableRowSecurity,
+        ForceRowSecurity,
+    )
+
+    create = CreatePolicy(
+        table="app.notes",
+        name="own notes",
+        command="update",
+        permissive=False,
+        roles=("authenticated", "public"),
+        using="owner = current_user",
+        with_check="owner = current_user",
+    )
+    assert create.statement().as_string() == (
+        'CREATE POLICY "own notes" ON "app"."notes" AS RESTRICTIVE FOR UPDATE '
+        'TO "authenticated", PUBLIC USING (owner = current_user) '
+        "WITH CHECK (owner = current_user)"
+    )
+    alter = AlterPolicy(table="app.notes", name="p", roles=("public",), using="true")
+    assert (
+        alter.statement().as_string()
+        == 'ALTER POLICY "p" ON "app"."notes" TO PUBLIC USING (true)'
+    )
+    assert DropPolicy(table="app.notes", name="p").statement().as_string() == (
+        'DROP POLICY "p" ON "app"."notes"'
+    )
+    assert EnableRowSecurity(table="app.notes").statement().as_string() == (
+        'ALTER TABLE "app"."notes" ENABLE ROW LEVEL SECURITY'
+    )
+    assert ForceRowSecurity(table="app.notes", force=False).statement().as_string() == (
+        'ALTER TABLE "app"."notes" NO FORCE ROW LEVEL SECURITY'
+    )
+    assert DisableRowSecurity.gate == DropPolicy.gate == "drop"
+    assert DropPolicy.order < CreatePolicy.order  # a replaced policy keeps its name

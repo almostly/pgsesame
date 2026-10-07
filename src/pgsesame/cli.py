@@ -103,7 +103,12 @@ def _load(path: Path) -> spec.Spec:
 def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
     reader = redshift.read if loaded.engine == "redshift" else postgres.read
     try:
-        return planner.make(loaded, reader(db))
+        normalized = (
+            postgres.normalize_policies(db, loaded)
+            if loaded.row_level_security and isinstance(db, Database)
+            else {}
+        )
+        return planner.make(loaded, reader(db), normalized)
     except planner.PlanError as e:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {problem}")
