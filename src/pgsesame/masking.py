@@ -28,6 +28,7 @@ from typing import Any
 
 from psycopg import sql
 
+from pgsesame import redshift
 from pgsesame.db import Connection, Database
 from pgsesame.ops import (
     AlterMaskingPolicy,
@@ -96,20 +97,33 @@ def read(db: Connection, spec: Spec, state: State) -> None:
     """Add the masking policies, attachments and masked columns' types to ``state``.
 
     Without superuser or ``sys:secadmin`` Redshift's masking views return no rows,
-    which would read as "nothing is masked", so that is checked first.
+    which would read as "nothing is masked", so that is checked (on the same
+    round as the reads: over the Data API they run together).
     """
     assert spec.masking is not None
-    allowed = db.rows(CAN_MANAGE)
+    queries = {"can_manage": CAN_MANAGE, "policies": POLICIES, "attached": ATTACHED}
+    tables = sorted({c.rsplit(".", 1)[0] for c in spec.masking.columns})
+    if tables:
+        where = sql.SQL(" or ").join(
+            sql.SQL("(n.nspname = {} and c.relname = {})").format(
+                sql.Literal(t.split(".", 1)[0]), sql.Literal(t.split(".", 1)[1])
+            )
+            for t in tables
+        )
+        queries["columns"] = db.render(sql.SQL(COLUMNS).format(where))
+    rows = redshift.fetch(db, queries)
+
+    allowed = rows["can_manage"]
     if not (allowed and allowed[0][0]):
         raise MaskingError(
             "masking: this user can't see masking policies (Redshift shows them to "
             "superusers and the sys:secadmin role only), so it can't plan them"
         )
-    for name, inputs, expression in db.rows(POLICIES):
+    for name, inputs, expression in rows["policies"]:
         state.mask_policies[name] = _policy(name, inputs, expression)
-    for policy, schema, table, grantee, gtype, priority, inputs, outputs in db.rows(
-        ATTACHED
-    ):
+    for policy, schema, table, grantee, gtype, priority, inputs, outputs in rows[
+        "attached"
+    ]:
         state.attachments.add(
             Attachment(
                 policy=policy,
@@ -121,17 +135,7 @@ def read(db: Connection, spec: Spec, state: State) -> None:
                 priority=int(priority),
             )
         )
-    tables = sorted({c.rsplit(".", 1)[0] for c in spec.masking.columns})
-    if not tables:
-        return
-    where = sql.SQL(" or ").join(
-        sql.SQL("(n.nspname = {} and c.relname = {})").format(
-            sql.Literal(t.split(".", 1)[0]), sql.Literal(t.split(".", 1)[1])
-        )
-        for t in tables
-    )
-    query = db.render(sql.SQL(COLUMNS).format(where))
-    for schema, table, column, type_name in db.rows(query):
+    for schema, table, column, type_name in rows.get("columns", []):
         state.column_types[f"{schema}.{table}.{column}"] = type_name
 
 

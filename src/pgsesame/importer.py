@@ -133,6 +133,14 @@ def build(
                 "not a type pgsesame manages; left out"
             )
             continue
+        # a privilege the spec can't name (Redshift's P in a default ACL, say):
+        # noted and left out, as for grants, so the spec stays valid
+        if d.privilege not in PRIVILEGES[engine].get(d.object_type, ()):
+            notes.append(
+                f"{d.grantee}: default {d.privilege.upper()} on {d.object_type} from "
+                f"{d.owner} isn't a privilege pgsesame manages; left out"
+            )
+            continue
         defaults[(d.owner, d.schema, d.grantee)][d.object_type].add(d.privilege)
     default_privileges = []
     for (owner, schema, grantee), kinds in sorted(defaults.items()):

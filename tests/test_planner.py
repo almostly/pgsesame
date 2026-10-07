@@ -645,3 +645,33 @@ def test_an_object_has_one_owner_and_must_exist():
                 "principals": {"r": {"type": "role", "owns": {"schemas": ["a"]}}},
             }
         )
+
+
+def test_a_default_privilege_pgsesame_doesnt_model_is_noted_not_revoked():
+    from pgsesame.state import DefaultGrant
+
+    # Redshift's default ACLs can carry letters past the SQL privileges (a P)
+    odd = DefaultGrant("etl", "s", "tables", "reader", "p")
+    plan = planner.make(_defaults_spec(), _defaults_state(odd))
+    assert [type(op).__name__ for op in plan.operations] == ["GrantDefault"]
+    assert any("P on tables etl creates" in n for n in plan.notes)
+
+
+def test_import_leaves_out_a_default_privilege_the_spec_cant_name():
+    from pgsesame import importer
+    from pgsesame.state import DefaultGrant
+
+    state = _state(
+        Role("etl", True, False, "user"),
+        Role("reader", False, False, "role"),
+        default_privileges={
+            DefaultGrant("etl", "s", "tables", "reader", "select"),
+            DefaultGrant("etl", "s", "tables", "reader", "p"),
+        },
+    )
+    written, notes = importer.build(state, "redshift")
+    assert written["default_privileges"] == [
+        {"owner": "etl", "schema": "s", "grantee": "reader", "tables": ["select"]}
+    ]
+    assert any("default P on tables from etl" in n for n in notes)
+    spec.parse(written)  # what import writes, the spec accepts
