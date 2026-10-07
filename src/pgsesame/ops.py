@@ -31,6 +31,7 @@ _ON = {
     "tables": sql.SQL("TABLE"),
     "views": sql.SQL("TABLE"),
     "sequences": sql.SQL("SEQUENCE"),
+    "columns": sql.SQL("TABLE"),
 }
 _PRIVILEGE = {
     "alter": sql.SQL("ALTER"),
@@ -56,12 +57,24 @@ assert set(_PRIVILEGE) >= set().union(
 
 
 def _object(object_type: str, name: str) -> sql.Composed:
+    if object_type == "columns":  # the table a column grant is ON
+        name = name.rsplit(".", 1)[0]
     parts = (
         name.split(".", 1)
-        if object_type in ("tables", "views", "sequences")
+        if object_type in ("tables", "views", "sequences", "columns")
         else [name]
     )
     return sql.SQL("{} {}").format(_ON[object_type], sql.Identifier(*parts))
+
+
+def _privilege_on(privilege: str, object_type: str, name: str) -> sql.Composed:
+    """Return ``SELECT ON TABLE s.t``, or for a column ``SELECT (c) ON TABLE s.t``."""
+    if object_type == "columns":
+        column = sql.Identifier(name.rsplit(".", 1)[1])
+        return sql.SQL("{} ({}) ON {}").format(
+            _privilege(privilege), column, _object(object_type, name)
+        )
+    return sql.SQL("{} ON {}").format(_privilege(privilege), _object(object_type, name))
 
 
 def _privilege(privilege: str) -> sql.SQL:
@@ -222,9 +235,8 @@ class Grant(Operation):
 
     def statement(self) -> sql.Composed:
         """Return GRANT privilege ON object TO grantee."""
-        return sql.SQL("GRANT {} ON {} TO {}").format(
-            _privilege(self.privilege),
-            _object(self.object_type, self.object_name),
+        return sql.SQL("GRANT {} TO {}").format(
+            _privilege_on(self.privilege, self.object_type, self.object_name),
             _grantee(self.grantee, self.grantee_identity),
         )
 
@@ -244,9 +256,8 @@ class Revoke(Operation):
 
     def statement(self) -> sql.Composed:
         """Return REVOKE privilege ON object FROM grantee."""
-        return sql.SQL("REVOKE {} ON {} FROM {}").format(
-            _privilege(self.privilege),
-            _object(self.object_type, self.object_name),
+        return sql.SQL("REVOKE {} FROM {}").format(
+            _privilege_on(self.privilege, self.object_type, self.object_name),
             _grantee(self.grantee, self.grantee_identity),
         )
 

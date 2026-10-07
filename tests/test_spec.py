@@ -122,7 +122,7 @@ def test_default_privileges_name_real_privileges():
     [
         ({"type": "user", "password_env": "ALICE PW"}, "principals.u.password_env"),
         (
-            {"type": "role", "privileges": {"tables": {"select": ["a.b.c"]}}},
+            {"type": "role", "privileges": {"tables": {"select": ["a.b.c.d"]}}},
             "principals.u.privileges.tables.select.0",
         ),
         (
@@ -206,3 +206,42 @@ def test_a_masking_type_is_a_type_not_sql():
         masking={"policies": {"p": {"type": "int); drop table x; --", "using": "1"}}},
     )
     assert problems[0].startswith("masking.policies.p.type: string should match")
+
+
+def test_column_privileges_name_columns():
+    problems = _problems(
+        principals={
+            "u": {
+                "type": "role",
+                "owns": {"columns": ["s.t.c"]},
+                "privileges": {
+                    "columns": {
+                        "select": ["s.t", "s.*", "s.t.c"],
+                        "truncate": ["s.t.c"],
+                    },
+                    "tables": {"select": ["s.t.c"]},
+                },
+            }
+        }
+    )
+    assert problems == [
+        "principals.u.owns.columns: a column is owned with its table",
+        "principals.u: s.t: a column is schema.table.column",
+        "principals.u: s.*: a column is schema.table.column",
+        "principals.u: s.t.c: three parts name a column (use columns)",
+        "principals.u.privileges.columns.truncate: not a postgres privilege on columns "
+        "(insert, references, select, update)",
+    ]
+
+
+def test_redshift_grants_select_and_update_on_columns():
+    problems = _problems(
+        engine="redshift",
+        principals={
+            "u": {"type": "role", "privileges": {"columns": {"insert": ["s.t.c"]}}}
+        },
+    )
+    assert problems == [
+        "principals.u.privileges.columns.insert: not a redshift privilege on columns "
+        "(select, update)"
+    ]

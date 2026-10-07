@@ -372,3 +372,49 @@ def test_row_level_security(dsn, tmp_path):
         conn.execute("CREATE POLICY sneaky ON analytics.notes FOR SELECT USING (true)")
     code, out = _sesame("plan", replaced, "--dsn", dsn)
     assert '- DROP POLICY "sneaky" ON "analytics"."notes"' in out, out
+
+
+COLUMNS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}support:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+      columns:
+        select: [analytics.people.id, analytics.people.name]
+        update: [analytics.people.name]
+"""
+
+
+def test_column_privileges(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE analytics.people (id int, name text, ssn text)")
+        conn.execute("INSERT INTO analytics.people VALUES (1, 'ann', '123')")
+    spec = _spec(tmp_path, COLUMNS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'+ GRANT SELECT ("name") ON TABLE "analytics"."people" TO "{P}support"' in out
+    )
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"SET ROLE {P}support")
+        assert conn.execute("SELECT id, name FROM analytics.people").fetchall() == [
+            (1, "ann")
+        ]
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT ssn FROM analytics.people")
+        conn.execute("RESET ROLE")
+        # a column grant made by hand is drift, revoked only when allowed
+        conn.execute(f"GRANT SELECT (ssn) ON analytics.people TO {P}support")
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert (
+        f'- REVOKE SELECT ("ssn") ON TABLE "analytics"."people" FROM "{P}support"'
+        in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0

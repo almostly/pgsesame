@@ -32,7 +32,7 @@ from pgsesame.spec import PRIVILEGES, Spec
 from pgsesame.state import Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
-PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences")
+PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences", "columns")
 
 
 class PlanError(Exception):

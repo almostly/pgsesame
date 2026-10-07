@@ -22,9 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 Engine = Literal["postgres", "redshift"]
 ObjectType = Literal[
-    "databases", "schemas", "tables", "views", "sequences", "functions"
+    "databases", "schemas", "tables", "views", "sequences", "functions", "columns"
 ]
 OBJECT_TYPES: tuple[str, ...] = get_args(ObjectType)
+# the types a default privilege can cover (a column is never created on its own)
+DEFAULT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functions")
 
 # Parse at the edge: a spec that gets past these types holds only well-formed
 # names, so nothing past the loader has to check them again.
@@ -36,9 +38,11 @@ Identifier = Annotated[
 ]
 # an environment variable name, as a shell accepts it
 EnvVar = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
-# an object: name, schema.name, or schema.* (every object of the type in schema)
+# an object: name, schema.name, schema.* (every object of the type in schema), or
+# for columns schema.table.column (which parts a type takes is checked per type)
 ObjectPattern = Annotated[
-    str, StringConstraints(pattern=r"^[^.\x00]+(\.([^.\x00]+|\*))?$")
+    str,
+    StringConstraints(pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"),
 ]
 # every privilege name any engine knows; which apply to which engine and object
 # type is the second pass's job
@@ -71,6 +75,7 @@ _COMMON = {
     "views": {"select"},
     "sequences": {"usage", "select", "update"},
     "functions": {"execute"},
+    "columns": {"select", "insert", "update", "references"},
 }
 PRIVILEGES: dict[str, dict[str, set[str]]] = {
     # MAINTAIN (VACUUM, ANALYZE, REFRESH ...) exists from PostgreSQL 17 on
@@ -80,6 +85,7 @@ PRIVILEGES: dict[str, dict[str, set[str]]] = {
         "schemas": _COMMON["schemas"] | {"alter", "drop"},
         "tables": _COMMON["tables"] | {"alter", "drop"},
         "views": _COMMON["views"] | {"alter", "drop"},
+        "columns": {"select", "update"},
     },
 }
 
@@ -147,7 +153,7 @@ class DefaultPrivilege(_Model):
         """Return object type -> privileges, for the types this rule covers."""
         return {
             kind: sorted(names)
-            for kind in OBJECT_TYPES
+            for kind in DEFAULT_TYPES
             if (names := getattr(self, kind)) is not None
         }
 
@@ -321,6 +327,25 @@ def _check(spec: Spec) -> list[str]:
             problems.append(
                 f"{where}.login: on Redshift a user always logs in and a role never does"
             )
+        if "columns" in p.owns:
+            problems.append(f"{where}.owns.columns: a column is owned with its table")
+        for kind, patterns in [
+            *p.owns.items(),
+            *(
+                (kind, [x for names in grants.values() for x in names])
+                for kind, grants in p.privileges.items()
+            ),
+        ]:
+            for pattern in patterns:
+                parts = pattern.split(".")
+                if kind == "columns" and (len(parts) != 3 or "*" in parts):
+                    problems.append(
+                        f"{where}: {pattern}: a column is schema.table.column"
+                    )
+                elif kind != "columns" and len(parts) > 2:
+                    problems.append(
+                        f"{where}: {pattern}: three parts name a column (use columns)"
+                    )
         for kind, grants in p.privileges.items():
             allowed = PRIVILEGES[spec.engine][kind]
             for privilege in grants:

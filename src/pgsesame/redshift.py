@@ -46,6 +46,15 @@ select identity_name, identity_type, namespace_name, relation_name,
        lower(privilege_type)
 from svv_relation_privileges
 """
+COLUMNS = (
+    "select table_schema, table_name, column_name from svv_columns where "
+    + _USER_SCHEMA.format(col="table_schema")
+)
+COLUMN_PRIVILEGES = """
+select identity_name, identity_type, namespace_name, relation_name, column_name,
+       lower(privilege_type)
+from svv_column_privileges
+"""
 
 
 def _int_array(value: Any) -> list[int]:
@@ -97,4 +106,7 @@ def read(db: Connection) -> State:
     for grantee, identity, schema, relation, priv in db.rows(RELATION_PRIVILEGES):
         full = f"{schema}.{relation}"
         privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
+    state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in db.rows(COLUMNS)}
+    for grantee, identity, schema, relation, column, priv in db.rows(COLUMN_PRIVILEGES):
+        privilege(grantee, identity, "columns", f"{schema}.{relation}.{column}", priv)
     return state
