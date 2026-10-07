@@ -71,7 +71,7 @@ def test_a_password_goes_to_the_keychain_never_the_file(keychain):
 
     targets.remove("prod")
     assert ("pgsesame", "prod") not in keychain.items
-    with pytest.raises(targets.TargetError, match="saved: staging"):
+    with pytest.raises(targets.TargetError, match="known: staging"):
         targets.get("prod")
 
 
@@ -111,7 +111,9 @@ def test_login_then_plan_by_name(keychain, tmp_path):
     code, out = _sesame(*args, input=password + "\n")
     assert code == 0, out
     assert (
-        "✓ connected as" in out and "saved local; password kept in the keychain" in out
+        "✓ connected as" in out
+        and "saved local in" in out
+        and "password from the keychain" in out
     )
     assert password not in (targets.config_dir() / "targets.toml").read_text()
 
@@ -147,3 +149,70 @@ def test_plan_names_an_unknown_target(keychain, tmp_path):
     spec.write_text("version: 1\nengine: postgres\nprincipals: {}\n")
     code, out = _sesame("plan", str(spec), "--target", "nope")
     assert code == 1 and "no target named 'nope'" in out, out
+
+
+def test_a_project_target_takes_its_password_from_the_environment(
+    keychain, tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "specs").mkdir()
+    monkeypatch.chdir(repo / "specs")  # found by walking up to the repository root
+    assert targets.project_file() is None
+    target = targets.Target(host="db.example", user="admin", password_env="APP_DB_PW")
+    with pytest.raises(targets.TargetError, match="--password-env"):
+        targets.save("ci", target, SecretStr("typed"), False, project=True)
+    path = targets.save("ci", target, None, False, project=True)
+    assert path == repo / "specs" / "sesame.toml"
+    assert 'password_env = "APP_DB_PW"' in path.read_text()
+
+    monkeypatch.chdir(repo)
+    path.rename(repo / "sesame.toml")
+    assert targets.origin("ci") == "sesame.toml"
+    assert targets.default_name() == "ci"  # the project's default
+    monkeypatch.delenv("APP_DB_PW", raising=False)
+    with pytest.raises(targets.TargetError, match="APP_DB_PW is not set"):
+        targets.password("ci", targets.get("ci"))
+    monkeypatch.setenv("APP_DB_PW", "from-env")
+    secret = targets.password("ci", targets.get("ci"))
+    assert secret is not None and secret.get_secret_value() == "from-env"
+
+    targets.save("ci", targets.Target(host="mine", user="me"), None, False)
+    assert targets.get("ci").host == "db.example"  # the project's wins over yours
+    with pytest.raises(targets.TargetError, match="edit or remove it there"):
+        targets.remove("ci")
+    targets.use("ci")
+    assert keychain.items == {}  # nothing went to the keychain
+
+
+def test_tool_sesame_in_pyproject(keychain, tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\n\n'
+        '[tool.sesame]\ndefault = "staging"\n\n'
+        '[tool.sesame.targets.staging]\nhost = "db.staging"\nuser = "admin"\n'
+        'password_env = "STAGING_PW"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    assert targets.project_file() == tmp_path / "pyproject.toml"
+    assert targets.default_name() == "staging"
+    assert targets.get("staging").password_source() == "password from $STAGING_PW"
+    (tmp_path / "sesame.toml").write_text('[targets.other]\nhost = "h"\n')
+    assert targets.project_file() == tmp_path / "sesame.toml"  # sesame.toml first
+
+
+@needs_postgres
+def test_login_with_password_env_then_plan(keychain, tmp_path, monkeypatch):
+    args, password = _login_args("envpw")
+    args = [a for a in args if a != "--password-stdin"] + ["--password-env", "PW_T"]
+    monkeypatch.chdir(tmp_path)
+    code, out = _sesame(*args, env={"PW_T": password})
+    assert code == 0 and "password from $PW_T" in out, out
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: postgres\nprincipals: {}\n")
+    code, out = _sesame("plan", str(spec), "-t", "envpw", env={"PW_T": password})
+    assert code == 0 and "password from $PW_T)" in out, out
+    monkeypatch.delenv("PW_T", raising=False)
+    code, out = _sesame("plan", str(spec), "-t", "envpw")
+    assert code == 1 and "PW_T is not set" in out, out
+    assert keychain.items == {}

@@ -199,11 +199,7 @@ def _from_target(
         from pgsesame.aws import iam_database
 
         return iam_database(target.database, target.cluster, target.workgroup)
-    secret = password or (targets.password(name) if target.has_password else None)
-    if target.has_password and secret is None:
-        raise targets.TargetError(
-            f"the keychain has no password for {name!r}; run sesame login {name} again"
-        )
+    secret = password or targets.password(name, target)
     dsn = make_conninfo(
         host=target.host,
         port=target.port,
@@ -250,8 +246,11 @@ TargetOption = typer.Option(
 
 
 def _where(options: ConnectOptions, db: Connection) -> str:
-    """Return the header's target: the saved name, then where it connects."""
-    return f"{options.label} ({db.target})" if options.label else db.target
+    """Return the header's target: its name, where it connects, the password's source."""
+    if not options.label:
+        return db.target
+    source = targets.get(options.label).password_source()
+    return f"{options.label} ({db.target}, {source})"
 
 
 def _connect(target: ConnectOptions) -> Connection:
@@ -474,6 +473,17 @@ def login(
     password_stdin: bool = typer.Option(
         False, "--password-stdin", help="Read the password from stdin (scripts)."
     ),
+    password_env: str | None = typer.Option(
+        None,
+        "--password-env",
+        help="Take the password from this environment variable when connecting "
+        "(.env, CI); nothing is stored.",
+    ),
+    project: bool = typer.Option(
+        False,
+        "--project",
+        help="Save to the project's sesame.toml, to commit (with --password-env).",
+    ),
     make_default: bool = typer.Option(
         False, "--default", help="Make it the default target."
     ),
@@ -497,6 +507,11 @@ def login(
         )
         raise typer.Exit(1)
     interactive = sys.stdin.isatty() and not password_stdin
+    if password_env and password_stdin:
+        err.print(
+            "[error]✗[/error] choose --password-env or --password-stdin, not both"
+        )
+        raise typer.Exit(1)
     secret: SecretStr | None = None
     if method == "password":
         host = host or _ask("Host", interactive)
@@ -505,9 +520,11 @@ def login(
             _ask("Database", interactive, "postgres" if engine == "postgres" else "dev")
         )
         port = port or (5439 if engine == "redshift" else 5432)
-        if password_stdin:
+        if password_env:
+            pass  # read from the environment when connecting, never stored
+        elif password_stdin:
             secret = SecretStr(sys.stdin.readline().rstrip("\n"))
-        elif interactive:
+        elif interactive and not project:
             typed = typer.prompt(
                 "Password (empty for none)",
                 hide_input=True,
@@ -534,17 +551,20 @@ def login(
         secret_arn=secret_arn,
         db_user=db_user,
         region=region,
+        password_env=password_env,
     )
     header("login", name)
     if check:
         _check_target(target, name, secret)
     try:
-        targets.save(name, target, secret, make_default)
+        path = targets.save(name, target, secret, make_default, project=project)
     except targets.TargetError as e:
         err.print(f"[error]✗[/error] {e}")
         raise typer.Exit(1) from None
-    where = "the keychain" if secret is not None else "nowhere (no password)"
-    console.print(f"[ok]✓[/ok] saved [accent]{name}[/accent]; password kept in {where}")
+    saved = target.model_copy(update={"has_password": secret is not None})
+    console.print(
+        f"[ok]✓[/ok] saved [accent]{name}[/accent] in {path}; {saved.password_source()}"
+    )
     if targets.default_name() == name:
         console.print(
             f"[muted]{name} is the default: sesame plan spec.yaml uses it[/muted]"
@@ -609,15 +629,17 @@ def list_targets() -> None:
     """List the saved targets."""
     saved = targets.all_targets()
     default = targets.default_name()
-    header("targets", str(targets.config_dir() / "targets.toml"))
+    project = targets.project_file()
+    personal = targets.config_dir() / "targets.toml"
+    header("targets", f"{project} + {personal}" if project else str(personal))
     if not saved:
         console.print("[muted]none yet: sesame login <name>[/muted]")
         return
     for name, target in sorted(saved.items()):
         mark = "[accent]*[/accent]" if name == default else " "
-        secret = "keychain" if target.has_password else "no password"
         console.print(
-            f"{mark} [accent]{name}[/accent]  {target.engine}  {target.describe()}  [muted]{target.method}, {secret}[/muted]"
+            f"{mark} [accent]{name}[/accent]  {target.engine}  {target.describe()}  "
+            f"[muted]{target.password_source()}, {targets.origin(name)}[/muted]"
         )
 
 
