@@ -179,6 +179,22 @@ def make(
     if problems:
         raise PlanError(problems)
 
+    # manage.prefixes: undeclared roles named so are managed as if declared with
+    # nothing, so what they hold is drift (revoked only with --allow-revoke);
+    # never dropped, and never a superuser or a platform's system role
+    for name, role in sorted(current.roles.items()):
+        if (
+            name not in spec.principals
+            and any(name.startswith(prefix) for prefix in spec.manage.prefixes)
+            and not role.superuser
+            and not _system_role(name)
+        ):
+            managed.add(name)
+            plan.notes.append(
+                f"{name}: not in the spec, managed by manage.prefixes; what it holds "
+                "is revoked with --allow-revoke"
+            )
+
     # a built-in role's own memberships are the platform's: never managed
     members = managed - builtins
     want_members = {m for m in want_members if m.member in members}
@@ -224,7 +240,8 @@ def make(
     have_privileges = {
         p
         for p in held - unknown
-        if p.grantee not in scope or _in_scope(p, scope[p.grantee])
+        if (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
+        and _in_managed_schemas(p, spec)
     }
     want_privileges = {p for p in want_privileges if p.grantee in managed}
     for p in sorted(want_privileges - have_privileges):
@@ -248,7 +265,9 @@ def make(
             )
         )
 
-    plan.operations += _plan_defaults(spec, current, identity, problems)
+    plan.operations += _plan_defaults(
+        spec, current, identity, problems, managed - builtins
+    )
     plan.operations += _plan_rls(spec, current, normalized or {}, problems)
     if spec.masking is not None:
         plan.operations += masking.plan(
@@ -391,7 +410,7 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
 
 
 def _plan_defaults(
-    spec: Spec, current: State, identity, problems: list[str]
+    spec: Spec, current: State, identity, problems: list[str], managed: set[str]
 ) -> list[Operation]:
     """Plan default privileges: what the spec's principals get on future objects.
 
@@ -413,8 +432,12 @@ def _plan_defaults(
                         rule.owner, rule.in_schema or "", kind, rule.grantee, spelt
                     )
                 )
-    managed = {name for name, p in spec.principals.items() if p.type != "builtin"}
-    have = {d for d in current.default_privileges if d.grantee in managed}
+    schemas = set(spec.manage.schemas)
+    have = {
+        d
+        for d in current.default_privileges
+        if d.grantee in managed and (not schemas or d.schema in schemas)
+    }
     have = {
         d
         for d in have
@@ -424,7 +447,7 @@ def _plan_defaults(
     def op(cls, d: DefaultGrant) -> Operation:
         return cls(
             owner=d.owner,
-            schema=d.schema,
+            in_schema=d.schema,
             object_type=d.object_type,
             privilege=d.privilege,
             grantee=d.grantee,
@@ -435,3 +458,21 @@ def _plan_defaults(
     return [op(GrantDefault, d) for d in sorted(want - have)] + [
         op(RevokeDefault, d) for d in sorted(have - want)
     ]
+
+
+def _system_role(name: str) -> bool:
+    """Return whether a role is the platform's own (never adopted by prefix)."""
+    return name.startswith(
+        ("pg_", "rds", "sys:", "cloudsql", "alloydb", "supabase")
+    ) or name in ("postgres", "PUBLIC")
+
+
+def _in_managed_schemas(p: Privilege, spec: Spec) -> bool:
+    """Return whether manage.schemas (if any) covers the privilege's object."""
+    schemas = spec.manage.schemas
+    if not schemas or p.object_type == "databases":
+        return True
+    schema = (
+        p.object_name if p.object_type == "schemas" else p.object_name.split(".", 1)[0]
+    )
+    return schema in schemas

@@ -242,6 +242,19 @@ class Masking(_Model):
     columns: dict[ColumnName, MaskedColumn] = Field(default_factory=dict)
 
 
+class Manage(_Model):
+    """What else the spec takes charge of, or how far it reaches, for adoption."""
+
+    schemas: list[Identifier] = Field(
+        default_factory=list,
+        description="Compare grants only on objects in these schemas; others aren't drift.",
+    )
+    prefixes: list[Identifier] = Field(
+        default_factory=list,
+        description="Also manage undeclared roles named so: their grants become drift.",
+    )
+
+
 class Spec(_Model):
     """A whole spec: the engine, the principals and default-privilege rules."""
 
@@ -253,6 +266,7 @@ class Spec(_Model):
         default_factory=dict, description="Tables whose row-level security is managed."
     )
     masking: Masking | None = Field(None, description="Redshift dynamic data masking.")
+    manage: Manage = Field(default_factory=Manage, description="Adoption scope.")
 
 
 def load(path: str | Path) -> Spec:
@@ -403,6 +417,7 @@ def _check(spec: Spec) -> list[str]:
                     )
     problems += _check_rls(spec)
     problems += _check_masking(spec)
+    problems += _check_manage(spec)
     return problems
 
 
@@ -483,5 +498,33 @@ def _check_masking(spec: Spec) -> list[str]:
         if both:
             problems.append(
                 f"{where}: {', '.join(both)} can't be both unmasked and masked"
+            )
+    return problems
+
+
+def _check_manage(spec: Spec) -> list[str]:
+    """With manage.schemas, the spec grants nothing outside those schemas."""
+    schemas = set(spec.manage.schemas)
+    if not schemas:
+        return []
+    problems: list[str] = []
+    for name, p in spec.principals.items():
+        for kind, grants in p.privileges.items():
+            if kind == "databases":
+                continue
+            for patterns in grants.values():
+                for pattern in patterns:
+                    schema = pattern if kind == "schemas" else pattern.split(".", 1)[0]
+                    if schema not in schemas:
+                        problems.append(
+                            f"principals.{name}.privileges.{kind}: {pattern} is outside "
+                            f"manage.schemas ({', '.join(sorted(schemas))})"
+                        )
+    for i, rule in enumerate(spec.default_privileges):
+        if rule.in_schema not in schemas:
+            where = rule.in_schema or "every schema"
+            problems.append(
+                f"default_privileges[{i}]: {where} is outside manage.schemas "
+                f"({', '.join(sorted(schemas))})"
             )
     return problems

@@ -14,6 +14,7 @@ from pgsesame.ops import (
     Grant,
     ReattachMaskingPolicy,
     RemoveMember,
+    Revoke,
 )
 from pgsesame.state import (
     Attachment,
@@ -464,3 +465,109 @@ def test_an_owner_that_does_not_exist_stops_the_plan():
             ),
             _defaults_state(),
         )
+
+
+# ---------------------------------------------------------------------------
+# manage: schemas and prefixes
+# ---------------------------------------------------------------------------
+def _held(*privileges, roles=("reader",), extra_roles=()):
+    state = _state(
+        *[Role(r, False) for r in (*roles, *extra_roles)],
+        objects={
+            "schemas": {"collections", "risk"},
+            "tables": {"collections.t", "risk.t"},
+        },
+    )
+    state.privileges = set(privileges)
+    return state
+
+
+def test_manage_schemas_leaves_grants_elsewhere_alone():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "manage": {"schemas": ["collections"]},
+            "principals": {
+                "reader": {
+                    "type": "role",
+                    "privileges": {"tables": {"select": ["collections.t"]}},
+                }
+            },
+        }
+    )
+    state = _held(
+        Privilege("reader", "tables", "risk.t", "select"),  # outside: not drift
+        Privilege("reader", "tables", "collections.t", "insert"),  # inside: drift
+    )
+    ops = planner.make(loaded, state).operations
+    assert ops == [
+        Grant(
+            grantee="reader",
+            object_type="tables",
+            object_name="collections.t",
+            privilege="select",
+        ),
+        Revoke(
+            grantee="reader",
+            object_type="tables",
+            object_name="collections.t",
+            privilege="insert",
+        ),
+    ]
+
+
+def test_manage_schemas_refuses_a_grant_outside_them():
+    with pytest.raises(spec.SpecError) as e:
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "postgres",
+                "manage": {"schemas": ["collections"]},
+                "principals": {
+                    "reader": {
+                        "type": "role",
+                        "privileges": {"tables": {"select": ["risk.t"]}},
+                    }
+                },
+                "default_privileges": [
+                    {"owner": "etl", "grantee": "reader", "tables": ["select"]}
+                ],
+            }
+        )
+    assert e.value.problems == [
+        "principals.reader.privileges.tables: risk.t is outside manage.schemas (collections)",
+        "default_privileges[0]: every schema is outside manage.schemas (collections)",
+    ]
+
+
+def test_manage_prefixes_adopts_undeclared_roles_but_never_drops_them():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "manage": {"prefixes": ["svc_"]},
+            "principals": {"reader": {"type": "role"}},
+        }
+    )
+    state = _held(
+        Privilege("svc_old", "tables", "risk.t", "select"),
+        Privilege("other", "tables", "risk.t", "select"),
+        roles=("reader",),
+        extra_roles=("svc_old", "other"),
+    )
+    state.roles["svc_admin"] = Role("svc_admin", True, superuser=True)
+    state.memberships = {Membership("svc_old", "reader")}
+    plan = planner.make(loaded, state)
+    assert [
+        (type(op).__name__, getattr(op, "grantee", getattr(op, "member", "")))
+        for op in plan.operations
+    ] == [
+        ("Revoke", "svc_old"),
+        ("RemoveMember", "svc_old"),
+    ]
+    assert all(op.needs == "revoke" for op in plan.operations)
+    assert any(
+        "svc_old: not in the spec, managed by manage.prefixes" in n for n in plan.notes
+    )
+    assert not any("svc_admin" in n for n in plan.notes)  # a superuser: never adopted
