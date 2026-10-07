@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from pgsesame.db import Connection
-from pgsesame.state import Membership, Privilege, Role, State
+from pgsesame.state import DefaultGrant, Membership, Privilege, Role, State
 
 USERS = "select usesysid, usename, usesuper from pg_user"
 # pg_catalog.pg_group, qualified: on redshift-local the proxy then leaves out
@@ -50,6 +50,16 @@ COLUMNS = (
     "select table_schema, table_name, column_name from svv_columns where "
     + _USER_SCHEMA.format(col="table_schema")
 )
+DEFAULT_PRIVILEGES = """
+select owner_name, coalesce(schema_name, ''), object_type, grantee_name, grantee_type,
+       lower(privilege_type)
+from svv_default_privileges
+"""
+_DEFAULT_TYPES = {
+    "RELATION": "tables",
+    "FUNCTION": "functions",
+    "PROCEDURE": "procedures",
+}
 COLUMN_PRIVILEGES = """
 select identity_name, identity_type, namespace_name, relation_name, column_name,
        lower(privilege_type)
@@ -106,6 +116,13 @@ def read(db: Connection) -> State:
     for grantee, identity, schema, relation, priv in db.rows(RELATION_PRIVILEGES):
         full = f"{schema}.{relation}"
         privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
+    for owner, schema, kind, grantee, gtype, priv in db.rows(DEFAULT_PRIVILEGES):
+        if gtype != "public":  # PUBLIC isn't managed yet
+            state.default_privileges.add(
+                DefaultGrant(
+                    owner, schema, _DEFAULT_TYPES.get(kind, kind.lower()), grantee, priv
+                )
+            )
     state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in db.rows(COLUMNS)}
     for grantee, identity, schema, relation, column, priv in db.rows(COLUMN_PRIVILEGES):
         privilege(grantee, identity, "columns", f"{schema}.{relation}.{column}", priv)

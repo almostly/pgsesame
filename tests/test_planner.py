@@ -56,8 +56,12 @@ def test_parts_not_planned_yet_are_noted_not_dropped_silently():
     assert (
         "fn: privileges on functions are planned from a later milestone" in plan.notes
     )
-    assert "default privileges are planned from a later milestone" in plan.notes
-    assert all(isinstance(op, CreateRole) for op in plan.operations)  # nothing else
+    # the default privilege is planned, for an owner the same plan creates
+    assert [type(op).__name__ for op in plan.operations] == [
+        "CreateRole",
+        "CreateRole",
+        "GrantDefault",
+    ]
 
 
 def test_a_superuser_in_the_spec_is_left_alone():
@@ -383,3 +387,80 @@ def test_policies_outside_the_spec_are_left_alone():
     plan = planner.make(_masking_spec(), state, masks={})
     assert "masking: policy someone_elses isn't in the spec; left alone" in plan.notes
     assert plan.operations == [DropMaskingPolicy(name="sesame_unmasked_int")]
+
+
+# ---------------------------------------------------------------------------
+# Default privileges
+# ---------------------------------------------------------------------------
+def _defaults_spec(engine="postgres", rules=None):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": engine,
+            "principals": {"reader": {"type": "role"}},
+            "default_privileges": rules
+            or [
+                {
+                    "owner": "etl",
+                    "schema": "s",
+                    "grantee": "reader",
+                    "tables": ["select"],
+                }
+            ],
+        }
+    )
+
+
+def _defaults_state(*grants, engine="pg"):
+    roles = [
+        Role("etl", True, False, engine),
+        Role("reader", False, False, "role" if engine != "pg" else "pg"),
+    ]
+    return _state(*roles, default_privileges=set(grants))
+
+
+def test_a_default_privilege_is_granted_for_an_owner_outside_the_spec():
+    from pgsesame.ops import GrantDefault
+
+    plan = planner.make(_defaults_spec(), _defaults_state())
+    (op,) = plan.operations
+    assert isinstance(op, GrantDefault)
+    assert op.statement().as_string(None) == (
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "etl" IN SCHEMA "s" GRANT SELECT ON TABLES TO "reader"'
+    )
+
+
+def test_redshift_names_the_owner_as_a_user_and_the_grantee_by_kind():
+    from pgsesame.state import DefaultGrant
+
+    plan = planner.make(
+        _defaults_spec(
+            "redshift", [{"owner": "etl", "grantee": "reader", "tables": ["select"]}]
+        ),
+        _defaults_state(
+            DefaultGrant("etl", "", "tables", "reader", "insert"), engine="user"
+        ),
+    )
+    assert [op.statement().as_string(None) for op in plan.operations] == [
+        'ALTER DEFAULT PRIVILEGES FOR USER "etl" GRANT SELECT ON TABLES TO ROLE "reader"',
+        'ALTER DEFAULT PRIVILEGES FOR USER "etl" REVOKE INSERT ON TABLES FROM ROLE "reader"',
+    ]
+    assert plan.operations[1].needs == "revoke"
+
+
+def test_default_privileges_of_other_grantees_are_left_alone():
+    from pgsesame.state import DefaultGrant
+
+    other = DefaultGrant("etl", "s", "tables", "someone_else", "select")
+    mine = DefaultGrant("etl", "s", "tables", "reader", "select")
+    assert planner.make(_defaults_spec(), _defaults_state(other, mine)).operations == []
+
+
+def test_an_owner_that_does_not_exist_stops_the_plan():
+    with pytest.raises(planner.PlanError, match="owner: ghost does not exist"):
+        planner.make(
+            _defaults_spec(
+                rules=[{"owner": "ghost", "grantee": "reader", "tables": ["select"]}]
+            ),
+            _defaults_state(),
+        )

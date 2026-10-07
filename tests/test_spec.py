@@ -257,3 +257,33 @@ def test_a_policy_for_public_names_no_other_role():
     assert problems == [
         "row_level_security.s.t.policies.p.to: public covers every role; list it alone"
     ]
+
+
+def test_default_privileges_take_the_types_each_engine_has():
+    problems = _problems(
+        engine="redshift",
+        principals={"r": {"type": "role"}},
+        default_privileges=[
+            {
+                "owner": "etl",
+                "grantee": "r",
+                "sequences": ["usage"],
+                "tables": ["select"],
+            },
+            {"owner": "etl", "grantee": "nobody", "tables": ["select"]},
+        ],
+    )
+    assert problems == [
+        "default_privileges[0].sequences: redshift has no default privileges on sequences "
+        "(tables, functions)",
+        "default_privileges[1].grantee: nobody is not declared",
+    ]
+    problems = _problems(
+        principals={"r": {"type": "role"}},
+        default_privileges=[
+            {"owner": "etl", "schema": "s", "grantee": "r", "schemas": ["usage"]}
+        ],
+    )
+    assert problems == [
+        "default_privileges[0].schemas: default privileges on schemas take no schema"
+    ]

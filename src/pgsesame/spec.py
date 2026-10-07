@@ -27,6 +27,11 @@ ObjectType = Literal[
 OBJECT_TYPES: tuple[str, ...] = get_args(ObjectType)
 # the types a default privilege can cover (a column is never created on its own)
 DEFAULT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functions")
+# ... and the ones each engine's ALTER DEFAULT PRIVILEGES takes (views are tables)
+DEFAULT_PRIVILEGE_TYPES = {
+    "postgres": ("tables", "sequences", "functions", "schemas"),
+    "redshift": ("tables", "functions"),
+}
 
 # Parse at the edge: a spec that gets past these types holds only well-formed
 # names, so nothing past the loader has to check them again.
@@ -366,13 +371,29 @@ def _check(spec: Spec) -> list[str]:
                 problems.append(f"{where}.groups: {group} is not a declared group")
     for i, rule in enumerate(spec.default_privileges):
         where = f"default_privileges[{i}]"
-        for key in ("owner", "grantee"):
-            if getattr(rule, key) not in principals:
-                problems.append(f"{where}.{key}: {getattr(rule, key)} is not declared")
+        # the owner need not be declared (often the ETL or admin user that
+        # creates the objects); the plan says if it doesn't exist
+        if rule.grantee not in principals:
+            problems.append(f"{where}.grantee: {rule.grantee} is not declared")
+        elif principals[rule.grantee].type == "group" and not redshift:
+            problems.append(f"{where}.grantee: groups exist on Redshift only")
         grants = rule.grants()
         if not grants:
             problems.append(f"{where}: grants no privileges")
+        allowed_types = DEFAULT_PRIVILEGE_TYPES[spec.engine]
+        for kind in grants:
+            if kind not in allowed_types:
+                problems.append(
+                    f"{where}.{kind}: {spec.engine} has no default privileges on {kind} "
+                    f"({', '.join(allowed_types)})"
+                )
+        if "schemas" in grants and rule.in_schema:
+            problems.append(
+                f"{where}.schemas: default privileges on schemas take no schema"
+            )
         for kind, names in grants.items():
+            if kind not in allowed_types:
+                continue
             allowed = PRIVILEGES[spec.engine][kind]
             for privilege in names:
                 if privilege not in allowed:

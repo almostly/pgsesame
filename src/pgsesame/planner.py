@@ -23,13 +23,15 @@ from pgsesame.ops import (
     AlterLogin,
     CreateRole,
     Grant,
+    GrantDefault,
     Operation,
     RemoveMember,
     Revoke,
+    RevokeDefault,
 )
 from pgsesame import masking
 from pgsesame.spec import PRIVILEGES, Spec
-from pgsesame.state import Identity, Membership, Privilege, State
+from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
 PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences", "columns")
@@ -246,6 +248,7 @@ def make(
             )
         )
 
+    plan.operations += _plan_defaults(spec, current, identity, problems)
     plan.operations += _plan_rls(spec, current, normalized or {}, problems)
     if spec.masking is not None:
         plan.operations += masking.plan(
@@ -268,8 +271,6 @@ def make(
                 f"{name}: privileges on {', '.join(unplanned)} are planned from a "
                 "later milestone"
             )
-    if spec.default_privileges:
-        plan.notes.append("default privileges are planned from a later milestone")
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     return plan
@@ -387,3 +388,50 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
         else:
             kept.append(op)
     return kept
+
+
+def _plan_defaults(
+    spec: Spec, current: State, identity, problems: list[str]
+) -> list[Operation]:
+    """Plan default privileges: what the spec's principals get on future objects.
+
+    Managed: every entry whose grantee the spec declares, whoever the owner is.
+    An entry for another grantee is someone else's and left alone.
+    """
+    want: set[DefaultGrant] = set()
+    for i, rule in enumerate(spec.default_privileges):
+        if rule.owner not in current.roles and rule.owner not in spec.principals:
+            problems.append(
+                f"default_privileges[{i}].owner: {rule.owner} does not exist"
+            )
+            continue
+        for kind, privileges in rule.grants().items():
+            for privilege in privileges:
+                spelt = "temporary" if privilege == "temp" else privilege
+                want.add(
+                    DefaultGrant(
+                        rule.owner, rule.in_schema or "", kind, rule.grantee, spelt
+                    )
+                )
+    managed = {name for name, p in spec.principals.items() if p.type != "builtin"}
+    have = {d for d in current.default_privileges if d.grantee in managed}
+    have = {
+        d
+        for d in have
+        if d.object_type in ("tables", "sequences", "functions", "schemas")
+    }
+
+    def op(cls, d: DefaultGrant) -> Operation:
+        return cls(
+            owner=d.owner,
+            schema=d.schema,
+            object_type=d.object_type,
+            privilege=d.privilege,
+            grantee=d.grantee,
+            grantee_identity=identity(d.grantee),
+            owner_identity=identity(d.owner),
+        )
+
+    return [op(GrantDefault, d) for d in sorted(want - have)] + [
+        op(RevokeDefault, d) for d in sorted(have - want)
+    ]
