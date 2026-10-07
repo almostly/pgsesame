@@ -441,7 +441,7 @@ _DEFAULT_ON = {
 
 class _Default(Operation):
     owner: str
-    schema: str  # "" for every schema
+    in_schema: str  # "" for every schema
     object_type: str
     privilege: str
     grantee: str
@@ -455,8 +455,8 @@ class _Default(Operation):
             sql.Identifier(self.owner),
         )
         where = (
-            sql.SQL(" IN SCHEMA {}").format(sql.Identifier(self.schema))
-            if self.schema
+            sql.SQL(" IN SCHEMA {}").format(sql.Identifier(self.in_schema))
+            if self.in_schema
             else sql.SQL("")
         )
         action = sql.SQL(
