@@ -422,7 +422,7 @@ through its SVV views); change sets; Redshift over IAM credentials and the Data
 API, each tested against oblako and Redshift Serverless; the GitHub Action
 (0.1.1).
 
-0.2, masking, Supabase and RDS:
+Done in 0.2.0 (2026-10-07), masking, Supabase and RDS:
 
 - Done: built-in roles (`type: builtin`) and PostgreSQL row-level security,
   tested on PostgreSQL 14 to 18 and on Supabase with `auth.uid()` policies.
@@ -432,8 +432,8 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
   says).
 - Done: column privileges on PostgreSQL and Redshift (`columns:`, objects named
   `schema.table.column`), tested on PostgreSQL 14 to 18 and redshift-local.
-- In oblako: masking policies in redshift-local, catalog first (done, on its
-  branch), then queries.
+- In oblako: masking policies in redshift-local, the catalog (oblako #73) and
+  masked query results (#74).
 - Done: RDS and Aurora PostgreSQL (`--rds`): IAM authentication tokens, the RDS
   Data API with transactions, and the admin user's limits (role changes without
   ADMIN OPTION are noted, not attempted); tested on oblako, PostgreSQL 16 and an
@@ -442,6 +442,10 @@ API, each tested against oblako and Redshift Serverless; the GitHub Action
 0.3:
 
 - Ownership (`owns`) and default privileges, planned and applied.
+- Checked against Redshift Serverless, where redshift-local now assumes: whether a
+  filter on a masked column compares the masked value, and whether a PUBLIC
+  attachment masks superusers.
+- The RDS tests in CI (they need oblako's RDS services).
 - More built-in roles (from 0.2's mechanism): Supabase's `anon`,
   `authenticated`, `service_role`, AlloyDB's `alloydbsuperuser`, Cloud SQL's
   `cloudsqlsuperuser`.
