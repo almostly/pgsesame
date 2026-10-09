@@ -138,7 +138,9 @@ def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     assert code == 0 and "2 statement(s) skipped" in out, out
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 2  # still drifted
 
-    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    code, out = _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")
+    assert code == 0, out
+    assert "REVOKE DELETE" in out and "needs --allow-revoke" not in out  # allowed
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
 
 
