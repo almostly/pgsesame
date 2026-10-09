@@ -179,14 +179,16 @@ def test_roles_reordered_move_priorities_without_a_revoke(db, tmp_path):
     )
     code, out = _sesame("apply", _spec(tmp_path, swapped))  # no --allow-revoke
     assert code == 0, out
-    assert ("sesame_redact", "sesame_ddm_fraud", "role", 20, '["email"]') in _attached(
+    # fraud's policy is the mask's, so it shares the mask's priority; support,
+    # written after it, still outranks it
+    assert ("sesame_redact", "sesame_ddm_fraud", "role", 10, '["email"]') in _attached(
         db
     )
     assert (
         "sesame_email_domain",
         "sesame_ddm_support",
         "role",
-        30,
+        20,
         '["email"]',
     ) in _attached(db)
     assert _sesame("plan", _spec(tmp_path, swapped))[0] == 0
