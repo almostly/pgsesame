@@ -2,7 +2,8 @@
 
 Privileges come from the ACLs in the catalog, expanded with ``aclexplode()``.
 Grants an object's owner holds on it are implied by ownership, so they are left
-out; so are grants to PUBLIC, which pgsesame does not manage yet. System schemas
+out; so are grants to PUBLIC, which pgsesame does not manage yet (its schema
+grants are read to warn about, CREATE above all). System schemas
 (``pg_*``, ``information_schema``) are never read.
 """
 
@@ -51,6 +52,13 @@ select g.rolname, n.nspname, lower(a.privilege_type)
 from pg_namespace n, aclexplode(n.nspacl) a
 join pg_roles g on g.oid = a.grantee
 where {_USER_SCHEMA} and a.grantee <> n.nspowner
+"""
+
+# grantee 0 is PUBLIC: not a role, so the join above leaves it out
+PUBLIC_SCHEMA_PRIVILEGES = f"""
+select n.nspname, lower(a.privilege_type)
+from pg_namespace n, aclexplode(n.nspacl) a
+where {_USER_SCHEMA} and a.grantee = 0
 """
 
 RELATION_PRIVILEGES = f"""
@@ -193,6 +201,8 @@ def read(db: Connection, columns: bool = True) -> State:
         state.privileges.add(Privilege(grantee, "databases", name, privilege))
     for grantee, name, privilege in db.rows(SCHEMA_PRIVILEGES):
         state.privileges.add(Privilege(grantee, "schemas", name, privilege))
+    for name, privilege in db.rows(PUBLIC_SCHEMA_PRIVILEGES):
+        state.public_privileges.add(Privilege("public", "schemas", name, privilege))
     for grantee, kind, name, privilege in db.rows(RELATION_PRIVILEGES):
         state.privileges.add(Privilege(grantee, kind, name, privilege))
     if columns:

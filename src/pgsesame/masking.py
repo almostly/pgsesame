@@ -7,7 +7,9 @@ priority winning:
 
 * ``mask``: the policy, TO PUBLIC, priority 10;
 * ``roles``: each role's policy, TO ROLE, priority 20, 30, ... in the order
-  written, so a later entry wins for a user in two of the roles;
+  written, so a later entry wins for a user in two of the roles; a role whose
+  policy is the one before it (the mask's, or the previous role's) shares that
+  priority, as Redshift allows for one policy and several grantees;
 * ``unmasked``: a pass-through policy (``USING (value)``), TO ROLE, priority 1000.
 
 The pass-through policies are pgsesame's own, one per column type
@@ -45,6 +47,7 @@ from pgsesame.state import Attachment, MaskPolicy, State
 MASK_PRIORITY = 10
 ROLE_PRIORITY = 20  # then 30, 40 ... in the order the spec lists the roles
 UNMASKED_PRIORITY = 1000
+STEP = 10
 PASS_THROUGH = "value"
 
 CAN_MANAGE = """
@@ -247,6 +250,26 @@ def normalize(db: Connection, spec: Spec, state: State) -> Normalized | None:
 # ---------------------------------------------------------------------------
 # Planning
 # ---------------------------------------------------------------------------
+def role_priorities(mask: str | None, roles: list[str]) -> list[int]:
+    """Return the priority of each role's policy, in the order the spec lists them.
+
+    Each role outranks the one before it, so a later entry wins for a user in
+    both; but a role whose policy is the previous one's (the mask's, for the
+    first) shares its priority. Redshift lets one policy be attached to several
+    grantees at one priority, and refuses two different policies there, so the
+    shared number says the same thing and matches a database that attached one
+    policy to several roles at one priority (often 0, the default).
+    """
+    out: list[int] = []
+    policy, priority = mask, MASK_PRIORITY
+    for role_policy in roles:
+        if role_policy != policy:  # another policy outranks the one before
+            priority = max(ROLE_PRIORITY, priority + STEP)
+        policy = role_policy
+        out.append(priority)
+    return out
+
+
 def _wanted_attachments(
     spec: Spec, state: State, grantee_type, problems: list[str]
 ) -> set[Attachment]:
@@ -281,8 +304,9 @@ def _wanted_attachments(
 
         if c.mask:
             attach(c.mask, "public", "public", MASK_PRIORITY)
-        for i, (role, policy) in enumerate(c.roles.items()):
-            attach(policy, role, grantee_type(role), ROLE_PRIORITY + 10 * i)
+        ranks = role_priorities(c.mask, list(c.roles.values()))
+        for (role, policy), priority in zip(c.roles.items(), ranks):
+            attach(policy, role, grantee_type(role), priority)
         for role in c.unmasked:
             attach(
                 unmasked_policy(type_name), role, grantee_type(role), UNMASKED_PRIORITY
@@ -334,7 +358,9 @@ def plan(
                 DropMaskingPolicy(name=name),
                 create.model_copy(update={"replacing": True}),
             ]
-        elif current.expression != target.expression:
+        elif current.expression not in (target.expression, create.using):
+            # the spec's text may be Redshift's stored form already (sesame import
+            # writes it), and storing that again needn't give the same text back
             ops.append(AlterMaskingPolicy(name=name, using=create.using))
     if normalized is None and any(n in state.mask_policies for n in wanted):
         notes.append(

@@ -106,6 +106,8 @@ class State:
     owners: dict[tuple[str, str], str] = field(default_factory=dict)
     # ALTER DEFAULT PRIVILEGES entries: grants on objects not created yet
     default_privileges: set[DefaultGrant] = field(default_factory=set)
+    # what PUBLIC (every user) holds on schemas: read to warn about, not managed
+    public_privileges: set[Privilege] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     policies: dict[tuple[str, str], Policy] = field(default_factory=dict)

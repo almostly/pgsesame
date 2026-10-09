@@ -134,6 +134,14 @@ def make(
         return "user"
 
     problems: list[str] = []
+    for name, p in sorted(spec.principals.items()):
+        joined = [g for g in p.member_of if spec.principals[g].type == "group"]
+        if joined:
+            plan.notes.append(
+                f"principals.{name}.member_of: {', '.join(joined)} is a group; "
+                "planned as groups (groups: [...] says so in the spec)"
+            )
+    plan.notes += public_create_notes(current, spec.manage.schemas)
     builtins = {name for name, p in spec.principals.items() if p.type == "builtin"}
     for name, p in sorted(spec.principals.items()):
         role = current.roles.get(name)
@@ -509,6 +517,24 @@ def _plan_defaults(
 
     return [op(GrantDefault, d) for d in sorted(want - have)] + [
         op(RevokeDefault, d) for d in sorted(have - want)
+    ]
+
+
+def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:
+    """Return a warning per schema in scope where PUBLIC (every user) may CREATE.
+
+    pgsesame doesn't manage PUBLIC's grants yet, so this is said, not revoked:
+    any user can create objects there (and on PostgreSQL before 15, functions
+    that shadow ones other users call).
+    """
+    return [
+        f"schema {p.object_name}: PUBLIC (every user) can CREATE in it, which "
+        "pgsesame doesn't manage yet; REVOKE CREATE ON SCHEMA "
+        f"{p.object_name} FROM PUBLIC closes it"
+        for p in sorted(state.public_privileges)
+        if p.object_type == "schemas"
+        and p.privilege == "create"
+        and (not schemas or p.object_name in schemas)
     ]
 
 

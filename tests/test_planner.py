@@ -396,6 +396,53 @@ def test_a_type_change_replaces_the_policy_behind_allow_drop():
     assert plan.allowed(allow_revoke=True, allow_drop=False) == []
 
 
+def test_roles_with_one_policy_share_a_priority():
+    from pgsesame.masking import role_priorities
+
+    assert role_priorities("m", ["a", "b"]) == [20, 30]  # each outranks the last
+    assert role_priorities(None, ["a", "a"]) == [20, 20]  # one policy: one priority
+    assert role_priorities("m", ["m", "b"]) == [10, 20]  # the mask's own policy
+    assert role_priorities(None, ["a", "a", "b", "a"]) == [20, 20, 30, 40]
+    assert role_priorities("m", []) == []
+
+
+def test_import_of_one_policy_on_two_roles_at_priority_0_plans_nothing():
+    # provision.sh's way: ATTACH ... TO ROLE x, TO ROLE y, no PRIORITY (0 each)
+    from pgsesame import importer
+
+    policies = [_policy("domain", "regexp_replace(value, '@.*', '')")]
+    attachments = [
+        _attachment("domain", "support", 0),
+        _attachment("domain", "fraud", 0),
+    ]
+    state = _masked_state(attachments, policies)
+    written, notes = importer.build(state, "redshift", masking_visible=True)
+    assert written["masking"]["columns"]["crm.c.email"] == {
+        "roles": {
+            "fraud": "domain",
+            "support": "domain",
+        }  # by name: a tie is one policy
+    }
+    assert not any("attached another way" in n for n in notes)
+    loaded = spec.parse(written)
+    plan = planner.make(loaded, state, masks={p.name: p for p in policies})
+    assert plan.operations == []
+
+
+def test_a_policy_already_in_redshifts_form_is_not_altered():
+    # sesame import writes the stored expression; creating it again can give a
+    # different text back, which isn't a change
+    stored = "CAST(CAST('***' AS VARCHAR) AS VARCHAR(64))"
+    masking = {**MASKING, "policies": {**MASKING["policies"]}}
+    masking["policies"]["redact"] = {"type": "varchar(64)", "using": stored}
+    policies, attachments = _converged()
+    policies[0] = _policy("redact", stored)
+    state = _masked_state(attachments, policies)
+    masks = {p.name: p for p in policies}
+    masks["redact"] = _policy("redact", f"CAST({stored} AS VARCHAR(64))")
+    assert planner.make(_masking_spec(masking), state, masks=masks).operations == []
+
+
 def test_policies_outside_the_spec_are_left_alone():
     policies, attachments = _converged()
     policies.append(_policy("someone_elses"))
@@ -703,3 +750,49 @@ def test_import_says_when_masking_couldnt_be_seen():
         "can't see masking policies" in n and "says nothing about whether" in n
         for n in notes
     )
+
+
+def test_a_group_in_member_of_is_planned_as_groups_with_a_note():
+    loaded = _spec(
+        "redshift",
+        analysts={"type": "group"},
+        u={"type": "user", "member_of": ["analysts"]},
+    )
+    state = _state(
+        Role("analysts", False, False, "group"), Role("u", True, False, "user")
+    )
+    plan = planner.make(loaded, state)
+    statements = [str(op.statement().as_string(None)) for op in plan.operations]
+    assert statements == ['ALTER GROUP "analysts" ADD USER "u"']
+    assert any(
+        "member_of: analysts is a group; planned as groups" in n for n in plan.notes
+    )
+
+
+def test_create_for_public_on_a_schema_in_scope_is_warned_about():
+    from pgsesame import importer
+
+    state = _state(
+        Role("reader", False, False),
+        objects={"schemas": {"public", "app"}},
+        public_privileges={
+            Privilege("public", "schemas", "public", "create"),
+            Privilege("public", "schemas", "public", "usage"),
+            Privilege("public", "schemas", "app", "create"),
+        },
+    )
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {"reader": {"type": "role"}},
+            "manage": {"schemas": ["public"]},
+        }
+    )
+    notes = [n for n in planner.make(loaded, state).notes if "PUBLIC" in n]
+    assert notes == [
+        "schema public: PUBLIC (every user) can CREATE in it, which pgsesame doesn't "
+        "manage yet; REVOKE CREATE ON SCHEMA public FROM PUBLIC closes it"
+    ]  # app is outside manage.schemas; USAGE isn't warned about
+    _, notes = importer.build(state, "postgres", schemas=["public"])
+    assert sum("PUBLIC (every user) can CREATE" in n for n in notes) == 1

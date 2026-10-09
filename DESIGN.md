@@ -285,7 +285,7 @@ So, for each column:
 | Spec | Attachment | Priority |
 |---|---|---|
 | `mask` | the policy, `TO PUBLIC` | 10 |
-| `roles` | each role's policy, `TO ROLE r` | 20, 30, ... in the order written (later wins) |
+| `roles` | each role's policy, `TO ROLE r` | 20, 30, ... in the order written (later wins); a role with the policy before it shares that priority |
 | `unmasked` | a pass-through policy, `TO ROLE r` for each | 1000, shared |
 
 The pass-through policy (`USING (value)`) is created by pgsesame, one per column
