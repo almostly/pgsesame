@@ -11,6 +11,23 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.5 (2026-10-09)
+
+Fixes from importing a masked Redshift Serverless warehouse: `sesame import`
+then `plan` is empty for masking attached at the default priority.
+
+### Fixed
+
+- **Redshift**: roles that share one masking policy now share its priority, as Redshift allows for one policy and several grantees, so a column with one policy attached to several roles at priority 0 (the default) no longer plans a detach and re-attach of each; import orders tied roles by name, not at random
+- **Redshift**: a masking policy whose spec text is already Redshift's stored form (as `sesame import` writes it) is no longer altered when storing that text again reads back differently
+- **CLI**: `apply --allow-revoke` and `--allow-drop` no longer label the statements they run as needing those flags
+
+### Added
+
+- **Spec**: a user's `member_of` may name a Redshift group, planned as `groups` is, with a note; a role naming a group is still refused, as groups hold users only
+- **Plan**: `plan` and `import` warn when a schema in scope gives CREATE to PUBLIC, with the `REVOKE` that closes it; PUBLIC's schema grants are read, not managed yet
+- **Docs**: the README's status says 0.2: ownership, default privileges, import, row-level security and masking
+
 ## v0.2.4 (2026-10-07)
 
 Safety on Redshift without a superuser, and RDS sign-in as the user you name.
