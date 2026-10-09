@@ -391,8 +391,12 @@ def _check(spec: Spec) -> list[str]:
             target = principals.get(parent)
             if target is None:
                 problems.append(f"{where}.member_of: {parent} is not declared")
-            elif target.type == "group":
-                problems.append(f"{where}.member_of: {parent} is a group; use groups")
+            elif target.type == "group" and p.type != "user":
+                # a user's member_of may name a group (planned as groups is); only
+                # users join groups
+                problems.append(
+                    f"{where}.member_of: {parent} is a group, which holds users only"
+                )
         for group in p.groups:
             target = principals.get(group)
             # a builtin principal may be a group the spec refers to, not manages
