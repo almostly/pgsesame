@@ -83,12 +83,15 @@ def test_passwords_never_go_in_the_spec():
     assert problems[0].startswith("principals.u.password: input should be 'disabled'")
 
 
-def test_membership_in_a_group_goes_through_groups():
+def test_a_user_may_name_a_group_in_member_of():
+    principals = {"g": {"type": "group"}, "u": {"type": "user", "member_of": ["g"]}}
+    loaded = _parse(engine="redshift", principals=principals)  # planned as groups
+    assert loaded.principals["u"].member_of == ["g"]
     problems = _problems(
         engine="redshift",
-        principals={"g": {"type": "group"}, "u": {"type": "user", "member_of": ["g"]}},
+        principals={"g": {"type": "group"}, "r": {"type": "role", "member_of": ["g"]}},
     )
-    assert problems == ["principals.u.member_of: g is a group; use groups"]
+    assert problems == ["principals.r.member_of: g is a group, which holds users only"]
 
 
 def test_default_privileges_name_declared_principals():

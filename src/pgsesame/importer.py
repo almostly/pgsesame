@@ -22,8 +22,13 @@ from typing import Any
 
 import yaml
 
-from pgsesame.planner import _system_role
-from pgsesame.masking import passes_through, same_order, unmasked_policy
+from pgsesame.planner import _system_role, public_create_notes
+from pgsesame.masking import (
+    passes_through,
+    role_priorities,
+    same_order,
+    unmasked_policy,
+)
 from pgsesame.state import Attachment
 from pgsesame.spec import (
     DEFAULT_PRIVILEGE_TYPES,
@@ -187,6 +192,7 @@ def build(
                         principals[name] = {"type": "builtin"}  # referred to
     if state.policies:
         notes.append("row-level security isn't imported yet; add it by hand")
+    notes += public_create_notes(state, schemas)
     return spec, sorted(set(notes))
 
 
@@ -237,12 +243,14 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
         # each grantee's highest-priority attachment decides what it sees
         winning: dict[str, Any] = {}
         others = (a for a in attached if a.grantee_type != "public")
-        for a in sorted(others, key=lambda a: a.priority):
+        for a in sorted(others, key=lambda a: (a.priority, a.grantee)):
             winning[a.grantee] = a
         unmasked = sorted(g for g, a in winning.items() if raw(a.policy))
+        # by priority, then name: a tie is one policy (Redshift refuses two at a
+        # priority), so the roles that share it stay together and in one order
         roles = {
             g: a.policy
-            for g, a in sorted(winning.items(), key=lambda kv: kv[1].priority)
+            for g, a in sorted(winning.items(), key=lambda kv: (kv[1].priority, kv[0]))
             if g not in unmasked
         }
         if unmasked and "mask" not in entry:
@@ -267,11 +275,13 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
                     entry["mask"], table, (column,), (column,), "public", "public", 10
                 )
             )
-        for i, (grantee, policy) in enumerate(entry.get("roles", {}).items()):
+        roles = entry.get("roles", {})
+        ranks = role_priorities(entry.get("mask"), list(roles.values()))
+        for (grantee, policy), priority in zip(roles.items(), ranks):
             gtype = winning[grantee].grantee_type
             then.append(
                 Attachment(
-                    policy, table, (column,), (column,), grantee, gtype, 20 + 10 * i
+                    policy, table, (column,), (column,), grantee, gtype, priority
                 )
             )
         for grantee in entry.get("unmasked", []):

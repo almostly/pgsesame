@@ -152,7 +152,9 @@ def read(db: Connection, columns: bool = True) -> State:
         state.objects[kind].add(f"{schema}.{name}")
 
     def privilege(grantee: str, identity: str, kind: str, name: str, priv: str) -> None:
-        if identity == "public":  # PUBLIC isn't managed yet
+        if identity == "public":  # PUBLIC isn't managed yet; its schema grants are
+            if kind == "schemas":  # read to warn about
+                state.public_privileges.add(Privilege("public", kind, name, priv))
             return
         if priv == "temp":  # one spelling, as the planner writes it
             priv = "temporary"
