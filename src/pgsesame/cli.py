@@ -407,11 +407,12 @@ def _warn_if_partial(result: planner.Plan) -> None:
         err.print(f"[change]! {escape(PARTIAL)}[/change]")
 
 
-def _show(result: planner.Plan, db: Connection) -> None:
+def _show(result: planner.Plan, db: Connection, gated: bool = True) -> None:
+    """Print the notes and operations; ``gated`` labels those a flag must allow."""
     for note in result.notes:
         console.print(f"[muted]note: {escape(note)}[/muted]")
     for op in result.operations:
-        gate = f"needs --allow-{op.needs}" if op.needs else ""
+        gate = f"needs --allow-{op.needs}" if op.needs and gated else ""
         operation(op.kind, db.render(op.display()), gate)
 
 
@@ -580,7 +581,7 @@ def apply(
     if not runnable:
         console.print("[ok]✓[/ok] nothing to apply")
     else:
-        _show(planner.Plan(runnable, result.notes), db)
+        _show(planner.Plan(runnable, result.notes), db, gated=False)  # allowed
         try:
             db.run([op.statement() for op in runnable])
         except (
