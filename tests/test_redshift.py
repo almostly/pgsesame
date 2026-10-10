@@ -314,6 +314,9 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
             "ORDER BY 1"
         ).fetchall()
     assert grants == [(f"{P}analysts", "SELECT"), (f"{P}reader", "SELECT")]
+    # those grants came from the spec's default privileges: not drift
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
 
 
 def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):

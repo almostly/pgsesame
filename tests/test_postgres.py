@@ -498,6 +498,10 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
             "SELECT has_table_privilege(%s, 'analytics.made_later', 'SELECT')",
             (f"{P}reader",),
         ).fetchone() == (True,)
+        # the grant the default privilege gave the new table isn't drift (the
+        # CREATE given by hand just above is)
+        code, out = _sesame("plan", spec, "--dsn", dsn)
+        assert "made_later" not in out, out
         conn.execute("DROP TABLE analytics.made_later")
         conn.execute(f"REVOKE CREATE ON SCHEMA analytics FROM {P}etl")
         # a default privilege made by hand for a managed grantee is drift

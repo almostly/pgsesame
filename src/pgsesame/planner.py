@@ -292,8 +292,34 @@ def make(
             )
         return owner_of.get((p.object_type, p.object_name)) == p.grantee
 
+    # what the spec's own default privileges give an object its owner made later
+    # (owner, schema, grantee, privilege): granted by the database, so not drift
+    defaulted: set[tuple[str, str, str, str, str]] = set()
+    for rule in spec.default_privileges:
+        for kind, names in rule.grants().items():
+            for privilege in names:
+                defaulted.add(
+                    (kind, rule.owner, rule.in_schema or "", rule.grantee, privilege)
+                )
+
+    def explained(p: Privilege) -> bool:
+        """Return whether one of the spec's default privileges gave this grant."""
+        # ON TABLES covers views too
+        kind = "tables" if p.object_type == "views" else p.object_type
+        if kind not in ("tables", "sequences", "schemas"):
+            return False
+        schema = p.object_name.split(".", 1)[0]
+        owner = owner_of.get((p.object_type, p.object_name))
+        if owner is None:
+            return False
+        anywhere = (kind, owner, "", p.grantee, p.privilege) in defaulted
+        here = kind != "schemas" and (
+            (kind, owner, schema, p.grantee, p.privilege) in defaulted
+        )
+        return anywhere or here
+
     want_privileges = {p for p in want_privileges if not implied(p)}
-    have_privileges = {p for p in have_privileges if not implied(p)}
+    have_privileges = {p for p in have_privileges if not (implied(p) or explained(p))}
     for p in sorted(want_privileges - have_privileges):
         plan.operations.append(
             Grant(

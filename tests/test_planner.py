@@ -804,3 +804,37 @@ def test_create_for_public_on_a_schema_in_scope_is_warned_about():
     ]  # app is outside manage.schemas; USAGE isn't warned about
     _, notes = importer.build(state, "postgres", schemas=["public"])
     assert sum("PUBLIC (every user) can CREATE" in n for n in notes) == 1
+
+
+def test_grants_the_specs_default_privileges_gave_are_not_drift():
+    # a table etl made after the apply got SELECT for reader from the default
+    # privilege: the next plan mustn't revoke it; the same grant on a table
+    # someone else owns is still drift
+    from pgsesame.ops import Revoke
+    from pgsesame.state import DefaultGrant, Privilege
+
+    state = _defaults_state(DefaultGrant("etl", "s", "tables", "reader", "select"))
+    state.objects = {
+        "schemas": {"s"},
+        "tables": {"s.made_later", "s.by_admin"},
+        "views": {"s.v_later"},
+    }
+    state.owners = {
+        ("schemas", "s"): "admin",
+        ("tables", "s.made_later"): "etl",
+        ("views", "s.v_later"): "etl",
+        ("tables", "s.by_admin"): "admin",
+    }
+    state.privileges = {
+        Privilege("reader", "tables", "s.made_later", "select"),
+        Privilege("reader", "views", "s.v_later", "select"),  # ON TABLES covers views
+        Privilege("reader", "tables", "s.by_admin", "select"),
+        Privilege("reader", "tables", "s.made_later", "insert"),  # not defaulted
+    }
+    plan = planner.make(_defaults_spec(), state)
+    revoked = sorted(
+        (op.object_name, op.privilege)
+        for op in plan.operations
+        if isinstance(op, Revoke)
+    )
+    assert revoked == [("s.by_admin", "select"), ("s.made_later", "insert")]
