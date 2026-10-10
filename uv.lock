@@ -715,7 +715,7 @@ wheels = [
 
 [[package]]
 name = "pgsesame"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
