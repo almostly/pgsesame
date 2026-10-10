@@ -130,6 +130,9 @@ def make(
     plan = Plan(partial=not current.sees_everything)
     redshift = spec.engine == "redshift"
     managed = set(spec.principals)
+    # a superuser's memberships and privileges are left alone (it bypasses them),
+    # but who owns an object still decides what its old owner keeps: planned
+    superusers: set[str] = set()
     want_members, want_privileges, missing = desired(spec, current)
     plan.warnings += missing
 
@@ -200,8 +203,13 @@ def make(
             )
             continue
         if role.superuser:
-            plan.notes.append(f"{name} is a superuser; pgsesame leaves it alone")
+            plan.notes.append(
+                f"{name} is a superuser; pgsesame manages only what it owns"
+                if p.owns
+                else f"{name} is a superuser; pgsesame leaves it alone"
+            )
             managed.discard(name)
+            superusers.add(name)
             continue
         if redshift and role.identity != p.type:
             problems.append(
@@ -302,7 +310,7 @@ def make(
     # on its own object are implied, so they are neither granted nor revoked
     owner_of = dict(current.owners)
     for name, p in sorted(spec.principals.items()):
-        if p.type == "builtin" or name not in managed:
+        if p.type == "builtin" or (name not in managed and name not in superusers):
             continue
         for kind, patterns in sorted(p.owns.items()):
             existing = current.objects.get(kind, set())
