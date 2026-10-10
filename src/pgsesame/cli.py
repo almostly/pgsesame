@@ -342,7 +342,8 @@ AWS_PANEL = r"AWS (needs pgsesame\[redshift], \[rds] or \[aurora])"
 RegionOption = typer.Option(
     None,
     "--region",
-    help="AWS region (default: AWS_REGION, then the profile's).",
+    help="AWS region (default: AWS_REGION, then AWS_DEFAULT_REGION, then the "
+    "profile's).",
     rich_help_panel=AWS_PANEL,
 )
 ProfileOption = typer.Option(

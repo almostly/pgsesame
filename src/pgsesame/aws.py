@@ -28,6 +28,7 @@ connection: ``rows``, ``run``, ``render``, ``database`` and ``target``.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -76,8 +77,11 @@ def _client(service: str) -> Any:
     The region comes from --region, else AWS_REGION / AWS_DEFAULT_REGION, else the
     profile's ``region`` in ~/.aws/config; without one, say where to set it.
     """
+    # boto3 reads AWS_DEFAULT_REGION but not AWS_REGION (the AWS CLI and the other
+    # SDKs read both, AWS_REGION first): read it here, so either works
+    region = _SESSION["region"] or os.environ.get("AWS_REGION") or None
     session = _boto3(service).session.Session(
-        profile_name=_SESSION["profile"], region_name=_SESSION["region"]
+        profile_name=_SESSION["profile"], region_name=region
     )
     if not session.region_name:
         profile = _SESSION["profile"] or session.profile_name

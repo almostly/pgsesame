@@ -267,3 +267,17 @@ def test_notes_are_printed_when_there_is_nothing_to_do(command, tmp_path, monkey
     assert result.exit_code == 0, result.output
     assert f"note: {note}" in result.output
     assert "nothing to" in result.output
+
+
+@pytest.mark.parametrize("variable", ["AWS_REGION", "AWS_DEFAULT_REGION"])
+def test_the_region_comes_from_either_variable(variable, tmp_path, monkeypatch):
+    # boto3 itself reads only AWS_DEFAULT_REGION; the error says AWS_REGION works
+    config = tmp_path / "config"
+    config.write_text("[default]\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "none"))
+    for name in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "eu-west-1")
+    aws.configure(None, None)
+    assert aws._client("sts").meta.region_name == "eu-west-1"
