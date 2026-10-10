@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 
@@ -66,6 +67,34 @@ class Database:
         """Return the connection as pgcli shows it: ``user@host:database``."""
         info = self.conn.info
         return f"{info.user}@{info.host}:{info.dbname}"
+
+    def signs_in(self, user: str, password: str) -> bool | None:
+        """Return whether ``user`` signs in with ``password`` on this server.
+
+        Same host, port, database and TLS as this connection. None when it can't
+        be told (the server unreachable): only a refused password is False.
+        """
+        info = self.conn.info
+        settings = {
+            **{
+                k: v
+                for k, v in info.get_parameters().items()
+                if k not in ("user", "password", "passfile")
+            },
+            "host": info.host,
+            "port": str(info.port),
+            "dbname": info.dbname,
+            "user": user,
+            "password": password,
+            "connect_timeout": "10",
+        }
+        try:
+            psycopg.connect(make_conninfo(**settings)).close()
+            return True
+        except psycopg.OperationalError as e:
+            # refused: "password authentication failed"; anything else (a timeout,
+            # no route) says nothing about the password
+            return False if "password" in str(e).lower() else None
 
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         """Run a catalog query and return its rows."""

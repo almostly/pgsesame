@@ -162,6 +162,37 @@ class CreateRole(Operation):
         return self._sql(sql.SQL("'********'"))
 
 
+class AlterPassword(Operation):
+    """Set a user's password again, from the environment variable the spec names."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 20
+    op: Literal["alter_password"] = "alter_password"
+    name: str
+    identity: Identity = "pg"
+    password: SecretStr | None = Field(None, exclude=True)  # never saved
+    password_env: str
+
+    def _sql(self, password: sql.Composable) -> sql.Composed:
+        """Return ALTER USER (Redshift) or ALTER ROLE ... PASSWORD ``password``."""
+        verb = "ALTER USER" if self.identity == "user" else "ALTER ROLE"
+        return sql.SQL("{} {} PASSWORD {}").format(
+            sql.SQL(verb), sql.Identifier(self.name), password
+        )
+
+    def statement(self) -> sql.Composed:
+        """Return the statement with the password, read when the plan was made."""
+        if self.password is None:
+            raise ValueError(
+                f"{self.password_env} is not set: no password for {self.name}"
+            )
+        return self._sql(sql.Literal(self.password.get_secret_value()))
+
+    def display(self) -> sql.Composed:
+        """Return the statement with the password masked."""
+        return self._sql(sql.SQL("'********'"))
+
+
 class AlterLogin(Operation):
     """Let a PostgreSQL role log in, or stop it."""
 
@@ -729,6 +760,7 @@ AnyOperation = Annotated[
     CreateRole
     | AlterOwner
     | AlterLogin
+    | AlterPassword
     | AddMember
     | Grant
     | Revoke

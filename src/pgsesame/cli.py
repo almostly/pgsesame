@@ -121,6 +121,7 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         # makes it the biggest read
         columns = any("columns" in p.privileges for p in loaded.principals.values())
         current = reader(db, columns)
+        _check_passwords(loaded, db, current)
         masks = None
         if loaded.masking is not None:
             masking.read(db, loaded, current)
@@ -144,6 +145,26 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
             f"[error]✗ reading the database through AWS failed:[/error] {escape(str(e))}"
         )
         raise typer.Exit(1) from None
+
+
+def _check_passwords(loaded: spec.Spec, db: Connection, current) -> None:
+    """Sign in as each user the spec gives a password_env, to see it still works.
+
+    Neither Redshift nor PostgreSQL (without a superuser's pg_authid) shows a
+    password, or that it was disabled: signing in is the only way to tell. Only
+    a direct connection can; over the Data API ``passwords_refused`` stays None.
+    """
+    if not isinstance(db, Database):
+        return
+    refused: set[str] = set()
+    for name, p in sorted(loaded.principals.items()):
+        role = current.roles.get(name)
+        password = os.environ.get(p.password_env) if p.password_env else None
+        if role is None or role.superuser or not p.can_login or password is None:
+            continue
+        if db.signs_in(name, password) is False:
+            refused.add(name)
+    current.passwords_refused = refused
 
 
 def _missing_view(e: Exception, engine: str) -> NoReturn:

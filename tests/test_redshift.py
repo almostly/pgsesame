@@ -207,6 +207,22 @@ def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
         ).fetchall() == [("UPDATE", False)]
 
 
+def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
+    # Redshift shows no password, disabled or not: plan signs in with password_env
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'ALTER USER "{P}alice" PASSWORD DISABLE')
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=ENV)
+    assert code == 2, out
+    assert f"~ ALTER USER \"{P}alice\" PASSWORD '********'" in out, out
+    assert "doesn't sign in with RS_TEST_ALICE_PASSWORD" in out
+    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=ENV)[0] == 0
+    alice = make_conninfo(dsn, user=f"{P}alice", password=ENV["RS_TEST_ALICE_PASSWORD"])
+    psycopg.connect(alice).close()
+
+
 def test_memberships_are_removed_only_when_allowed(dsn, tmp_path):
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
     changed = SPEC.replace(

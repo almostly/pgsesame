@@ -145,6 +145,19 @@ def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
         ).fetchone() == (True, False)
 
 
+def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
+    spec, env = _spec(tmp_path), {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-1"}
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'ALTER ROLE "{P}alice" PASSWORD NULL')
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 2, out
+    assert f"~ ALTER ROLE \"{P}alice\" PASSWORD '********'" in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    psycopg.connect(make_conninfo(dsn, user=f"{P}alice", password="alice-pw-1")).close()
+
+
 def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     spec = _spec(tmp_path)
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0

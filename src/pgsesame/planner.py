@@ -26,6 +26,7 @@ from pgsesame.ops import (
     Grant,
     GrantDefault,
     Operation,
+    AlterPassword,
     RemoveMember,
     RevokeGrantOption,
     Revoke,
@@ -188,6 +189,29 @@ def make(
             )
         elif not redshift and role.login != p.can_login:
             plan.operations.append(AlterLogin(name=name, login=p.can_login))
+        if p.password_env and name in (current.passwords_refused or ()):
+            # the password in the environment doesn't sign it in: disabled or
+            # changed by hand since; set it again
+            plan.notes.append(
+                f"{name}: doesn't sign in with {p.password_env} (its password was "
+                "disabled or changed); setting it again"
+            )
+            password = os.environ.get(p.password_env)
+            plan.operations.append(
+                AlterPassword(
+                    name=name,
+                    identity=identity(name),
+                    password=password,
+                    password_env=p.password_env,
+                )
+            )
+    if current.passwords_refused is None and any(
+        p.password_env and name in current.roles for name, p in spec.principals.items()
+    ):
+        plan.notes.append(
+            "passwords aren't checked over the Data API (no connection to sign in "
+            "on): one disabled or changed by hand isn't seen"
+        )
     if problems:
         raise PlanError(problems)
 

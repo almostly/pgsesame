@@ -859,3 +859,28 @@ def test_a_grant_option_on_a_kept_privilege_is_revoked_alone():
     assert option.statement().as_string(None) == (
         'REVOKE GRANT OPTION FOR SELECT ON TABLE "s"."t" FROM "reader"'
     )
+
+
+def test_a_refused_password_is_set_again_from_its_variable(monkeypatch):
+    from pgsesame.ops import AlterPassword
+
+    monkeypatch.setenv("ALICE_PW", "Alice-pw-1")
+    loaded = _spec("redshift", alice={"type": "user", "password_env": "ALICE_PW"})
+    state = _state(Role("alice", True, False, "user"))
+    state.passwords_refused = {"alice"}
+    plan = planner.make(loaded, state)
+    (op,) = plan.operations
+    assert isinstance(op, AlterPassword)
+    assert op.display().as_string(None) == "ALTER USER \"alice\" PASSWORD '********'"
+    assert (
+        op.statement().as_string(None) == "ALTER USER \"alice\" PASSWORD 'Alice-pw-1'"
+    )
+    assert any("doesn't sign in with ALICE_PW" in n for n in plan.notes)
+
+
+def test_over_the_data_api_passwords_are_said_to_be_unchecked():
+    loaded = _spec("redshift", alice={"type": "user", "password_env": "ALICE_PW"})
+    state = _state(Role("alice", True, False, "user"))  # passwords_refused: None
+    plan = planner.make(loaded, state)
+    assert plan.operations == []
+    assert any("passwords aren't checked over the Data API" in n for n in plan.notes)

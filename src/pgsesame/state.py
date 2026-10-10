@@ -118,6 +118,10 @@ class State:
     mask_policies: dict[str, MaskPolicy] = field(default_factory=dict)
     attachments: set[Attachment] = field(default_factory=set)
     column_types: dict[str, str] = field(default_factory=dict)
+    # users the spec gives a password_env, signed in as with it: None when not
+    # tried (over the Data API there's no connection to sign in on), else the
+    # ones refused (the password was disabled or changed by hand)
+    passwords_refused: set[str] | None = None
     # the roles the connected user may alter and grant (ADMIN OPTION on PostgreSQL
     # 16+, any non-superuser with CREATEROLE before); None: every role
     administers: set[str] | None = None
