@@ -88,6 +88,18 @@ from svv_column_privileges
 """
 
 
+def is_redshift(db: Connection) -> bool:
+    """Return whether the database has Redshift's SVV views (Redshift or redshift-local).
+
+    version() doesn't tell: redshift-local reports PostgreSQL's. pg_views lists
+    the SVV views on both, and none on PostgreSQL.
+    """
+    rows = db.rows(
+        "select count(*) from pg_views where viewname in ('svv_roles', 'svv_user_grants')"
+    )
+    return bool(rows and rows[0][0])
+
+
 def _int_array(value: Any) -> list[int]:
     """Return an int[] column: a list over a driver, ``{1,2}`` text over the Data API."""
     if value is None:

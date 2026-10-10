@@ -6,6 +6,7 @@ from pathlib import Path
 
 import os
 import sys
+from typing import NoReturn
 
 import psycopg
 import typer
@@ -132,6 +133,8 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {escape(problem)}")
         raise typer.Exit(1) from None
+    except psycopg.errors.UndefinedTable as e:
+        _missing_view(e, loaded.engine)
     except Exception as e:
         # a Data API's error while reading (access denied, the API not enabled
         # yet ...): said plainly; anything else is a bug and keeps its traceback
@@ -141,6 +144,19 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
             f"[error]✗ reading the database through AWS failed:[/error] {escape(str(e))}"
         )
         raise typer.Exit(1) from None
+
+
+def _missing_view(e: Exception, engine: str) -> NoReturn:
+    """Say which catalog view the database lacks, and exit 1."""
+    what = str(e).strip().splitlines()[0]
+    hint = (
+        "pgsesame reads Redshift's SVV views (svv_roles, svv_user_grants, ...); "
+        "on oblako's redshift-local, use an image from 2026-10-07 or later"
+        if engine == "redshift"
+        else "is this PostgreSQL? For Redshift, set engine: redshift (or --engine)"
+    )
+    err.print(f"[error]✗ can't read the catalog:[/error] {escape(what)}; {hint}")
+    raise typer.Exit(1) from None
 
 
 class ConnectOptions:
@@ -666,12 +682,24 @@ def import_spec(
     db = _connect(options)
     if engine is None:
         saved = targets.get(options.label).engine if options.label else None
-        engine = saved or ("redshift" if cluster or workgroup else "postgres")
+        engine = saved or ("redshift" if cluster or workgroup else None)
+    if engine is None:
+        # neither said nor saved: the catalog tells (Redshift has its SVV views),
+        # or a Redshift spec would come out as postgres, its groups as roles
+        engine = "redshift" if redshift.is_redshift(db) else "postgres"
+        if engine == "redshift":
+            err.print(
+                "[muted]note: engine: redshift, from the catalog (its SVV views); "
+                "--engine sets it[/muted]"
+            )
     if engine not in ("postgres", "redshift"):
         err.print("[error]✗[/error] --engine is postgres or redshift")
         raise typer.Exit(1)
     reader = redshift.read if engine == "redshift" else postgres.read
-    state = reader(db, False)  # column grants come from their own view
+    try:
+        state = reader(db, False)  # column grants come from their own view
+    except psycopg.errors.UndefinedTable as e:
+        _missing_view(e, engine)
     if not state.sees_everything:
         # what it can't see would be missing from the spec, and a superuser's plan
         # of that spec would revoke it: write nothing

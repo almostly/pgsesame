@@ -340,6 +340,17 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert code == 0, out
 
 
+def test_import_without_engine_finds_redshift(dsn, tmp_path):
+    # from --dsn alone: the catalog says Redshift, and groups stay groups
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame("import", "--dsn", dsn, "--prefix", P, "-o", str(imported))
+    assert code == 0, out
+    assert "engine: redshift, from the catalog" in out
+    text = imported.read_text()
+    assert "engine: redshift" in text and f"{P}analysts:\n    type: group" in text
+
+
 def test_ownership(dsn, tmp_path):
     owners = f"""
 version: 1

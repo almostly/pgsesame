@@ -595,3 +595,20 @@ def test_ownership(dsn, tmp_path):
         ).fetchall()
     assert {o for (o,) in owners} == {f"{P}etl"}
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
+def test_a_redshift_spec_against_postgresql_says_what_is_missing(tmp_path):
+    # Redshift's SVV views aren't on PostgreSQL: a clear error, not a traceback
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: redshift\nprincipals: {}\n")
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert code == 1, out
+    assert "can't read the catalog" in out and "svv_" in out
+    assert "Traceback" not in out and "Undefined" not in out
+
+
+def test_import_without_engine_finds_postgresql(tmp_path):
+    out_file = tmp_path / "imported.yaml"
+    code, out = _sesame("import", "--dsn", DSN, "-o", str(out_file))
+    assert code == 0, out
+    assert "engine: postgres" in out_file.read_text()
