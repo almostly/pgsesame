@@ -62,9 +62,11 @@ class Plan:
     # skipped, so a dropped table (a dbt model removed) doesn't block every apply
     warnings: list[str] = field(default_factory=list)
 
-    def allowed(self, allow_revoke: bool, allow_drop: bool) -> list[Operation]:
+    def allowed(
+        self, allow_revoke: bool, allow_drop: bool, allow_owner: bool = False
+    ) -> list[Operation]:
         """Return the operations apply may run with these flags."""
-        gates = {"revoke": allow_revoke, "drop": allow_drop}
+        gates = {"revoke": allow_revoke, "drop": allow_drop, "owner": allow_owner}
         return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 

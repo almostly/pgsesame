@@ -179,7 +179,7 @@ The same file then serves CI, with `STAGING_DB_PASSWORD` as a repository secret.
 ```bash
 sesame validate permissions.yaml
 sesame plan permissions.yaml       # exit code 2 when there are changes
-sesame apply permissions.yaml      # revokes and drops need --allow-revoke / --allow-drop
+sesame apply permissions.yaml      # revokes, drops and owner changes need --allow-revoke / --allow-drop / --allow-owner
 
 sesame plan permissions.yaml -o changes.json   # save the plan as a change set
 sesame show changes.json                       # review it, no database needed
@@ -252,7 +252,10 @@ and dropped in the same plan (never attached), which needs
 Ownership is declared on the owner, and planned as `ALTER ... OWNER TO` for the
 objects it lists (`schema.*` for every table in a schema). Objects the spec
 doesn't list keep their owner; an owner's privileges on its own objects are
-implied, so they're neither granted nor revoked. On Redshift the owner is a user:
+implied, so they're neither granted nor revoked. A change of owner takes from the
+old owner everything owning gave it, so apply runs it only with `--allow-owner`;
+without it, the plan shows it and apply skips it. pgsesame never drops a schema,
+table, view, user, group or role. On Redshift the owner is a user:
 
 ```yaml
 principals:
@@ -362,7 +365,8 @@ jobs:
 
 On a pull request the plan is posted as one comment, updated on each push. On
 merge, `apply` runs exactly the change set the plan job saved, or refuses if the
-database changed since. Revokes need `allow-revoke: true`. The step's outputs
+database changed since. Revokes need `allow-revoke: true`, owner changes
+`allow-owner: true`. The step's outputs
 (`has-changes`, `to-add`, `to-change`, `to-remove`) can drive other steps. For
 Redshift with IAM, sign in with `aws-actions/configure-aws-credentials` and pass
 `args: --iam --workgroup analytics`.

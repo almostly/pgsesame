@@ -609,6 +609,11 @@ def apply(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
     allow_drop: bool = typer.Option(False, "--allow-drop", help="Also run drops."),
+    allow_owner: bool = typer.Option(
+        False,
+        "--allow-owner",
+        help="Also run owner changes (the old owner loses what owning gave it).",
+    ),
 ) -> None:
     """Make the database match the spec, in one transaction.
 
@@ -654,7 +659,7 @@ def apply(
         result = planner.Plan(
             saved.with_secrets(), result.notes, warnings=result.warnings
         )
-    runnable = result.allowed(allow_revoke, allow_drop)
+    runnable = result.allowed(allow_revoke, allow_drop, allow_owner)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:
         # the warnings and notes, as plan prints them

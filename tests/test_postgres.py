@@ -153,7 +153,8 @@ def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
     code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
     assert code == 2, out
     assert f"~ ALTER ROLE \"{P}alice\" PASSWORD '********'" in out, out
-    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert "needs --allow-revoke" in out  # it overrides what was done by hand
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
     psycopg.connect(make_conninfo(dsn, user=f"{P}alice", password="alice-pw-1")).close()
 
@@ -634,7 +635,11 @@ def test_ownership(dsn, tmp_path):
     assert f'~ ALTER SCHEMA "analytics" OWNER TO "{P}etl"' in out
     assert f'~ ALTER TABLE "analytics"."events" OWNER TO "{P}etl"' in out
     assert "GRANT SELECT" not in out
-    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert "needs --allow-owner" in out
+    code, out = _sesame("apply", spec, "--dsn", dsn)  # no flag: shown, skipped
+    assert code == 0 and "skipped: needs --allow-owner" in out, out
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 2
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-owner")[0] == 0
     with psycopg.connect(dsn) as conn:
         owners = conn.execute(
             "SELECT tableowner FROM pg_tables WHERE schemaname = 'analytics'"

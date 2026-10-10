@@ -2,7 +2,8 @@
 
 Each operation knows its kind (``create``, ``change`` or ``remove``, which the plan
 colours green, yellow and red), whether it takes something away (revokes and
-membership removals need ``--allow-revoke``, drops ``--allow-drop``), and how to
+membership removals need ``--allow-revoke``, drops ``--allow-drop``, owner changes
+``--allow-owner``), and how to
 render itself with ``psycopg.sql``, so names are always quoted and never pasted
 into SQL text.
 """
@@ -21,7 +22,9 @@ if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
     from typing_extensions import LiteralString
 
 Kind = Literal["create", "change", "remove"]
-Gate = Literal["revoke", "drop"]
+# what apply needs a flag for: taking access away (revoke), dropping (drop), and
+# changing an owner (owner: the old owner loses what owning gave it)
+Gate = Literal["revoke", "drop", "owner"]
 
 # GRANT's keyword for each object type, and each privilege's keyword, written out
 # as constants: psycopg.sql only takes literal strings as SQL
@@ -166,6 +169,8 @@ class AlterPassword(Operation):
     """Set a user's password again, from the environment variable the spec names."""
 
     kind: ClassVar[Kind] = "change"
+    # it overrides a password someone set or disabled by hand: --allow-revoke
+    gate: ClassVar[Gate | None] = "revoke"
     order: ClassVar[int] = 20
     op: Literal["alter_password"] = "alter_password"
     name: str
@@ -222,6 +227,8 @@ class AlterOwner(Operation):
     """Give an object to the principal the spec says owns it."""
 
     kind: ClassVar[Kind] = "change"
+    # the old owner loses every right owning gave it: run only with --allow-owner
+    gate: ClassVar[Gate | None] = "owner"
     order: ClassVar[int] = 15  # after the owners exist, before grants
     op: Literal["alter_owner"] = "alter_owner"
     object_type: str

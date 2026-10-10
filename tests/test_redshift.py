@@ -217,7 +217,7 @@ def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
     assert code == 2, out
     assert f"~ ALTER USER \"{P}alice\" PASSWORD '********'" in out, out
     assert "doesn't sign in with RS_TEST_ALICE_PASSWORD" in out
-    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=ENV)[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn, env=ENV)[0] == 0
     alice = make_conninfo(dsn, user=f"{P}alice", password=ENV["RS_TEST_ALICE_PASSWORD"])
     psycopg.connect(alice).close()
@@ -408,7 +408,9 @@ principals:
     assert code == 2, out
     assert f'~ ALTER SCHEMA "rs_test" OWNER TO "{P}etl"' in out, out
     assert f'~ ALTER TABLE "rs_test"."events" OWNER TO "{P}etl"' in out, out
-    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    code, out = _sesame("apply", spec, "--dsn", dsn)  # no flag: shown, skipped
+    assert code == 0 and "skipped: needs --allow-owner" in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-owner")[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
     with psycopg.connect(dsn, autocommit=True) as conn:  # hand them back for cleanup
         me = sql.Identifier(conn.info.user)

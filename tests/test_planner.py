@@ -968,3 +968,25 @@ def test_privileges_pgsesame_doesnt_manage_are_one_note_per_kind():
         "INSERT on views isn't a privilege pgsesame manages: 50 grants left as they "
         "are (reader on s.v0, reader on s.v1, reader on s.v10, and 47 more)",
     ]
+
+
+def test_owner_changes_need_allow_owner_and_password_resets_allow_revoke(monkeypatch):
+    # nothing that takes rights away runs without its flag: an owner change takes
+    # from the old owner what owning gave it; a reset overrides a password
+    from pgsesame.ops import AlterOwner, AlterPassword
+
+    monkeypatch.setenv("ETL_PW", "Etl-pw-12345")
+    loaded = _spec(
+        "postgres",
+        etl={"type": "user", "password_env": "ETL_PW", "owns": {"tables": ["s.t"]}},
+    )
+    state = _state(Role("etl", True), objects={"tables": {"s.t"}, "schemas": {"s"}})
+    state.owners = {("tables", "s.t"): "admin"}
+    state.passwords_refused = {"etl"}
+    plan = planner.make(loaded, state)
+    assert {type(op) for op in plan.operations} == {AlterOwner, AlterPassword}
+    assert plan.allowed(allow_revoke=False, allow_drop=False) == []
+    assert [type(op) for op in plan.allowed(False, False, allow_owner=True)] == [
+        AlterOwner
+    ]
+    assert [type(op) for op in plan.allowed(True, False)] == [AlterPassword]
