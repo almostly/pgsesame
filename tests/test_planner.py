@@ -884,3 +884,26 @@ def test_over_the_data_api_passwords_are_said_to_be_unchecked():
     plan = planner.make(loaded, state)
     assert plan.operations == []
     assert any("passwords aren't checked over the Data API" in n for n in plan.notes)
+
+
+def test_a_defaulted_grant_the_spec_also_names_is_not_granted_again():
+    # sesame import writes both: the grant on the table and the default privilege
+    from pgsesame.state import DefaultGrant, Privilege
+
+    loaded = _defaults_spec()
+    loaded = spec.parse(
+        {
+            **loaded.model_dump(by_alias=True, exclude_none=True),
+            "principals": {
+                "reader": {
+                    "type": "role",
+                    "privileges": {"tables": {"select": ["s.t"]}},
+                }
+            },
+        }
+    )
+    state = _defaults_state(DefaultGrant("etl", "s", "tables", "reader", "select"))
+    state.objects = {"schemas": {"s"}, "tables": {"s.t"}}
+    state.owners = {("tables", "s.t"): "etl"}
+    state.privileges = {Privilege("reader", "tables", "s.t", "select")}
+    assert planner.make(loaded, state).operations == []

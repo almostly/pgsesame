@@ -344,7 +344,7 @@ def make(
         return anywhere or here
 
     want_privileges = {p for p in want_privileges if not implied(p)}
-    have_privileges = {p for p in have_privileges if not (implied(p) or explained(p))}
+    have_privileges = {p for p in have_privileges if not implied(p)}
     for p in sorted(want_privileges - have_privileges):
         plan.operations.append(
             Grant(
@@ -355,7 +355,9 @@ def make(
                 grantee_identity=identity(p.grantee),
             )
         )
-    for p in sorted(have_privileges - want_privileges):
+    # explained grants only escape a revoke: one the spec also names is still
+    # compared, or it would look missing and be granted again
+    for p in sorted(p for p in have_privileges - want_privileges if not explained(p)):
         plan.operations.append(
             Revoke(
                 grantee=p.grantee,
