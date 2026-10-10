@@ -907,3 +907,26 @@ def test_a_defaulted_grant_the_spec_also_names_is_not_granted_again():
     state.owners = {("tables", "s.t"): "etl"}
     state.privileges = {Privilege("reader", "tables", "s.t", "select")}
     assert planner.make(loaded, state).operations == []
+
+
+def test_iam_links_are_granted_and_revoked_only_when_allowed():
+    from pgsesame.ops import LinkIam, UnlinkIam
+
+    keep, new = (
+        "arn:aws:iam::123456789012:role/keep",
+        "arn:aws:iam::123456789012:role/new",
+    )
+    gone = "arn:aws:iam::123456789012:role/gone"
+    loaded = _spec("dsql", app={"type": "user", "iam": [keep, new]})
+    state = _state(Role("app", True))
+    state.iam_links = {
+        ("app", keep),
+        ("app", gone),
+        ("other", gone),
+    }  # other: unmanaged
+    plan = planner.make(loaded, state)
+    link, unlink = plan.operations
+    assert isinstance(link, LinkIam) and isinstance(unlink, UnlinkIam)
+    assert (link.arn, unlink.arn) == (new, gone)
+    assert link.statement().as_string(None) == f"AWS IAM GRANT \"app\" TO '{new}'"
+    assert unlink.needs == "revoke"

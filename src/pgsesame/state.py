@@ -122,6 +122,8 @@ class State:
     # tried (over the Data API there's no connection to sign in on), else the
     # ones refused (the password was disabled or changed by hand)
     passwords_refused: set[str] | None = None
+    # Aurora DSQL: (role, IAM identity ARN) that signs in as the role
+    iam_links: set[tuple[str, str]] = field(default_factory=set)
     # the roles the connected user may alter and grant (ADMIN OPTION on PostgreSQL
     # 16+, any non-superuser with CREATEROLE before); None: every role
     administers: set[str] | None = None

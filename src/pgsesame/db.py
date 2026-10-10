@@ -15,6 +15,15 @@ from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 
+class PartiallyApplied(Exception):
+    """A statement failed after ``done`` of ``total`` were applied and committed."""
+
+    def __init__(self, done: int, total: int, error: Exception):
+        """Keep how far the apply got, and why it stopped."""
+        super().__init__(str(error))
+        self.done, self.total, self.error = done, total, error
+
+
 class Connection(Protocol):
     """What the readers and the CLI use from a connection, whichever kind it is."""
 

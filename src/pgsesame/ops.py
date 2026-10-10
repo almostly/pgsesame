@@ -349,6 +349,38 @@ class RevokeGrantOption(Operation):
         )
 
 
+class LinkIam(Operation):
+    """Aurora DSQL: let an IAM identity sign in as a role (AWS IAM GRANT)."""
+
+    order: ClassVar[int] = 25  # after the role is created and can log in
+    op: Literal["link_iam"] = "link_iam"
+    role: str
+    arn: str
+
+    def statement(self) -> sql.Composed:
+        """Return AWS IAM GRANT role TO 'arn'."""
+        return sql.SQL("AWS IAM GRANT {} TO {}").format(
+            sql.Identifier(self.role), sql.Literal(self.arn)
+        )
+
+
+class UnlinkIam(Operation):
+    """Aurora DSQL: stop an IAM identity signing in as a role (AWS IAM REVOKE)."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 60
+    op: Literal["unlink_iam"] = "unlink_iam"
+    role: str
+    arn: str
+
+    def statement(self) -> sql.Composed:
+        """Return AWS IAM REVOKE role FROM 'arn'."""
+        return sql.SQL("AWS IAM REVOKE {} FROM {}").format(
+            sql.Identifier(self.role), sql.Literal(self.arn)
+        )
+
+
 class RemoveMember(Operation):
     """Take ``member`` out of ``role`` (a group or role on Redshift)."""
 
@@ -765,6 +797,8 @@ AnyOperation = Annotated[
     | Grant
     | Revoke
     | RevokeGrantOption
+    | LinkIam
+    | UnlinkIam
     | RemoveMember
     | CreatePolicy
     | AlterPolicy

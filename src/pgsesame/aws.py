@@ -32,10 +32,11 @@ import os
 import time
 from typing import Any
 
+import psycopg
 from psycopg import sql
 from pydantic import SecretStr
 
-from pgsesame.db import Database
+from pgsesame.db import Database, PartiallyApplied
 
 # BatchExecuteStatement takes at most 40 SQL statements
 BATCH_LIMIT = 40
@@ -62,7 +63,13 @@ def _boto3(service: str = ""):
     try:
         import boto3
     except ImportError as e:
-        extra = "rds" if service.startswith("rds") else "redshift"
+        extra = (
+            "rds"
+            if service.startswith("rds")
+            else "dsql"
+            if service == "dsql"
+            else "redshift"
+        )
         raise RuntimeError(
             f"connecting through AWS needs boto3, which comes with the {extra} extra: "
             f"uv tool install --force 'pgsesame[{extra}]' (or pip install "
@@ -504,3 +511,46 @@ def _rds_array(array: dict[str, Any]) -> list[Any]:
         if key in array:
             return list(array[key])
     return []
+
+
+class DsqlDatabase(Database):
+    """An Aurora DSQL database: PostgreSQL, but one DDL statement per transaction."""
+
+    def run(self, statements: list[sql.Composed]) -> None:
+        """Run each statement in its own transaction, in order.
+
+        Aurora DSQL refuses a second DDL statement in a transaction, and a GRANT
+        is DDL, so a plan can't be one transaction. A failure stops the run and
+        says how many statements before it were applied.
+        """
+        for done, statement in enumerate(statements):
+            try:
+                self.conn.execute(statement)
+            except psycopg.Error as e:
+                raise PartiallyApplied(done, len(statements), e) from None
+
+
+def dsql_database(
+    cluster: str, db_user: str | None = None, client: Any = None
+) -> DsqlDatabase:
+    """Connect to an Aurora DSQL cluster (identifier or endpoint) with an IAM token.
+
+    As ``admin`` (the default) the token is an admin one (dsql:DbConnectAdmin);
+    as another role, a role the caller's IAM identity is linked to
+    (dsql:DbConnect, after AWS IAM GRANT).
+    """
+    client = client or _client("dsql")
+    region = client.meta.region_name
+    host = cluster if "." in cluster else f"{cluster}.dsql.{region}.on.aws"
+    user = db_user or "admin"
+    token = (
+        client.generate_db_connect_admin_auth_token(host, region)
+        if user == "admin"
+        else client.generate_db_connect_auth_token(host, region)
+    )
+    from psycopg.conninfo import make_conninfo
+
+    dsn = make_conninfo(
+        host=host, dbname="postgres", user=user, password=token, sslmode="require"
+    )
+    return DsqlDatabase(SecretStr(dsn))

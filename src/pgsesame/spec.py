@@ -20,7 +20,8 @@ from typing import Annotated, Any, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-Engine = Literal["postgres", "redshift"]
+# dsql: Amazon Aurora DSQL, PostgreSQL 16 for roles and grants, with less of it
+Engine = Literal["postgres", "redshift", "dsql"]
 ObjectType = Literal[
     "databases", "schemas", "tables", "views", "sequences", "functions", "columns"
 ]
@@ -30,11 +31,15 @@ DEFAULT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functi
 # what ALTER ... OWNER TO is planned for, per engine
 OWNABLE = {
     "postgres": ("databases", "schemas", "tables", "views", "sequences"),
+    # ALTER ... OWNER on Aurora DSQL needs SET ROLE on the new owner and its
+    # CREATE on the schema: not planned
+    "dsql": (),
     "redshift": ("schemas", "tables", "views"),
 }
 # ... and the ones each engine's ALTER DEFAULT PRIVILEGES takes (views are tables)
 DEFAULT_PRIVILEGE_TYPES = {
     "postgres": ("tables", "sequences", "functions", "schemas"),
+    "dsql": ("tables", "sequences", "functions", "schemas"),
     "redshift": ("tables", "functions"),
 }
 
@@ -75,7 +80,7 @@ Privilege = Literal[
     "usage",
 ]
 # PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
-MAX_NAME_BYTES = {"postgres": 63, "redshift": 127}
+MAX_NAME_BYTES = {"postgres": 63, "redshift": 127, "dsql": 63}
 
 # privileges each object type accepts, per engine
 _COMMON = {
@@ -90,6 +95,9 @@ _COMMON = {
 PRIVILEGES: dict[str, dict[str, set[str]]] = {
     # MAINTAIN (VACUUM, ANALYZE, REFRESH ...) exists from PostgreSQL 17 on
     "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger", "maintain"}},
+    # Aurora DSQL: no database privileges (GRANT ... ON DATABASE is unsupported)
+    # and no MAINTAIN
+    "dsql": {**_COMMON, "databases": set(), "tables": _COMMON["tables"] | {"trigger"}},
     "redshift": {
         **_COMMON,
         # Redshift has no CONNECT: GRANT CONNECT ON DATABASE is a syntax error
@@ -140,6 +148,12 @@ class Principal(_Model):
     )
     password: Literal["disabled"] | None = Field(
         None, description="'disabled' for no password; never a password itself."
+    )
+    iam: list[
+        Annotated[str, StringConstraints(pattern=r"^arn:aws[\w-]*:iam::\d{12}:\S+$")]
+    ] = Field(
+        default_factory=list,
+        description="Aurora DSQL: IAM users or roles (ARNs) that sign in as it.",
     )
 
     @property
@@ -321,6 +335,7 @@ def _check(spec: Spec) -> list[str]:
     """Check what pydantic can't: engine rules and references between principals."""
     problems: list[str] = []
     redshift = spec.engine == "redshift"
+    dsql = spec.engine == "dsql"
     principals = spec.principals
     limit = MAX_NAME_BYTES[spec.engine]
     for name, p in principals.items():
@@ -359,7 +374,7 @@ def _check(spec: Spec) -> list[str]:
         if "columns" in p.owns:
             problems.append(f"{where}.owns.columns: a column is owned with its table")
         ownable = OWNABLE[spec.engine]
-        for kind in p.owns:
+        for kind in p.owns if ownable else ():  # none at all: said once, below
             if kind != "columns" and kind not in ownable:
                 problems.append(
                     f"{where}.owns.{kind}: pgsesame plans ownership of "
@@ -384,6 +399,28 @@ def _check(spec: Spec) -> list[str]:
                     problems.append(
                         f"{where}: {pattern}: three parts name a column (use columns)"
                     )
+        if dsql:
+            if p.password or p.password_env:
+                problems.append(
+                    f"{where}: Aurora DSQL signs in with IAM only; link IAM identities "
+                    "with iam: [arn] instead of a password"
+                )
+            if p.iam and not p.can_login:
+                problems.append(
+                    f"{where}.iam: an IAM identity signs in as it, so it needs login: true"
+                )
+            if "databases" in p.privileges:
+                problems.append(
+                    f"{where}.privileges.databases: Aurora DSQL has no database "
+                    "privileges (one database, postgres, open to every role)"
+                )
+            if p.owns:
+                problems.append(
+                    f"{where}.owns: ownership isn't planned on Aurora DSQL (ALTER ... "
+                    "OWNER needs SET ROLE on the new owner)"
+                )
+        elif p.iam:
+            problems.append(f"{where}.iam: IAM links are Aurora DSQL's (engine: dsql)")
         if redshift and "functions" in p.privileges:
             problems.append(
                 f"{where}.privileges.functions: pgsesame doesn't plan grants on "
@@ -392,6 +429,8 @@ def _check(spec: Spec) -> list[str]:
             )
         for kind, grants in p.privileges.items():
             allowed = PRIVILEGES[spec.engine][kind]
+            if not allowed:  # the engine has none of the kind: said once above
+                continue
             for privilege in grants:
                 if privilege not in allowed:
                     problems.append(
@@ -505,6 +544,8 @@ def _check_rls(spec: Spec) -> list[str]:
     problems: list[str] = []
     if spec.row_level_security and spec.engine == "redshift":
         return ["row_level_security: Redshift's RLS policies come in a later version"]
+    if spec.row_level_security and spec.engine == "dsql":
+        return ["row_level_security: Aurora DSQL has no row-level security"]
     for table, rls in spec.row_level_security.items():
         for name, policy in rls.policies.items():
             where = f"row_level_security.{table}.policies.{name}"

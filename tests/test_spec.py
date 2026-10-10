@@ -335,3 +335,43 @@ def test_default_privileges_take_the_types_each_engine_has():
     assert problems == [
         "default_privileges[0].schemas: default privileges on schemas take no schema"
     ]
+
+
+def test_dsql_refuses_what_aurora_dsql_lacks_once_each():
+    arn = "arn:aws:iam::123456789012:role/app"
+    problems = _problems(
+        engine="dsql",
+        principals={
+            "app": {
+                "type": "role",
+                "iam": [arn],
+                "password_env": "APP_PW",
+                "owns": {"schemas": ["s"]},
+                "privileges": {
+                    "databases": {"create": ["postgres"]},
+                    "tables": {"maintain": ["s.t"]},
+                },
+            }
+        },
+        row_level_security={"s.t": {}},
+    )
+    assert [p.split(":")[0] for p in problems] == [
+        "principals.app",
+        "principals.app.iam",
+        "principals.app.privileges.databases",
+        "principals.app.owns",
+        "principals.app.privileges.tables.maintain",
+        "row_level_security",
+    ]
+
+
+def test_iam_links_are_aurora_dsqls():
+    arn = "arn:aws:iam::123456789012:role/app"
+    loaded = _parse(engine="dsql", principals={"app": {"type": "user", "iam": [arn]}})
+    assert loaded.principals["app"].iam == [arn]
+    problems = _problems(principals={"app": {"type": "user", "iam": [arn]}})
+    assert problems == [
+        "principals.app.iam: IAM links are Aurora DSQL's (engine: dsql)"
+    ]
+    with pytest.raises(spec.SpecError):  # not an ARN
+        _parse(engine="dsql", principals={"app": {"type": "user", "iam": ["app"]}})

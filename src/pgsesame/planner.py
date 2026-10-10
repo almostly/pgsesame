@@ -27,8 +27,10 @@ from pgsesame.ops import (
     GrantDefault,
     Operation,
     AlterPassword,
+    LinkIam,
     RemoveMember,
     RevokeGrantOption,
+    UnlinkIam,
     Revoke,
     RevokeDefault,
 )
@@ -380,6 +382,8 @@ def make(
             )
         )
 
+    if spec.engine == "dsql":
+        plan.operations += _plan_iam(spec, current, managed - builtins)
     plan.operations += _plan_defaults(
         spec, current, identity, problems, managed - builtins, plan.notes
     )
@@ -608,11 +612,20 @@ def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:
     ]
 
 
+def _plan_iam(spec: Spec, current: State, managed: set[str]) -> list[Operation]:
+    """Return the AWS IAM GRANT and REVOKE that link the spec's IAM identities."""
+    want = {(name, arn) for name, p in spec.principals.items() for arn in p.iam}
+    have = {(role, arn) for role, arn in current.iam_links if role in managed}
+    return [LinkIam(role=r, arn=a) for r, a in sorted(want - have)] + [
+        UnlinkIam(role=r, arn=a) for r, a in sorted(have - want)
+    ]
+
+
 def _system_role(name: str) -> bool:
     """Return whether a role is the platform's own (never adopted by prefix)."""
     return name.startswith(
         ("pg_", "rds", "sys:", "cloudsql", "alloydb", "supabase")
-    ) or name in ("postgres", "PUBLIC")
+    ) or name in ("postgres", "PUBLIC", "dbowner")  # dbowner: Aurora DSQL's
 
 
 def _in_managed_schemas(p: Privilege, spec: Spec) -> bool:

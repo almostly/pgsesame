@@ -49,7 +49,7 @@ class Target(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    engine: Literal["postgres", "redshift"] = "postgres"
+    engine: Literal["postgres", "redshift", "dsql"] = "postgres"
     method: Literal["password", "iam", "data-api"] = "password"
     # password: a server
     host: str | None = None
@@ -63,6 +63,7 @@ class Target(BaseModel):
     )
     # iam / data-api: an RDS instance or Aurora cluster, or Redshift's
     rds: str | None = None
+    dsql: str | None = None  # an Aurora DSQL cluster: always IAM
     cluster: str | None = None
     workgroup: str | None = None
     secret_arn: str | None = None
@@ -77,6 +78,8 @@ class Target(BaseModel):
             return f"{self.user}@{self.host}:{self.port}/{self.database}"
         if self.rds:
             return f"{self.method} rds {self.rds}/{self.database}"
+        if self.dsql:
+            return f"iam dsql {self.dsql} as {self.db_user or 'admin'}"
         place = (
             f"workgroup {self.workgroup}"
             if self.workgroup

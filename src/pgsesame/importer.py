@@ -125,6 +125,9 @@ def build(
                 owned[kind].append(obj)
         if owned:
             entry["owns"] = dict(sorted(owned.items()))
+        links = sorted(arn for role, arn in state.iam_links if role == name)
+        if links:  # Aurora DSQL: the IAM identities that sign in as it
+            entry["iam"] = links
         if grants:
             entry["privileges"] = {
                 kind: {priv: sorted(objects) for priv, objects in sorted(by.items())}

@@ -28,7 +28,8 @@ revokes and drops but applies them only when you ask.
 
 ## Where it runs
 
-PostgreSQL 14 to 18 and Amazon Redshift (provisioned or Serverless). PostgreSQL
+PostgreSQL 14 to 18, Amazon Redshift (provisioned or Serverless) and Amazon
+Aurora DSQL. PostgreSQL
 services work through the same connection, as the platform's admin role: Supabase
 (tested, with its built-in roles and row-level security), Google's AlloyDB, Amazon
 RDS and Aurora, Cloud SQL, Neon.
@@ -50,12 +51,40 @@ Data API runs apply in one transaction. The admin user isn't a superuser: from
 PostgreSQL 16 on it changes only the roles it has ADMIN OPTION on, so a login or
 membership change it can't make is noted in the plan, not attempted.
 
+Amazon Aurora DSQL is `engine: dsql`: PostgreSQL 16's roles, memberships, grants
+and default privileges, plus the IAM identities that sign in as a role:
+
+```yaml
+version: 1
+engine: dsql
+principals:
+  app:
+    type: user                       # a role that logs in
+    iam: [arn:aws:iam::123456789012:role/app-task]   # AWS IAM GRANT app TO '...'
+    privileges:
+      schemas: {usage: [orders]}
+      tables: {select: [orders.*]}
+```
+
+```bash
+sesame plan permissions.yaml --dsql abc123xyz          # as admin, with an IAM token
+sesame login dsql --dsql abc123xyz                     # or save it as a target
+```
+
+DSQL signs in with IAM only, so a spec gives it no passwords, and it has no
+database privileges, row-level security or ownership changes: a spec naming them
+is refused with the reason. It also allows one DDL statement per transaction,
+and a GRANT is one, so apply runs each statement in its own transaction; if one
+fails, apply says how many before it were applied, and the next plan shows what
+remains.
+
 ## Install
 
 ```bash
 uv tool install pgsesame               # installs the `sesame` command
 uv tool install "pgsesame[redshift]"   # Redshift through IAM or the Data API
 uv tool install "pgsesame[rds]"        # RDS and Aurora through IAM or the Data API (or [aurora])
+uv tool install "pgsesame[dsql]"       # Aurora DSQL
 uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```
@@ -110,6 +139,7 @@ the Data API keeps no secret at all:
 sesame login prod --host db.example.com --user admin --database app   # asks for the password
 sesame login analytics --engine redshift --iam --workgroup analytics --database dev
 sesame login aurora --iam --rds my-cluster            # RDS or Aurora: an IAM token
+sesame login dsql --dsql abc123xyz                    # Aurora DSQL: an IAM token
 sesame targets                     # the saved targets; * marks the default
 sesame use prod                    # the default for plan and apply
 sesame plan permissions.yaml --target analytics
