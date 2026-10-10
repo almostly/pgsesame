@@ -235,3 +235,35 @@ def test_without_batch_rights_expressions_simply_arent_compared():
 
     db = DataApiDatabase("dev", workgroup="wg", client=ProbingDataApi(deny_batch=True))
     assert masking.normalize(db, _masking_spec(), State()) is None
+
+
+class _NoDatabase:
+    """A connection that's never queried: the plan is made up by the test."""
+
+    database = "dev"
+    target = "fake:dev"
+
+    def render(self, statement):
+        """Return a statement as text, as a real connection would."""
+        return statement.as_string(None)
+
+    def close(self):
+        """Nothing to close."""
+
+
+@pytest.mark.parametrize("command", ["plan", "apply"])
+def test_notes_are_printed_when_there_is_nothing_to_do(command, tmp_path, monkeypatch):
+    # an import followed by an empty plan mustn't hide that PUBLIC can still create
+    from pgsesame import cli, planner
+
+    note = "schema public: PUBLIC (every user) can CREATE in it"
+    monkeypatch.setattr(cli, "_connect", lambda options: _NoDatabase())
+    monkeypatch.setattr(cli, "_plan", lambda loaded, db: planner.Plan([], [note]))
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: redshift\nprincipals: {}\n")
+    result = CliRunner().invoke(
+        app, [command, str(spec), "--dsn", "host=x"], env={"NO_COLOR": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    assert f"note: {note}" in result.output
+    assert "nothing to" in result.output

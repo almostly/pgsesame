@@ -481,10 +481,12 @@ def plan(
     header("plan", _where(options, db))
     result = _plan(loaded, db)
     _warn_if_partial(result)
+    # the notes first, with or without changes: an empty plan can still have
+    # something to say (PUBLIC can create in a schema, a superuser left alone)
+    _show(result, db)
     if not result.operations:
         console.print("[ok]✓[/ok] the database matches the spec; nothing to do")
         raise typer.Exit(0)
-    _show(result, db)
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
     if out is not None:
         ChangeSet.build(loaded, db.target, result.operations).save(out)
@@ -587,6 +589,7 @@ def apply(
     runnable = result.allowed(allow_revoke, allow_drop)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:
+        _show(planner.Plan([], result.notes), db)  # the notes, as plan prints them
         console.print("[ok]✓[/ok] nothing to apply")
     else:
         _show(planner.Plan(runnable, result.notes), db, gated=False)  # allowed
