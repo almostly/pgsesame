@@ -78,6 +78,51 @@ def test_privileges_are_checked_per_engine():
     assert loaded.principals["r"].privileges == {"tables": {"alter": ["s.t"]}}
 
 
+def test_redshift_has_no_connect_privilege():
+    # GRANT CONNECT ON DATABASE is a syntax error on Redshift
+    connect = {"type": "user", "privileges": {"databases": {"connect": ["dev"]}}}
+    problems = _problems(engine="redshift", principals={"u": connect})
+    assert problems == [
+        "principals.u.privileges.databases.connect: not a redshift privilege on "
+        "databases (create, temp, temporary)"
+    ]
+    assert _parse(principals={"u": {**connect, "type": "role"}})  # PostgreSQL has it
+
+
+def test_function_grants_are_refused_on_redshift_not_skipped():
+    execute = {"type": "role", "privileges": {"functions": {"execute": ["s.f"]}}}
+    problems = _problems(engine="redshift", principals={"r": execute})
+    assert len(problems) == 1
+    assert problems[0].startswith("principals.r.privileges.functions: pgsesame doesn't")
+    # default privileges on functions are planned on Redshift, and stay allowed
+    _parse(
+        engine="redshift",
+        principals={"r": {"type": "role"}},
+        default_privileges=[{"owner": "etl", "grantee": "r", "functions": ["execute"]}],
+    )
+
+
+def test_redshift_refuses_names_it_would_fold_to_lower_case():
+    problems = _problems(
+        engine="redshift",
+        principals={
+            "Analyst": {
+                "type": "role",
+                "privileges": {"tables": {"select": ["Sales.t"]}},
+            },
+            "IAMR:Etl-TaskRole-AbC1": {"type": "user"},  # named by Redshift: kept
+        },
+        manage={"schemas": ["Sales"]},
+    )
+    assert [p.split(": ", 2)[:2] for p in problems] == [
+        ["principals.Analyst", "Analyst"],
+        ["principals.Analyst.privileges.tables", "Sales.t"],
+        ["manage.schemas", "Sales"],
+    ]
+    assert "it would be analyst; write it that way" in problems[0]
+    _parse(principals={"Analyst": {"type": "role"}})  # PostgreSQL keeps the case
+
+
 def test_passwords_never_go_in_the_spec():
     problems = _problems(principals={"u": {"type": "user", "password": "hunter2"}})
     assert problems[0].startswith("principals.u.password: input should be 'disabled'")

@@ -92,6 +92,8 @@ PRIVILEGES: dict[str, dict[str, set[str]]] = {
     "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger", "maintain"}},
     "redshift": {
         **_COMMON,
+        # Redshift has no CONNECT: GRANT CONNECT ON DATABASE is a syntax error
+        "databases": _COMMON["databases"] - {"connect"},
         "schemas": _COMMON["schemas"] | {"alter", "drop"},
         "tables": _COMMON["tables"] | {"alter", "drop"},
         "views": _COMMON["views"] | {"alter", "drop"},
@@ -382,6 +384,12 @@ def _check(spec: Spec) -> list[str]:
                     problems.append(
                         f"{where}: {pattern}: three parts name a column (use columns)"
                     )
+        if redshift and "functions" in p.privileges:
+            problems.append(
+                f"{where}.privileges.functions: pgsesame doesn't plan grants on "
+                "Redshift functions yet; grant EXECUTE by hand and leave it out of "
+                "the spec (default_privileges on functions are planned)"
+            )
         for kind, grants in p.privileges.items():
             allowed = PRIVILEGES[spec.engine][kind]
             for privilege in grants:
@@ -437,11 +445,59 @@ def _check(spec: Spec) -> list[str]:
                         f"{where}.{kind}: {privilege} is not a {spec.engine} "
                         f"privilege on {kind}"
                     )
+    if redshift:
+        problems += _check_case(spec)
     problems += _check_rls(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
     problems += _check_owners(spec)
     return problems
+
+
+def _folded(name: str) -> bool:
+    """Return whether Redshift would store ``name`` in lower case, unlike written.
+
+    Redshift folds identifiers, quoted or not, to lower case unless
+    enable_case_sensitive_identifier is on. IAM users and roles (IAM:..., IAMR:...)
+    are named by Redshift itself and keep their case.
+    """
+    return name != name.lower() and not name.startswith(("IAM:", "IAMR:"))
+
+
+def _check_case(spec: Spec) -> list[str]:
+    """On Redshift, refuse a name with upper-case letters, which Redshift folds."""
+    named: list[tuple[str, str]] = []
+    for name, p in spec.principals.items():
+        where = f"principals.{name}"
+        named.append((where, name))
+        for kind, patterns in [
+            *((f"owns.{k}", v) for k, v in p.owns.items()),
+            *(
+                (f"privileges.{k}", [x for names in grants.values() for x in names])
+                for k, grants in p.privileges.items()
+            ),
+        ]:
+            named += [(f"{where}.{kind}", pattern) for pattern in patterns]
+    for i, rule in enumerate(spec.default_privileges):
+        named += [(f"default_privileges[{i}]", rule.owner)]
+        if rule.in_schema:
+            named.append((f"default_privileges[{i}].schema", rule.in_schema))
+    if spec.masking is not None:
+        for name, policy in spec.masking.policies.items():
+            named.append((f"masking.policies.{name}", name))
+            named += [(f"masking.policies.{name}.input", n) for n in policy.input or {}]
+        for column, c in spec.masking.columns.items():
+            named.append((f"masking.columns.{column}", column))
+            named += [(f"masking.columns.{column}.inputs", n) for n in c.inputs or []]
+    named += [("manage.schemas", n) for n in spec.manage.schemas]
+    named += [("manage.prefixes", n) for n in spec.manage.prefixes]
+    return [
+        f"{where}: {name}: Redshift stores names in lower case (unless "
+        f"enable_case_sensitive_identifier is on), so it would be {name.lower()}; "
+        "write it that way"
+        for where, name in named
+        if _folded(name)
+    ]
 
 
 def _check_rls(spec: Spec) -> list[str]:
