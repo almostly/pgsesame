@@ -11,6 +11,14 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.7 (2026-10-10)
+
+What a superuser owns is planned.
+
+### Fixed
+
+- **Planner**: a principal that is a superuser on the server (`dpu_redshift`, say) had its `owns` skipped, so an object owned by someone else planned nothing and a missing one wasn't warned about. Its ownership is now planned like any owner's (`ALTER ... OWNER TO`, behind `--allow-owner`); its memberships and privileges are still left alone, as a superuser bypasses them
+
 ## v0.2.6 (2026-10-10)
 
 Fixes from a parity run on Redshift Serverless against redshift-local, Aurora DSQL
