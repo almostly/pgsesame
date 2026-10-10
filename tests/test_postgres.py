@@ -204,13 +204,19 @@ def test_roles_outside_the_spec_are_left_alone(dsn, tmp_path):
         ).fetchone() == (True,)
 
 
-def test_a_missing_object_stops_the_plan(dsn, tmp_path):
+def test_a_missing_object_is_warned_about_and_skipped(dsn, tmp_path):
+    # a table the spec names may be dropped (a dbt model removed): the rest of the
+    # plan still applies, and the warning says which grant was skipped
     spec = _spec(
         tmp_path, SPEC.replace("insert: [analytics.events]", "insert: [analytics.nope]")
     )
-    code, out = _sesame("plan", spec, "--dsn", dsn)
-    assert code == 1
-    assert "analytics.nope does not exist" in out
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-1"}
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 2, out
+    assert "! principals." in out and "analytics.nope does not exist; skipped" in out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 0 and "analytics.nope does not exist; skipped" in out, out
 
 
 def test_a_change_set_applies_exactly_what_was_planned(dsn, tmp_path):

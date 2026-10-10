@@ -126,7 +126,8 @@ def test_a_privilege_pgsesame_does_not_model_is_noted_and_left_alone():
     plan = planner.make(loaded, current)
     assert plan.operations == []
     assert plan.notes == [
-        "r holds RULE on s.t, which pgsesame doesn't manage; left as it is"
+        "RULE on tables isn't a privilege pgsesame manages: 1 grant left as it is "
+        "(r on s.t)"
     ]
 
 
@@ -704,10 +705,9 @@ def test_an_object_has_one_owner_and_must_exist():
                 },
             }
         )
-    with pytest.raises(
-        planner.PlanError, match="owns.tables: a.missing does not exist"
-    ):
-        planner.make(_owners_spec({"tables": ["a.missing"]}), _owned_state())
+    # a missing object is warned about and skipped, not fatal
+    plan = planner.make(_owners_spec({"tables": ["a.missing"]}), _owned_state())
+    assert any("owns.tables: a.missing does not exist" in w for w in plan.warnings)
     with pytest.raises(spec.SpecError, match="on Redshift only a user owns objects"):
         spec.parse(
             {
@@ -930,3 +930,41 @@ def test_iam_links_are_granted_and_revoked_only_when_allowed():
     assert (link.arn, unlink.arn) == (new, gone)
     assert link.statement().as_string(None) == f"AWS IAM GRANT \"app\" TO '{new}'"
     assert unlink.needs == "revoke"
+
+
+def test_a_grant_on_a_missing_table_is_skipped_with_a_warning():
+    loaded = _spec(
+        reader={"type": "role", "privileges": {"tables": {"select": ["s.t", "s.gone"]}}}
+    )
+    state = _state(Role("reader", False), objects={"tables": {"s.t"}, "schemas": {"s"}})
+    plan = planner.make(loaded, state)
+    assert [op.object_name for op in plan.operations if hasattr(op, "object_name")] == [
+        "s.t"
+    ]
+    assert plan.warnings == [
+        "principals.reader.privileges.tables.select: s.gone does not exist; skipped"
+    ]
+
+
+def test_privileges_pgsesame_doesnt_manage_are_one_note_per_kind():
+    # GRANT ALL on Redshift views gives INSERT, DELETE ... on each: thousands of
+    # lines in a CI log, now one per privilege and object type
+    from pgsesame.state import Privilege
+
+    loaded = _spec("redshift", reader={"type": "role"})
+    state = _state(Role("reader", False, False, "role"))
+    views = [f"s.v{i}" for i in range(50)]
+    state.objects = {"schemas": {"s"}, "views": set(views)}
+    state.privileges = {
+        Privilege("reader", "views", v, priv)
+        for v in views
+        for priv in ("insert", "delete")
+    }
+    plan = planner.make(loaded, state)
+    unmanaged = [n for n in plan.notes if "isn't a privilege pgsesame manages" in n]
+    assert unmanaged == [
+        "DELETE on views isn't a privilege pgsesame manages: 50 grants left as they "
+        "are (reader on s.v0, reader on s.v1, reader on s.v10, and 47 more)",
+        "INSERT on views isn't a privilege pgsesame manages: 50 grants left as they "
+        "are (reader on s.v0, reader on s.v1, reader on s.v10, and 47 more)",
+    ]

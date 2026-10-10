@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from pgsesame.planner import _system_role, public_create_notes
+from pgsesame.planner import _system_role, public_create_notes, unmanaged_notes
 from pgsesame.masking import (
     passes_through,
     role_priorities,
@@ -72,6 +72,7 @@ def build(
     selected = sorted(name for name in state.roles if selectable(name))
     principals: dict[str, dict[str, Any]] = {}
     referred: set[str] = set()
+    unmanaged: set[Privilege] = set()
 
     for name in selected:
         role = state.roles[name]
@@ -110,10 +111,7 @@ def build(
             if p.grantee != name or not _in_schemas(p, in_scope):
                 continue
             if p.privilege not in known.get(p.object_type, ()):
-                notes.append(
-                    f"{name}: {p.privilege.upper()} on {p.object_name} isn't a privilege "
-                    "pgsesame manages; left out"
-                )
+                unmanaged.add(p)  # one note per privilege and type, after the loop
                 continue
             grants[p.object_type][p.privilege].add(p.object_name)
         owned: dict[str, list[str]] = defaultdict(list)
@@ -137,6 +135,7 @@ def build(
 
     for name in sorted(referred - set(principals)):
         principals[name] = {"type": "builtin"}  # referred to, not managed
+    notes += unmanaged_notes(unmanaged, "left out")
 
     defaults: dict[tuple[str, str, str], dict[str, set[str]]] = defaultdict(
         lambda: defaultdict(set)

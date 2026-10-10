@@ -474,7 +474,9 @@ def _warn_if_partial(result: planner.Plan) -> None:
 
 
 def _show(result: planner.Plan, db: Connection, gated: bool = True) -> None:
-    """Print the notes and operations; ``gated`` labels those a flag must allow."""
+    """Print the warnings, notes and operations; ``gated`` labels those a flag must allow."""
+    for warning in result.warnings:
+        err.print(f"[change]! {escape(warning)}[/change]")
     for note in result.notes:
         console.print(f"[muted]note: {escape(note)}[/muted]")
     for op in result.operations:
@@ -649,14 +651,18 @@ def apply(
             _show(result, db)
             err.print("plan again (sesame plan -o) and review the new change set")
             raise typer.Exit(1)
-        result = planner.Plan(saved.with_secrets(), result.notes)
+        result = planner.Plan(
+            saved.with_secrets(), result.notes, warnings=result.warnings
+        )
     runnable = result.allowed(allow_revoke, allow_drop)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:
-        _show(planner.Plan([], result.notes), db)  # the notes, as plan prints them
+        # the warnings and notes, as plan prints them
+        _show(planner.Plan([], result.notes, warnings=result.warnings), db)
         console.print("[ok]✓[/ok] nothing to apply")
     else:
-        _show(planner.Plan(runnable, result.notes), db, gated=False)  # allowed
+        allowed = planner.Plan(runnable, result.notes, warnings=result.warnings)
+        _show(allowed, db, gated=False)
         try:
             db.run([op.statement() for op in runnable])
         except PartiallyApplied as e:

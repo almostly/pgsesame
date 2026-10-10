@@ -58,6 +58,9 @@ class Plan:
     operations: list[Operation] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     partial: bool = False  # read by a user the catalog shows only part of
+    # objects the spec names that the database doesn't have: their grants are
+    # skipped, so a dropped table (a dbt model removed) doesn't block every apply
+    warnings: list[str] = field(default_factory=list)
 
     def allowed(self, allow_revoke: bool, allow_drop: bool) -> list[Operation]:
         """Return the operations apply may run with these flags."""
@@ -65,9 +68,14 @@ class Plan:
         return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 
-def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]]:
-    """Return the memberships and privileges the spec asks for, patterns expanded."""
-    problems: list[str] = []
+def desired(
+    spec: Spec, current: State
+) -> tuple[set[Membership], set[Privilege], list[str]]:
+    """Return the memberships and privileges the spec asks for, patterns expanded.
+
+    And what it names that doesn't exist, whose grants are left out of the plan.
+    """
+    missing: list[str] = []
     memberships = {
         Membership(name, parent)
         for name, p in spec.principals.items()
@@ -83,16 +91,14 @@ def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]
                 for pattern in patterns:
                     matched = _expand(pattern, existing)
                     if not matched and not pattern.endswith(".*"):
-                        problems.append(
+                        missing.append(
                             f"principals.{name}.privileges.{kind}.{privilege}: "
-                            f"{pattern} does not exist"
+                            f"{pattern} does not exist; skipped"
                         )
                     # one spelling for TEMP and TEMPORARY, as the readers report it
                     spelt = "temporary" if privilege == "temp" else privilege
                     privileges |= {Privilege(name, kind, obj, spelt) for obj in matched}
-    if problems:
-        raise PlanError(problems)
-    return memberships, privileges
+    return memberships, privileges, missing
 
 
 def _expand(pattern: str, existing: set[str]) -> set[str]:
@@ -122,7 +128,8 @@ def make(
     plan = Plan(partial=not current.sees_everything)
     redshift = spec.engine == "redshift"
     managed = set(spec.principals)
-    want_members, want_privileges = desired(spec, current)
+    want_members, want_privileges, missing = desired(spec, current)
+    plan.warnings += missing
 
     def identity(name: str) -> Identity:
         """Return the kind of identity a name is: the spec's word, else the database's."""
@@ -265,11 +272,7 @@ def make(
     # is reported and left in place: never planned, never revoked, never fatal
     known = PRIVILEGES[spec.engine]
     unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
-    for p in sorted(unknown):
-        plan.notes.append(
-            f"{p.grantee} holds {p.privilege.upper()} on {p.object_name}, which "
-            "pgsesame doesn't manage; left as it is"
-        )
+    plan.notes += unmanaged_notes(unknown, "left as they are")
     # a built-in role's privileges are managed only where the spec speaks for it:
     # the schemas (and databases) its privileges name. Elsewhere they are the
     # platform's (Supabase grants anon and authenticated a lot in public), and
@@ -294,8 +297,9 @@ def make(
             for pattern in patterns:
                 matched = _expand(pattern, existing)
                 if not matched and not pattern.endswith(".*"):
-                    problems.append(
-                        f"principals.{name}.owns.{kind}: {pattern} does not exist"
+                    plan.warnings.append(
+                        f"principals.{name}.owns.{kind}: {pattern} does not exist; "
+                        "skipped"
                     )
                 for obj in sorted(matched):
                     owner_of[(kind, obj)] = name
@@ -619,6 +623,30 @@ def _plan_iam(spec: Spec, current: State, managed: set[str]) -> list[Operation]:
     return [LinkIam(role=r, arn=a) for r, a in sorted(want - have)] + [
         UnlinkIam(role=r, arn=a) for r, a in sorted(have - want)
     ]
+
+
+def unmanaged_notes(privileges: set[Privilege], outcome: str) -> list[str]:
+    """Return one note per privilege and object type pgsesame doesn't manage.
+
+    A warehouse can hold thousands (GRANT ALL on views gives Redshift's INSERT,
+    DELETE ... on each): a count and a few examples, not a line each.
+    """
+    by_kind: dict[tuple[str, str], list[Privilege]] = {}
+    for p in sorted(privileges):
+        by_kind.setdefault((p.privilege, p.object_type), []).append(p)
+    notes = []
+    for (privilege, kind), held in sorted(by_kind.items()):
+        examples = ", ".join(f"{p.grantee} on {p.object_name}" for p in held[:3])
+        more = f", and {len(held) - 3} more" if len(held) > 3 else ""
+        if len(held) == 1:
+            count, said = "1 grant", outcome.replace("they are", "it is")
+        else:
+            count, said = f"{len(held)} grants", outcome
+        notes.append(
+            f"{privilege.upper()} on {kind} isn't a privilege pgsesame manages: "
+            f"{count} {said} ({examples}{more})"
+        )
+    return notes
 
 
 def _system_role(name: str) -> bool:
