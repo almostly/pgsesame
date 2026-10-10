@@ -249,11 +249,18 @@ default_privileges:
 
 `sesame import` writes the spec that reproduces what the database grants today,
 so a first plan has nothing to do, and the spec is edited from there. On Redshift
-it needs a superuser: Redshift shows anyone else only their own grants, and a
-spec missing the rest would have a superuser's plan revoke them, so import
-refuses rather than write it (an IAM user becomes a superuser with
-`ALTER USER "IAM:..." PASSWORD '...' CREATEUSER`, and IAM sign-in keeps working).
-Plan and apply as a non-superuser say so before anything else:
+it needs to see every grant: Redshift shows a user only its own, unless it is a
+superuser or holds the `ACCESS SYSTEM TABLE` system permission, and a spec missing
+the rest would have a plan revoke them, so import refuses rather than write it.
+The permission is the least-privileged way, through a role:
+
+```sql
+CREATE ROLE sesame_reader;
+GRANT ACCESS SYSTEM TABLE TO ROLE sesame_reader;
+GRANT ROLE sesame_reader TO "IAM:deployer";
+```
+
+Plan and apply without it say so before anything else:
 
 ```bash
 sesame import --target dwh --schema collections --schema risk_engine -o permissions.yaml

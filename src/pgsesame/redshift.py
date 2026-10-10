@@ -90,6 +90,37 @@ from svv_column_privileges
 """
 
 
+# who holds the system permission that shows every row of the SVV views (a
+# non-superuser sees its own grants of it, and those of its roles)
+SYSTEM_TABLE_ACCESS = """
+select identity_name, identity_type from svv_system_privileges
+where system_privilege = 'ACCESS SYSTEM TABLE'
+"""
+
+
+def _reads_system_tables(db: Connection, me: str, rows: dict[str, list]) -> bool:
+    """Return whether ``me`` holds ACCESS SYSTEM TABLE, itself or through its roles.
+
+    Its own role grants are visible to it, so the roles it holds are known; a
+    catalog without svv_system_privileges (an older redshift-local) says no.
+    """
+    held = {role for user, role in rows["user_roles"] if user == me}
+    grants = rows["role_roles"]
+    while True:  # roles granted to its roles, and so on
+        more = {granted for role, granted in grants if role in held} - held
+        if not more:
+            break
+        held |= more
+    try:
+        holders = db.rows(SYSTEM_TABLE_ACCESS)
+    except Exception:  # no such view: nothing tells, so the safe answer
+        return False
+    return any(
+        (kind == "user" and name == me) or (kind == "role" and name in held)
+        for name, kind in holders
+    )
+
+
 def is_redshift(db: Connection) -> bool:
     """Return whether the database has Redshift's SVV views (Redshift or redshift-local).
 
@@ -127,7 +158,7 @@ def read(db: Connection, columns: bool = True) -> State:
     Data API they run at the same time, each an HTTP round trip.
     """
     queries = {
-        "me": "select usesuper from pg_user where usename = current_user",
+        "me": "select usename, usesuper from pg_user where usename = current_user",
         "users": USERS,
         "groups": GROUPS,
         "roles": ROLES,
@@ -148,8 +179,11 @@ def read(db: Connection, columns: bool = True) -> State:
 
     state = State()
     me = rows["me"]
-    # a non-superuser sees only its own grants in the SVV views (and no masking)
-    state.sees_everything = bool(me and me[0][0])
+    # a non-superuser sees only its own grants in the SVV views (and no masking),
+    # unless it holds ACCESS SYSTEM TABLE: then it sees every row, as a superuser
+    state.sees_everything = bool(me and me[0][1]) or (
+        bool(me) and _reads_system_tables(db, me[0][0], rows)
+    )
     users: dict[int, str] = {}
     for sysid, name, superuser in rows["users"]:
         users[sysid] = name

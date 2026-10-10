@@ -438,9 +438,10 @@ def _connect(target: ConnectOptions) -> Connection:
 
 
 PARTIAL = (
-    "this user isn't a superuser, and Redshift shows a non-superuser only its own "
-    "grants: this plan can't see the rest, so grants it adds may already exist and "
-    "drift elsewhere goes unseen. Plan as a superuser to see everything."
+    "this user isn't a superuser and doesn't hold ACCESS SYSTEM TABLE, so Redshift "
+    "shows it only its own grants: this plan can't see the rest, so grants it adds "
+    "may already exist and drift elsewhere goes unseen. To see everything without "
+    "a superuser: GRANT ACCESS SYSTEM TABLE TO ROLE <a role this user holds>."
 )
 
 
@@ -725,11 +726,11 @@ def import_spec(
         # what it can't see would be missing from the spec, and a superuser's plan
         # of that spec would revoke it: write nothing
         err.print(
-            "[error]✗[/error] import needs a superuser on Redshift: it shows a "
-            "non-superuser only its own grants, so the spec would leave out everyone "
-            "else's memberships and grants, and a superuser's plan of it would revoke "
-            "them. Connect as a superuser (an IAM user is one after ALTER USER "
-            "\"IAM:...\" PASSWORD '...' CREATEUSER)."
+            "[error]✗[/error] import needs to see every grant: Redshift shows this "
+            "user only its own, so the spec would leave out everyone else's "
+            "memberships and grants, and a plan of it would revoke them. Grant it "
+            "ACCESS SYSTEM TABLE through a role (GRANT ACCESS SYSTEM TABLE TO ROLE "
+            "<a role it holds>), or connect as a superuser."
         )
         raise typer.Exit(1)
     (me,) = db.rows("select current_user")[0]

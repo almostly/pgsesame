@@ -436,7 +436,8 @@ def test_a_user_that_sees_only_its_own_grants_imports_nothing(dsn, tmp_path):
         "import", "--dsn", limited, "--engine", "redshift", "-o", str(out_file)
     )
     assert code == 1, out
-    assert "import needs a superuser on Redshift" in out
+    assert "import needs to see every grant" in out
+    assert "ACCESS SYSTEM TABLE" in out
     assert not out_file.exists()
 
     spec = _spec(
@@ -444,4 +445,39 @@ def test_a_user_that_sees_only_its_own_grants_imports_nothing(dsn, tmp_path):
         f"version: 1\nengine: redshift\nprincipals:\n  {P}limited: {{type: user}}\n",
     )
     code, out = _sesame("plan", spec, "--dsn", limited)
-    assert "this user isn't a superuser" in out, out
+    assert "this user isn't a superuser and doesn't hold ACCESS SYSTEM TABLE" in out, (
+        out
+    )
+
+
+def test_access_system_table_through_a_role_sees_everything(dsn, tmp_path):
+    # the least-privileged way to read every grant: no superuser needed
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE USER {P}limited PASSWORD 'Limited-pw-1'")
+        conn.execute(f"CREATE ROLE {P}catalog")
+        try:
+            conn.execute(f"GRANT ACCESS SYSTEM TABLE TO ROLE {P}catalog")
+        except psycopg.Error:
+            pytest.skip("this Redshift has no ACCESS SYSTEM TABLE permission")
+        conn.execute(f"GRANT ROLE {P}catalog TO {P}limited")
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
+    limited = make_conninfo(dsn, user=f"{P}limited", password="Limited-pw-1")
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        limited,
+        "--prefix",
+        P,
+        "--schema",
+        "rs_test",
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    # what a non-superuser can't see without it: others' memberships and grants
+    assert f"member_of:\n    - {P}writer" in text and "groups:" in text, text
+    code, out = _sesame("plan", _spec(tmp_path), "--dsn", limited)
+    assert "ACCESS SYSTEM TABLE" not in out, out  # no partial-view warning
+    assert f'GRANT ROLE "{P}writer" TO "{P}alice"' not in out, out
