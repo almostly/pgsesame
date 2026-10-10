@@ -210,12 +210,12 @@ def read(db: Connection, columns: bool = True) -> State:
         grantee: str, identity: str, kind: str, name: str, priv: str, option=False
     ) -> None:
         """Record one SVV privilege row; PUBLIC's only as a schema grant to warn about."""
-        if identity == "public":  # PUBLIC isn't managed yet; its schema grants are
-            if kind == "schemas":  # read to warn about
-                state.public_privileges.add(Privilege("public", kind, name, priv))
-            return
         if priv == "temp":  # one spelling, as the planner writes it
             priv = "temporary"
+        if identity == "public":  # PUBLIC: managed where the spec declares it, and
+            grantee = "public"  # its schema grants read to warn about where not
+            if kind == "schemas":
+                state.public_privileges.add(Privilege("public", kind, name, priv))
         state.privileges.add(Privilege(grantee, kind, name, priv))
         if _true(option):
             state.grant_options.add(Privilege(grantee, kind, name, priv))

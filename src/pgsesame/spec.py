@@ -340,6 +340,13 @@ def _check(spec: Spec) -> list[str]:
     limit = MAX_NAME_BYTES[spec.engine]
     for name, p in principals.items():
         where = f"principals.{name}"
+        if name.lower() == "public" and (name != "public" or p.type != "builtin"):
+            problems.append(
+                f"{where}: PUBLIC (every user) is declared as public: "
+                "{type: builtin}, with only its privileges"
+            )
+        if "public" in p.member_of or "public" in p.groups:
+            problems.append(f"{where}: every user is in PUBLIC already")
         if len(name.encode()) > limit:
             problems.append(f"{where}: longer than {spec.engine}'s {limit} bytes")
         if p.type == "builtin":
@@ -456,7 +463,11 @@ def _check(spec: Spec) -> list[str]:
         where = f"default_privileges[{i}]"
         # the owner need not be declared (often the ETL or admin user that
         # creates the objects); the plan says if it doesn't exist
-        if rule.grantee not in principals:
+        if rule.grantee == "public":
+            problems.append(
+                f"{where}.grantee: default privileges for PUBLIC aren't planned yet"
+            )
+        elif rule.grantee not in principals:
             problems.append(f"{where}.grantee: {rule.grantee} is not declared")
         elif principals[rule.grantee].type == "group" and not redshift:
             problems.append(f"{where}.grantee: groups exist on Redshift only")

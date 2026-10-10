@@ -799,8 +799,9 @@ def test_create_for_public_on_a_schema_in_scope_is_warned_about():
     )
     notes = [n for n in planner.make(loaded, state).notes if "PUBLIC" in n]
     assert notes == [
-        "schema public: PUBLIC (every user) can CREATE in it, which pgsesame doesn't "
-        "manage yet; REVOKE CREATE ON SCHEMA public FROM PUBLIC closes it"
+        "schema public: PUBLIC (every user) can CREATE in it, which the spec doesn't "
+        "manage; REVOKE CREATE ON SCHEMA public FROM PUBLIC closes it (or declare "
+        "public: {type: builtin} with its grants)"
     ]  # app is outside manage.schemas; USAGE isn't warned about
     _, notes = importer.build(state, "postgres", schemas=["public"])
     assert sum("PUBLIC (every user) can CREATE" in n for n in notes) == 1
@@ -990,3 +991,62 @@ def test_owner_changes_need_allow_owner_and_password_resets_allow_revoke(monkeyp
         AlterOwner
     ]
     assert [type(op) for op in plan.allowed(True, False)] == [AlterPassword]
+
+
+def test_public_is_granted_and_its_drift_revoked_only_where_the_spec_speaks():
+    # PUBLIC's defaults elsewhere (CONNECT on the database, other schemas) stay
+    from pgsesame.ops import Grant, Revoke
+    from pgsesame.state import Privilege
+
+    loaded = _spec(
+        public={"type": "builtin", "privileges": {"tables": {"select": ["s.t"]}}}
+    )
+    state = _state(objects={"tables": {"s.t", "s.u", "other.x"}, "schemas": {"s"}})
+    state.privileges = {
+        Privilege("public", "tables", "s.u", "insert"),  # in s: drift
+        Privilege("public", "tables", "other.x", "select"),  # outside: left alone
+        Privilege("public", "databases", "app", "connect"),  # PostgreSQL's default
+    }
+    plan = planner.make(loaded, state)
+    statements = [op.statement().as_string(None) for op in plan.operations]
+    assert statements == [
+        'GRANT SELECT ON TABLE "s"."t" TO PUBLIC',
+        'REVOKE INSERT ON TABLE "s"."u" FROM PUBLIC',
+    ]
+    assert isinstance(plan.operations[0], Grant) and isinstance(
+        plan.operations[1], Revoke
+    )
+    assert plan.operations[1].needs == "revoke"
+
+
+def test_public_is_declared_only_as_a_builtin():
+    def problems(principals, **more):
+        with pytest.raises(spec.SpecError) as err:
+            spec.parse(
+                {"version": 1, "engine": "postgres", "principals": principals, **more}
+            )
+        return err.value.problems
+
+    assert problems({"public": {"type": "role"}})[0].startswith(
+        "principals.public: PUBLIC"
+    )
+    assert problems({"PUBLIC": {"type": "builtin"}})[0].startswith(
+        "principals.PUBLIC: PUBLIC"
+    )
+    assert (
+        problems(
+            {
+                "public": {"type": "builtin"},
+                "app": {"type": "user", "member_of": ["public"]},
+            }
+        )[0]
+        == "principals.app: every user is in PUBLIC already"
+    )
+    assert problems(
+        {"public": {"type": "builtin"}},
+        default_privileges=[
+            {"owner": "etl", "grantee": "public", "tables": ["select"]}
+        ],
+    ) == [
+        "default_privileges[0].grantee: default privileges for PUBLIC aren't planned yet"
+    ]

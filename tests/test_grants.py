@@ -109,3 +109,20 @@ def test_the_command_writes_json_or_csv(tmp_path):
     assert len(rows) == 6 and rows[0]["grantee"] == "lidris"
     bad = runner.invoke(app, ["grants", str(path), "--object", "loans"])
     assert bad.exit_code == 1 and "schema.table" in bad.output
+
+
+def test_public_is_its_own_grantee_type():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "redshift",
+            "principals": {
+                "public": {
+                    "type": "builtin",
+                    "privileges": {"tables": {"select": ["s.t"]}},
+                }
+            },
+        }
+    )
+    (row,) = grants.rows(loaded)
+    assert (row.grantee, row.grantee_type) == ("public", "public")

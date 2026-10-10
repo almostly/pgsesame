@@ -111,6 +111,8 @@ class Operation(BaseModel):
 
 def _grantee(name: str, identity: Identity) -> sql.Composed:
     """Return a grantee as GRANT and REVOKE name it: Redshift says GROUP and ROLE."""
+    if name == "public":  # PUBLIC, every user: a keyword (no role can be named so)
+        return sql.SQL("{}").format(sql.SQL("PUBLIC"))
     if identity == "group":
         return sql.SQL("GROUP {}").format(sql.Identifier(name))
     if identity == "role":
@@ -643,7 +645,7 @@ def _type(text: str) -> sql.SQL:
 def _mask_grantee(grantee: str, grantee_type: str) -> sql.Composable:
     """Return a masking grantee: PUBLIC, ROLE name, or a user's name."""
     if grantee_type == "public":
-        return sql.SQL("PUBLIC")
+        return sql.SQL("{}").format(sql.SQL("PUBLIC"))
     if grantee_type == "role":
         return sql.SQL("ROLE {}").format(sql.Identifier(grantee))
     return sql.Identifier(grantee)

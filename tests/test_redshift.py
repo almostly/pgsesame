@@ -223,6 +223,40 @@ def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
     psycopg.connect(alice).close()
 
 
+def test_grants_to_public(dsn, tmp_path):
+    public = f"""
+version: 1
+engine: redshift
+principals:
+  public:
+    type: builtin
+    privileges:
+      schemas: {{usage: [rs_test]}}
+      tables: {{select: [rs_test.daily]}}
+  {P}nobody:
+    type: user
+    password_env: RS_TEST_NOBODY_PW
+"""
+    env = {"RS_TEST_NOBODY_PW": "Nobody-pw-123"}
+    spec = _spec(tmp_path, public)
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'GRANT SELECT ON TABLE "rs_test"."daily" TO PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    nobody = make_conninfo(dsn, user=f"{P}nobody", password="Nobody-pw-123")
+    with psycopg.connect(nobody) as conn:  # holds nothing itself: PUBLIC's
+        conn.execute("SELECT count(*) FROM rs_test.daily")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("GRANT INSERT ON rs_test.daily TO PUBLIC")
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'REVOKE INSERT ON TABLE "rs_test"."daily" FROM PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # for the next test
+        conn.execute("REVOKE ALL ON rs_test.daily FROM PUBLIC")
+        conn.execute("REVOKE USAGE ON SCHEMA rs_test FROM PUBLIC")
+
+
 def test_memberships_are_removed_only_when_allowed(dsn, tmp_path):
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
     changed = SPEC.replace(

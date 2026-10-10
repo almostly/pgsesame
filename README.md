@@ -191,8 +191,20 @@ use IAM, or set `password: disabled`.
 
 A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
 builtin`: granted to and joined, never created or altered, and their privileges are
-managed only in the schemas the spec names for them. Row-level security is
-declared per table:
+managed only in the schemas the spec names for them. PUBLIC, every user, is one too,
+named `public`: its grants are planned `TO PUBLIC` and revoked as drift only in
+the schemas its privileges name, so its defaults elsewhere (CONNECT on the
+database, USAGE on `public`) are left alone:
+
+```yaml
+principals:
+  public:
+    type: builtin
+    privileges:
+      tables: {select: [reference.countries]}
+```
+
+Row-level security is declared per table:
 
 ```yaml
 principals:

@@ -155,11 +155,21 @@ def make(
                 f"principals.{name}.member_of: {', '.join(joined)} is a group; "
                 "planned as groups (groups: [...] says so in the spec)"
             )
-    plan.notes += public_create_notes(current, spec.manage.schemas)
+    # where the spec declares PUBLIC's grants, it manages them: no warning there
+    managed_public = (
+        _scope(spec.principals["public"])[0] if "public" in spec.principals else set()
+    )
+    plan.notes += [
+        note
+        for note in public_create_notes(current, spec.manage.schemas)
+        if note.split(":", 1)[0].removeprefix("schema ") not in managed_public
+    ]
     builtins = {name for name, p in spec.principals.items() if p.type == "builtin"}
     for name, p in sorted(spec.principals.items()):
         role = current.roles.get(name)
         if p.type == "builtin":
+            if name == "public":  # PUBLIC isn't a role: nothing to find
+                continue
             if role is None:
                 problems.append(
                     f"principals.{name}: the built-in role doesn't exist on this server"
@@ -603,14 +613,15 @@ def _plan_defaults(
 def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:
     """Return a warning per schema in scope where PUBLIC (every user) may CREATE.
 
-    pgsesame doesn't manage PUBLIC's grants yet, so this is said, not revoked:
-    any user can create objects there (and on PostgreSQL before 15, functions
-    that shadow ones other users call).
+    Unless the spec declares PUBLIC's grants for the schema, this is said, not
+    revoked: any user can create objects there (and on PostgreSQL before 15,
+    functions that shadow ones other users call).
     """
     return [
         f"schema {p.object_name}: PUBLIC (every user) can CREATE in it, which "
-        "pgsesame doesn't manage yet; REVOKE CREATE ON SCHEMA "
-        f"{p.object_name} FROM PUBLIC closes it"
+        "the spec doesn't manage; REVOKE CREATE ON SCHEMA "
+        f"{p.object_name} FROM PUBLIC closes it (or declare public: "
+        "{type: builtin} with its grants)"
         for p in sorted(state.public_privileges)
         if p.object_type == "schemas"
         and p.privilege == "create"

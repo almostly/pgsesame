@@ -24,14 +24,16 @@
       ~ " and case d.grantee_type"
       ~ "   when 'user' then exists (select 1 from pg_user u where u.usename = d.grantee)"
       ~ "   when 'group' then exists (select 1 from pg_catalog.pg_group where groname = d.grantee)"
+      ~ "   when 'public' then true"
       ~ "   else exists (select 1 from svv_roles r where r.role_name = d.grantee) end"
       ~ " order by 3, 1, 2") -%}
   {%- set statements = [] -%}
   {%- for privilege, column, grantee, grantee_type in rows.rows -%}
     {%- set to = {'group': 'GROUP ', 'role': 'ROLE '}.get(grantee_type, '') -%}
+    {%- set who = 'PUBLIC' if grantee_type == 'public' else adapter.quote(grantee) -%}
     {%- set cols = ' (' ~ adapter.quote(column) ~ ')' if column else '' -%}
     {%- do statements.append(
-        'grant ' ~ privilege ~ cols ~ ' on ' ~ this ~ ' to ' ~ to ~ adapter.quote(grantee)) -%}
+        'grant ' ~ privilege ~ cols ~ ' on ' ~ this ~ ' to ' ~ to ~ who) -%}
   {%- endfor -%}
   {{ return(statements | join(';\n')) }}
 {% endmacro %}

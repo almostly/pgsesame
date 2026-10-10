@@ -37,7 +37,7 @@ class GrantRow:
     column: str  # for a column grant, else empty
     privilege: str
     grantee: str
-    grantee_type: str  # Redshift: user, group or role; PostgreSQL: role
+    grantee_type: str  # Redshift: user, group or role; PostgreSQL: role; public
 
 
 def rows(spec: Spec, only: str | None = None) -> list[GrantRow]:
@@ -48,7 +48,9 @@ def rows(spec: Spec, only: str | None = None) -> list[GrantRow]:
     """
     out: set[GrantRow] = set()
     for name, p in spec.principals.items():
-        if spec.engine == "redshift":
+        if name == "public":
+            kind = "public"  # GRANT ... TO PUBLIC
+        elif spec.engine == "redshift":
             kind = "role" if p.type == "builtin" else p.type
         else:
             kind = "role"

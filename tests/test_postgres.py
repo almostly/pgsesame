@@ -159,6 +159,38 @@ def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
     psycopg.connect(make_conninfo(dsn, user=f"{P}alice", password="alice-pw-1")).close()
 
 
+def test_grants_to_public(dsn, tmp_path):
+    public = f"""
+version: 1
+engine: postgres
+principals:
+  public:
+    type: builtin
+    privileges:
+      schemas: {{usage: [analytics]}}
+      tables: {{select: [analytics.daily]}}
+  {P}nobody:
+    type: user
+    password_env: NOBODY_PW
+"""
+    env = {"NOBODY_PW": "nobody-pw-1"}
+    spec = _spec(tmp_path, public)
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'GRANT SELECT ON TABLE "analytics"."daily" TO PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    nobody = make_conninfo(dsn, user=f"{P}nobody", password="nobody-pw-1")
+    with psycopg.connect(nobody) as conn:  # holds nothing itself: PUBLIC's
+        conn.execute("SELECT count(*) FROM analytics.daily")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("GRANT INSERT ON analytics.daily TO PUBLIC")
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'REVOKE INSERT ON TABLE "analytics"."daily" FROM PUBLIC' in out, out
+    assert "CONNECT" not in out  # PUBLIC's database default: not in its scope
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+
+
 def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     spec = _spec(tmp_path)
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0

@@ -34,6 +34,10 @@ SPEC = f"""
 version: 1
 engine: redshift
 principals:
+  public:
+    type: builtin
+    privileges:
+      tables: {{select: [marts.loans]}}
   {P}analysts:
     type: group
     privileges:
@@ -129,7 +133,11 @@ def _grants(conn: psycopg.Connection) -> set[tuple[str, str]]:
         "FROM svv_column_privileges "
         "WHERE namespace_name = 'marts' AND relation_name = 'loans'"
     ).fetchall()
-    return {(who, what) for who, what in [*on_table, *on_column] if who.startswith(P)}
+    return {
+        (who, what)
+        for who, what in [*on_table, *on_column]
+        if who.startswith(P) or who == "public"
+    }
 
 
 def _table_id(conn: psycopg.Connection) -> int:
@@ -154,6 +162,7 @@ def _publish(spec: Path) -> None:
 
 def test_a_rebuilt_table_keeps_the_declared_grants(admin, tmp_path):
     expected = {
+        ("public", "SELECT"),
         (f"{P}analysts", "SELECT"),
         (f"{P}lidris", "SELECT"),
         (f"{P}support", "SELECT (id)"),
@@ -197,6 +206,7 @@ def test_the_hook_skips_a_grantee_that_doesnt_exist(admin, tmp_path):
     admin.execute(f'DROP USER "{P}lidris"')
     _dbt("run")
     assert _grants(admin) == {
+        ("public", "SELECT"),
         (f"{P}analysts", "SELECT"),
         (f"{P}support", "SELECT (id)"),
     }
