@@ -295,6 +295,14 @@ writes it), `column`, `privilege`, `grantee` and `grantee_type` (on Redshift use
 group or role, which decides the `GRANT` syntax). `--object schema.table` keeps
 the rows that reach that table: its own and its schema's `*`.
 
+[examples/dbt](examples/dbt) is the pattern for dbt: after each apply,
+`publish_grants.py` loads `sesame grants --format csv` into
+`monitoring.declared_grants`, and one shared post-hook, `pgsesame_regrant()`,
+grants a model's rows right after it builds, in the same transaction, skipping
+grantees that don't exist. dbt's own `grants:` config would revoke everything
+else on each build; this only adds back what the spec declares.
+`tests/test_dbt.py` runs it with dbt against redshift-local.
+
 ### Adopting an existing database
 
 `sesame import` writes the spec that reproduces what the database grants today,
