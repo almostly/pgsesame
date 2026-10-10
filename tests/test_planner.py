@@ -80,6 +80,46 @@ def test_a_superuser_in_the_spec_is_left_alone():
     assert "admin is a superuser; pgsesame leaves it alone" in plan.notes
 
 
+def test_what_a_superuser_owns_is_planned_though_it_is_left_alone_otherwise():
+    from pgsesame.ops import AlterOwner
+
+    loaded = _spec(
+        "redshift",
+        dpu_redshift={
+            "type": "user",
+            "owns": {"schemas": ["mart"], "tables": ["mart.loans", "mart.missing"]},
+            "privileges": {"schemas": {"usage": ["mart"]}},
+        },
+    )
+    current = _state(
+        Role("dpu_redshift", True, superuser=True, identity="user"),
+        Role("etl_owner", True, identity="user"),
+        objects={"schemas": {"mart"}, "tables": {"mart.loans"}},
+        owners={
+            ("schemas", "mart"): "etl_owner",
+            ("tables", "mart.loans"): "etl_owner",
+        },
+    )
+    plan = planner.make(loaded, current)
+    assert [op.statement().as_string(None) for op in plan.operations] == [
+        'ALTER SCHEMA "mart" OWNER TO "dpu_redshift"',
+        'ALTER TABLE "mart"."loans" OWNER TO "dpu_redshift"',
+    ]
+    assert all(isinstance(op, AlterOwner) for op in plan.operations)  # no grant
+    assert plan.allowed(False, False) == []  # behind --allow-owner, as any owner
+    assert any("mart.missing does not exist" in w for w in plan.warnings)
+    assert "dpu_redshift is a superuser; pgsesame manages only what it owns" in (
+        plan.notes
+    )
+
+    # once it owns them, nothing to do
+    current.owners = {
+        ("schemas", "mart"): "dpu_redshift",
+        ("tables", "mart.loans"): "dpu_redshift",
+    }
+    assert planner.make(loaded, current).operations == []
+
+
 def test_unmanaged_roles_keep_their_redshift_identity_in_a_removal():
     loaded = _spec("redshift", alice={"type": "user"})
     current = _state(

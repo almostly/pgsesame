@@ -266,7 +266,9 @@ objects it lists (`schema.*` for every table in a schema). Objects the spec
 doesn't list keep their owner; an owner's privileges on its own objects are
 implied, so they're neither granted nor revoked. A change of owner takes from the
 old owner everything owning gave it, so apply runs it only with `--allow-owner`;
-without it, the plan shows it and apply skips it. pgsesame never drops a schema,
+without it, the plan shows it and apply skips it. A superuser's memberships and
+privileges are left alone (it bypasses them), but what it owns is planned like
+any other owner's. pgsesame never drops a schema,
 table, view, user, group or role. On Redshift the owner is a user:
 
 ```yaml
