@@ -578,6 +578,33 @@ def show(
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
 
 
+@app.command(name="grants")
+def grants_command(
+    path: Path = SpecPath,
+    only: str | None = typer.Option(
+        None,
+        "--object",
+        help="Only what one object gets (schema.table): its own grants and its "
+        "schema's *.",
+    ),
+    fmt: str = typer.Option("json", "--format", help="json or csv."),
+) -> None:
+    """List the grants the spec declares, as JSON or CSV (no database needed).
+
+    For tools that rebuild tables (dbt, Glue): a rebuilt table loses its grants, and
+    this is what to put back, as pgsesame reads the spec. schema.* stays * .
+    """
+    from pgsesame import grants
+
+    if fmt not in ("json", "csv"):
+        err.print("[error]✗[/error] --format is json or csv")
+        raise typer.Exit(1)
+    if only is not None and only.count(".") != 1:
+        err.print("[error]✗[/error] --object is schema.table")
+        raise typer.Exit(1)
+    sys.stdout.write(grants.dump(grants.rows(_load(path), only), fmt))
+
+
 def _load_changeset(path: Path) -> ChangeSet:
     """Load a saved change set, or print why it can't be used and exit 1."""
     try:

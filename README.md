@@ -278,6 +278,23 @@ default_privileges:
     tables: [select]
 ```
 
+### Tables that are rebuilt
+
+A grant belongs to one table, so a tool that rebuilds tables (dbt's table
+materialization, Glue, a stored procedure) drops its grants with the old one.
+`sesame grants` lists what the spec grants, from the spec alone, for such a tool
+to put back right after a rebuild, without parsing the YAML itself:
+
+```bash
+sesame grants permissions.yaml --object bianalytics.loans          # JSON
+sesame grants permissions.yaml --format csv > declared_grants.csv  # every grant
+```
+
+Each row is `object_type`, `schema`, `object` (`*` for `schema.*`, as the spec
+writes it), `column`, `privilege`, `grantee` and `grantee_type` (on Redshift user,
+group or role, which decides the `GRANT` syntax). `--object schema.table` keeps
+the rows that reach that table: its own and its schema's `*`.
+
 ### Adopting an existing database
 
 `sesame import` writes the spec that reproduces what the database grants today,
