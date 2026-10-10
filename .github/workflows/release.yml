@@ -69,6 +69,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # signed in, Docker Hub's pull limit is per account rather than per runner IP
+      # (the binfmt image below and the Dockerfile's python base both come from there)
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/setup-qemu-action@v3  # arm64 on an amd64 runner
 
       - uses: docker/setup-buildx-action@v3
