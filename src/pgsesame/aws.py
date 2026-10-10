@@ -36,6 +36,11 @@ from pydantic import SecretStr
 
 from pgsesame.db import Database
 
+# BatchExecuteStatement takes at most 40 SQL statements
+BATCH_LIMIT = 40
+# how long a Data API session outlives its last statement, in seconds
+SESSION_KEEP_ALIVE = 300
+
 
 _SESSION: dict[str, str | None] = {"profile": None, "region": None}
 
@@ -223,8 +228,17 @@ class DataApiDatabase:
         return statement.as_string()
 
     def run(self, statements: list[sql.Composed]) -> None:
-        """Run the statements as one batch, which Redshift runs as one transaction."""
+        """Run the statements as one transaction.
+
+        Up to ``BATCH_LIMIT`` statements go as one batch, which Redshift runs as
+        one transaction. A longer plan would be refused as a batch, so it runs in a
+        Data API session instead: BEGIN, each statement, COMMIT, one call each on
+        the session's connection, and ROLLBACK if any of them fails.
+        """
         sqls = [self.render(statement) for statement in statements]
+        if len(sqls) > BATCH_LIMIT:
+            self._run_in_session(sqls)
+            return
         try:
             started = self.client.batch_execute_statement(Sqls=sqls, **self._where)
         except Exception as e:
@@ -237,6 +251,35 @@ class DataApiDatabase:
                 ) from None
             raise
         self._wait(started["Id"])
+
+    def _run_in_session(self, sqls: list[str]) -> None:
+        """Run ``sqls`` between BEGIN and COMMIT on one Data API session's connection.
+
+        BEGIN opens the session (named by the database and credentials); every
+        statement after it names only the session, so all of them share its
+        transaction. The first failure rolls it back and is raised.
+        """
+        started = self.client.execute_statement(
+            Sql="BEGIN", SessionKeepAliveSeconds=SESSION_KEEP_ALIVE, **self._where
+        )
+        self._wait(started["Id"])
+        session = started["SessionId"]
+
+        def call(text: str) -> None:
+            """Run one statement on the session and wait for it to finish."""
+            # a session already names the database and the credentials
+            self._wait(self.client.execute_statement(Sql=text, SessionId=session)["Id"])
+
+        try:
+            for text in sqls:
+                call(text)
+        except Exception:
+            try:
+                call("ROLLBACK")
+            except Exception:  # the session ending rolls the transaction back too
+                pass
+            raise
+        call("COMMIT")
 
     def close(self) -> None:
         """Nothing to close: each call is its own HTTPS request."""
