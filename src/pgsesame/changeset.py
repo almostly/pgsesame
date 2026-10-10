@@ -117,5 +117,6 @@ def is_changeset(path: str | Path) -> bool:
 
 
 def _sha256(raw: dict[str, Any]) -> str:
+    """Return the SHA-256 of ``raw`` as canonical JSON (sorted keys, no spaces)."""
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

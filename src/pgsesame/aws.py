@@ -57,6 +57,7 @@ def configure_defaults(profile: str | None, region: str | None) -> None:
 
 
 def _boto3(service: str = ""):
+    """Return the boto3 module, or say which extra installs it."""
     try:
         import boto3
     except ImportError as e:
@@ -167,6 +168,7 @@ class DataApiDatabase:
         return self._label
 
     def _wait(self, statement_id: str) -> dict[str, Any]:
+        """Poll a statement until it finishes; raise its error if it failed."""
         delay = 0.1
         while True:
             described = self.client.describe_statement(Id=statement_id)
@@ -207,6 +209,7 @@ class DataApiDatabase:
     def _result(
         self, statement_id: str, described: dict[str, Any]
     ) -> list[tuple[Any, ...]]:
+        """Return a finished statement's rows, following every page."""
         if not described.get("HasResultSet"):
             return []
         out: list[tuple[Any, ...]] = []
@@ -286,6 +289,7 @@ class DataApiDatabase:
 
 
 def _value(field: dict[str, Any]) -> Any:
+    """Return a Data API field (one typed key, or isNull) as a Python value."""
     if field.get("isNull"):
         return None
     for key in ("stringValue", "longValue", "booleanValue", "doubleValue"):
@@ -489,6 +493,7 @@ def _rds_value(field: dict[str, Any]) -> Any:
 
 
 def _rds_array(array: dict[str, Any]) -> list[Any]:
+    """Return an RDS Data API arrayValue as a list, nested arrays included."""
     if "arrayValues" in array:
         return [_rds_array(a) for a in array["arrayValues"]]
     for key in ("stringValues", "longValues", "booleanValues", "doubleValues"):

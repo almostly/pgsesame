@@ -105,6 +105,7 @@ def config_dir() -> Path:
 
 
 def _personal_path() -> Path:
+    """Return where the personal targets file lives."""
     return config_dir() / "targets.toml"
 
 
@@ -130,6 +131,7 @@ def project_file(start: Path | None = None) -> Path | None:
 
 
 def _load(path: Path) -> dict[str, Any]:
+    """Return a targets file's contents (pyproject.toml's [tool.sesame])."""
     data = tomllib.loads(path.read_text())
     if path.name == "pyproject.toml":
         data = data.get("tool", {}).get("sesame", {})
@@ -138,16 +140,19 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _personal() -> dict[str, Any]:
+    """Return the personal targets, empty when there's no file yet."""
     path = _personal_path()
     return _load(path) if path.exists() else {"targets": {}}
 
 
 def _project() -> tuple[Path | None, dict[str, Any]]:
+    """Return the project's targets file and its contents, if there is one."""
     path = project_file()
     return (path, _load(path)) if path else (None, {"targets": {}})
 
 
 def _write_personal(data: dict[str, Any]) -> None:
+    """Write the personal targets file, replacing it in one step."""
     path = _personal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -159,6 +164,7 @@ def _write_personal(data: dict[str, Any]) -> None:
 
 
 def _write_project(path: Path, data: dict[str, Any]) -> None:
+    """Write the project's targets file; pyproject.toml is edited by hand."""
     if path.name == "pyproject.toml":
         raise TargetError(
             "the project's targets are in pyproject.toml [tool.sesame]: edit it there"
@@ -302,6 +308,7 @@ def use(name: str) -> None:
 
 
 def _keychain_set(name: str, value: str) -> None:
+    """Keep a target's password in the system keychain, or say there is none."""
     try:
         import keyring
         from keyring.backends.fail import Keyring as NoKeyring

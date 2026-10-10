@@ -110,6 +110,8 @@ class SpecError(Exception):
 
 
 class _Model(BaseModel):
+    """A spec section: unknown keys are errors, and nothing changes once loaded."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -303,6 +305,7 @@ def json_schema() -> dict[str, Any]:
 
 
 def _describe(err: Any) -> str:
+    """Return one validation error as ``path: message``, the way the CLI prints it."""
     # pydantic marks a bad mapping key with a "[key]" step; the path names the key
     path = ".".join(str(part) for part in err["loc"] if part != "[key]") or "spec"
     if err["type"] == "extra_forbidden":

@@ -42,6 +42,7 @@ SpecPath = typer.Argument(..., exists=True, dir_okay=False, help="The spec (YAML
 
 
 def _version(value: bool) -> None:
+    """Print the version and exit, for ``--version``."""
     if value:
         console.print(f"[accent]sesame[/accent] {__version__}")
         raise typer.Exit()
@@ -97,6 +98,7 @@ DsnOption = typer.Option(
 
 
 def _load(path: Path) -> spec.Spec:
+    """Load a spec, or print each of its problems and exit 1."""
     try:
         return spec.load(path)
     except spec.SpecError as e:
@@ -106,6 +108,7 @@ def _load(path: Path) -> spec.Spec:
 
 
 def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
+    """Read the database and return the plan that makes it match ``loaded``."""
     reader = redshift.read if loaded.engine == "redshift" else postgres.read
     try:
         normalized = (
@@ -191,6 +194,7 @@ class ConnectOptions:
         return Database(self.dsn)  # libpq's PG* variables, ~/.pgpass, services
 
     def _from_flags(self) -> Connection:
+        """Return the connection the command-line flags (or libpq's PG* variables) describe."""
         if self.rds:
             return _rds(
                 self.rds,
@@ -380,6 +384,7 @@ def _where(options: ConnectOptions, db: Connection) -> str:
 
 
 def _connect(target: ConnectOptions) -> Connection:
+    """Connect, or print why it failed and exit 1."""
     try:
         return target.connect()
     except (
@@ -403,6 +408,7 @@ PARTIAL = (
 
 
 def _warn_if_partial(result: planner.Plan) -> None:
+    """Warn when the plan was made from part of the catalog."""
     if result.partial:
         err.print(f"[change]! {escape(PARTIAL)}[/change]")
 
@@ -417,6 +423,7 @@ def _show(result: planner.Plan, db: Connection, gated: bool = True) -> None:
 
 
 def _summary(result: planner.Plan) -> str:
+    """Return the plan's counts: to add, to change, to remove."""
     counts = {"create": 0, "change": 0, "remove": 0}
     for op in result.operations:
         counts[op.kind] += 1
@@ -506,6 +513,7 @@ def show(
 
 
 def _load_changeset(path: Path) -> ChangeSet:
+    """Load a saved change set, or print why it can't be used and exit 1."""
     try:
         return ChangeSet.load(path)
     except ChangeSetError as e:
@@ -865,6 +873,7 @@ def login(
 
 
 def _valid_name(name: str) -> str:
+    """Return ``name`` if it can name a target, else raise ValueError."""
     import re
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
@@ -875,6 +884,7 @@ def _valid_name(name: str) -> str:
 
 
 def _ask(label: str, interactive: bool, default: str | None = None) -> str:
+    """Prompt for a value, or without a terminal use the default or exit 1."""
     if not interactive:
         if default is not None:
             return default

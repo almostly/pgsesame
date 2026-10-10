@@ -40,6 +40,7 @@ from pgsesame.state import Privilege, State
 
 
 def _in_schemas(p: Privilege, schemas: set[str]) -> bool:
+    """Return whether a grant is on one of ``schemas`` (every grant when none)."""
     if not schemas or p.object_type == "databases":
         return True
     schema = (
@@ -62,6 +63,7 @@ def build(
     notes: list[str] = []
 
     def selectable(name: str) -> bool:
+        """Return whether import writes this role: not a superuser, system role or the importer."""
         role = state.roles[name]
         if role.superuser or _system_role(name) or name == me:
             return False
@@ -209,6 +211,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
     policies = state.mask_policies
 
     def raw(name: str) -> bool:
+        """Return whether ``name`` is a policy that passes its value through."""
         return name in policies and passes_through(policies[name])
 
     by_column: dict[tuple[str, str], list[Any]] = defaultdict(list)

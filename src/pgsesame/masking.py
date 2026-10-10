@@ -82,10 +82,12 @@ class MaskingError(Exception):
 # Reading
 # ---------------------------------------------------------------------------
 def _json(value: Any) -> Any:
+    """Return a JSON column decoded: text over the Data API, already parsed otherwise."""
     return json.loads(value) if isinstance(value, str) else value
 
 
 def _policy(name: str, inputs: Any, expression: Any) -> MaskPolicy:
+    """Return a masking policy from svv_masking_policy's JSON columns."""
     columns = _json(inputs) or []
     (expr,) = _json(expression) or [{"expr": "", "type": ""}]
     return MaskPolicy(
@@ -276,6 +278,7 @@ def role_priorities(roles: list[str]) -> list[int]:
 def _wanted_attachments(
     spec: Spec, state: State, grantee_type, problems: list[str]
 ) -> set[Attachment]:
+    """Return the attachments the spec's masked columns ask for."""
     assert spec.masking is not None
     out: set[Attachment] = set()
     for column, c in sorted(spec.masking.columns.items()):
@@ -291,6 +294,7 @@ def _wanted_attachments(
                 )
 
         def attach(policy: str, grantee: str, gtype: str, priority: int) -> None:
+            """Add one wanted attachment of ``policy`` on this column."""
             reads = spec.masking.policies.get(policy) if spec.masking else None
             several = reads is not None and len(reads.inputs()) > 1
             out.add(
@@ -339,6 +343,7 @@ def plan(
     managed_columns = {tuple(c.rsplit(".", 1)) for c in spec.masking.columns}
 
     def managed(a: Attachment) -> bool:
+        """Return whether an attachment is on a column the spec masks."""
         return any((a.table, col) in managed_columns for col in a.columns)
 
     have = {a for a in state.attachments if managed(a)}
@@ -375,6 +380,7 @@ def plan(
     # per policy, column and grantee: one DETACH removes every priority, so a
     # change of priorities is a detach and the attaches that follow it
     def key(a: Attachment) -> tuple:
+        """Return what one DETACH names: policy, column and grantee."""
         return (a.policy, a.table, a.columns, a.grantee, a.grantee_type)
 
     detached: set[tuple] = set()
@@ -432,6 +438,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
     """
 
     def ident(a: Attachment) -> tuple:
+        """Return an attachment's identity, without its priority."""
         return (a.policy, a.grantee, a.grantee_type, a.inputs)
 
     if len({ident(a) for a in now}) != len(now) or len(now) != len(then):
@@ -442,6 +449,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
         return False
 
     def sign(x: int) -> int:
+        """Return -1, 0 or 1: how one priority compares with another."""
         return (x > 0) - (x < 0)
 
     keys = list(have)
@@ -451,6 +459,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
 
 
 def _attach(a: Attachment, replacing: bool = False) -> AttachMaskingPolicy:
+    """Return the ATTACH operation for an attachment."""
     return AttachMaskingPolicy(
         policy=a.policy,
         table=a.table,
@@ -464,6 +473,7 @@ def _attach(a: Attachment, replacing: bool = False) -> AttachMaskingPolicy:
 
 
 def _detach(a: Attachment, kind, replacing: bool = False) -> Operation:
+    """Return the DETACH operation (of ``kind``) for an attachment."""
     return kind(
         policy=a.policy,
         table=a.table,

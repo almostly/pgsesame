@@ -57,6 +57,7 @@ assert set(_PRIVILEGE) >= set().union(
 
 
 def _object(object_type: str, name: str) -> sql.Composed:
+    """Return what a GRANT is ON: ``TABLE s.t``, ``SCHEMA s``; a column's table."""
     if object_type == "columns":  # the table a column grant is ON
         name = name.rsplit(".", 1)[0]
     parts = (
@@ -78,6 +79,7 @@ def _privilege_on(privilege: str, object_type: str, name: str) -> sql.Composed:
 
 
 def _privilege(privilege: str) -> sql.SQL:
+    """Return a privilege's SQL keyword."""
     return _PRIVILEGE[privilege]
 
 
@@ -129,6 +131,7 @@ class CreateRole(Operation):
     password_disabled: bool = False
 
     def _sql(self, password: sql.Composable | None) -> sql.Composed:
+        """Return the CREATE statement for this principal, with ``password``."""
         name = sql.Identifier(self.name)
         if self.identity == "group":
             return sql.SQL("CREATE GROUP {}").format(name)
@@ -314,17 +317,20 @@ class RemoveMember(Operation):
 
 
 def _table(name: str) -> sql.Composed:
+    """Return ``schema.table`` as a quoted identifier."""
     schema, table = name.split(".", 1)
     return sql.SQL("{}").format(sql.Identifier(schema, table))
 
 
 def _roles(roles: tuple[str, ...]) -> sql.Composed:
+    """Return a policy's roles for TO: quoted names, PUBLIC as a keyword."""
     return sql.SQL(", ").join(
         sql.SQL("PUBLIC") if r == "public" else sql.Identifier(r) for r in roles
     )
 
 
 def _expression(text: str) -> sql.SQL:
+    """Return a policy expression from the spec as SQL."""
     # a policy's USING / WITH CHECK is SQL by design: it comes from the reviewed
     # spec, and goes into the statement as written
     return sql.SQL(cast("LiteralString", text))
@@ -340,6 +346,7 @@ _COMMAND = {
 
 
 def _clauses(using: str | None, with_check: str | None) -> list[sql.Composable]:
+    """Return a policy's USING and WITH CHECK clauses, the ones it has."""
     parts: list[sql.Composable] = []
     if using:
         parts.append(sql.SQL("USING ({})").format(_expression(using)))
@@ -472,6 +479,8 @@ _DEFAULT_ON = {
 
 
 class _Default(Operation):
+    """An ALTER DEFAULT PRIVILEGES entry: what ``grantee`` gets on ``owner``'s new objects."""
+
     owner: str
     in_schema: str  # "" for every schema
     object_type: str
@@ -481,6 +490,7 @@ class _Default(Operation):
     owner_identity: Identity = "pg"
 
     def _alter(self, verb: str) -> sql.Composed:
+        """Return the ALTER DEFAULT PRIVILEGES statement that grants or revokes it."""
         # Redshift names an owner FOR USER; PostgreSQL FOR ROLE (any role)
         target = sql.SQL("FOR {} {}").format(
             sql.SQL("ROLE" if self.owner_identity == "pg" else "USER"),
@@ -533,12 +543,14 @@ class RevokeDefault(_Default):
 # Redshift dynamic data masking
 # ---------------------------------------------------------------------------
 def _type(text: str) -> sql.SQL:
+    """Return a policy input's type as SQL."""
     # a policy input's type, from the spec (checked to be words and an optional
     # (n) or (p, s)) or from Redshift's catalog
     return sql.SQL(cast("LiteralString", text))
 
 
 def _mask_grantee(grantee: str, grantee_type: str) -> sql.Composable:
+    """Return a masking grantee: PUBLIC, ROLE name, or a user's name."""
     if grantee_type == "public":
         return sql.SQL("PUBLIC")
     if grantee_type == "role":
@@ -547,12 +559,17 @@ def _mask_grantee(grantee: str, grantee_type: str) -> sql.Composable:
 
 
 def _columns(names: tuple[str, ...]) -> sql.Composed:
+    """Return column names as a quoted, comma-separated list."""
     return sql.SQL(", ").join(sql.Identifier(n) for n in names)
 
 
 class _Replaceable(Operation):
-    # part of replacing a policy ALTER can't change (detach everywhere, drop,
-    # create, attach again): all of it needs --allow-drop, or none of it runs
+    """A masking operation that may be part of replacing a policy.
+
+    A policy ALTER can't change is replaced: detach it everywhere, drop it, create
+    it, attach it again. All of that needs --allow-drop, or none of it runs.
+    """
+
     replacing: bool = False
 
     @property
@@ -611,6 +628,8 @@ class DropMaskingPolicy(Operation):
 
 
 class _Attachment(_Replaceable):
+    """A masking policy attached to columns of a table, for one grantee."""
+
     policy: str
     table: str
     columns: tuple[str, ...]
@@ -646,6 +665,7 @@ class AttachMaskingPolicy(_Attachment):
 
 
 def _detach(op: _Attachment) -> sql.Composed:
+    """Return the DETACH MASKING POLICY statement for an attachment."""
     return sql.SQL("DETACH MASKING POLICY {} ON {} ({}) FROM {}").format(
         sql.Identifier(op.policy),
         _table(op.table),

@@ -92,6 +92,7 @@ def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]
 
 
 def _expand(pattern: str, existing: set[str]) -> set[str]:
+    """Return the objects a pattern names: ``schema.*`` or one name, if it exists."""
     if pattern.endswith(".*"):
         schema = pattern[:-2]
         return {obj for obj in existing if obj.split(".", 1)[0] == schema}
@@ -282,6 +283,7 @@ def make(
                         )
 
     def implied(p: Privilege) -> bool:
+        """Return whether the grantee holds this by owning the object."""
         if p.object_type == "columns":
             table = p.object_name.rsplit(".", 1)[0]
             return p.grantee in (
@@ -358,6 +360,7 @@ def _scope(principal) -> tuple[set[str], set[str]]:
 
 
 def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
+    """Return whether a grant is on an object the spec's scope covers."""
     schemas, databases = scope
     if p.object_type == "databases":
         return p.object_name in databases
@@ -435,6 +438,7 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
     created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
 
     def reachable(role: str) -> bool:
+        """Return whether the plan may alter this role: it creates or administers it."""
         return role in created or role in administers
 
     kept: list[Operation] = []
@@ -505,6 +509,7 @@ def _plan_defaults(
     have = {d for d in have if d.privilege in known.get(d.object_type, ())}
 
     def op(cls, d: DefaultGrant) -> Operation:
+        """Return the operation (``cls``) for a default privilege."""
         return cls(
             owner=d.owner,
             in_schema=d.schema,
