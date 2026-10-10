@@ -38,18 +38,20 @@ RELATIONS = (
     "where c.relkind in ('r', 'v') and " + _USER_SCHEMA.format(col="n.nspname")
 )
 DATABASE_PRIVILEGES = """
-select identity_name, identity_type, database_name, lower(privilege_type)
+select identity_name, identity_type, database_name, lower(privilege_type),
+       admin_option
 from svv_database_privileges
 where database_name = current_database() and privilege_scope = 'DATABASE'
 """
 SCHEMA_PRIVILEGES = """
-select identity_name, identity_type, namespace_name, lower(privilege_type)
+select identity_name, identity_type, namespace_name, lower(privilege_type),
+       admin_option
 from svv_schema_privileges
 where privilege_scope = 'SCHEMA'
 """
 RELATION_PRIVILEGES = """
 select identity_name, identity_type, namespace_name, relation_name,
-       lower(privilege_type)
+       lower(privilege_type), admin_option
 from svv_relation_privileges
 """
 # every column, needed only when a spec grants on columns (svv_columns, like
@@ -98,6 +100,13 @@ def is_redshift(db: Connection) -> bool:
         "select count(*) from pg_views where viewname in ('svv_roles', 'svv_user_grants')"
     )
     return bool(rows and rows[0][0])
+
+
+def _true(value: Any) -> bool:
+    """Return a boolean column: a bool over a driver, maybe 't'/'true' as text."""
+    if isinstance(value, str):
+        return value.lower() in ("t", "true")
+    return bool(value)
 
 
 def _int_array(value: Any) -> list[int]:
@@ -163,7 +172,9 @@ def read(db: Connection, columns: bool = True) -> State:
         kinds[f"{schema}.{name}"] = kind
         state.objects[kind].add(f"{schema}.{name}")
 
-    def privilege(grantee: str, identity: str, kind: str, name: str, priv: str) -> None:
+    def privilege(
+        grantee: str, identity: str, kind: str, name: str, priv: str, option=False
+    ) -> None:
         """Record one SVV privilege row; PUBLIC's only as a schema grant to warn about."""
         if identity == "public":  # PUBLIC isn't managed yet; its schema grants are
             if kind == "schemas":  # read to warn about
@@ -172,14 +183,18 @@ def read(db: Connection, columns: bool = True) -> State:
         if priv == "temp":  # one spelling, as the planner writes it
             priv = "temporary"
         state.privileges.add(Privilege(grantee, kind, name, priv))
+        if _true(option):
+            state.grant_options.add(Privilege(grantee, kind, name, priv))
 
-    for grantee, identity, name, priv in rows["database_privileges"]:
-        privilege(grantee, identity, "databases", name, priv)
-    for grantee, identity, name, priv in rows["schema_privileges"]:
-        privilege(grantee, identity, "schemas", name, priv)
-    for grantee, identity, schema, relation, priv in rows["relation_privileges"]:
+    for grantee, identity, name, priv, option in rows["database_privileges"]:
+        privilege(grantee, identity, "databases", name, priv, option)
+    for grantee, identity, name, priv, option in rows["schema_privileges"]:
+        privilege(grantee, identity, "schemas", name, priv, option)
+    for grantee, identity, schema, relation, priv, option in rows[
+        "relation_privileges"
+    ]:
         full = f"{schema}.{relation}"
-        privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
+        privilege(grantee, identity, kinds.get(full, "tables"), full, priv, option)
     for kind, name, owner in rows["owners"]:
         state.owners[(kind, name)] = owner
     for owner, schema, kind, grantee, gtype, priv in rows["default_privileges"]:

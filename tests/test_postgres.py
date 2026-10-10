@@ -122,6 +122,29 @@ def test_plan_apply_then_nothing_to_do(dsn, tmp_path):
         assert conn.execute("SELECT count(*) FROM analytics.daily").fetchone() == (0,)
 
 
+def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # the right to grant it on
+        conn.execute(
+            f'GRANT SELECT ON analytics.events TO "{P}reader" WITH GRANT OPTION'
+        )
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'- REVOKE GRANT OPTION FOR SELECT ON TABLE "analytics"."events" '
+        f'FROM "{P}reader"  needs --allow-revoke'
+    ) in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # SELECT itself stays
+        assert conn.execute(
+            "SELECT has_table_privilege(%s, 'analytics.events', 'SELECT'), "
+            "has_table_privilege(%s, 'analytics.events', 'SELECT WITH GRANT OPTION')",
+            (f"{P}reader", f"{P}reader"),
+        ).fetchone() == (True, False)
+
+
 def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     spec = _spec(tmp_path)
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0

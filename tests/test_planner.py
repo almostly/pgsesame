@@ -838,3 +838,24 @@ def test_grants_the_specs_default_privileges_gave_are_not_drift():
         if isinstance(op, Revoke)
     )
     assert revoked == [("s.by_admin", "select"), ("s.made_later", "insert")]
+
+
+def test_a_grant_option_on_a_kept_privilege_is_revoked_alone():
+    from pgsesame.ops import Revoke, RevokeGrantOption
+    from pgsesame.state import Privilege
+
+    loaded = _spec(
+        reader={"type": "role", "privileges": {"tables": {"select": ["s.t"]}}}
+    )
+    held = Privilege("reader", "tables", "s.t", "select")
+    extra = Privilege("reader", "tables", "s.t", "insert")
+    state = _state(Role("reader", False), objects={"tables": {"s.t"}, "schemas": {"s"}})
+    state.privileges = {held, extra}
+    state.grant_options = {held, extra}  # INSERT goes whole, its option with it
+    plan = planner.make(loaded, state)
+    assert [type(op) for op in plan.operations] == [Revoke, RevokeGrantOption]
+    (option,) = [op for op in plan.operations if isinstance(op, RevokeGrantOption)]
+    assert option.needs == "revoke"
+    assert option.statement().as_string(None) == (
+        'REVOKE GRANT OPTION FOR SELECT ON TABLE "s"."t" FROM "reader"'
+    )

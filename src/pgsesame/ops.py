@@ -297,6 +297,27 @@ class Revoke(Operation):
         )
 
 
+class RevokeGrantOption(Operation):
+    """Take back the right to grant a privilege on, keeping the privilege itself."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 50
+    op: Literal["revoke_grant_option"] = "revoke_grant_option"
+    grantee: str
+    object_type: str
+    object_name: str
+    privilege: str
+    grantee_identity: Identity = "pg"
+
+    def statement(self) -> sql.Composed:
+        """Return REVOKE GRANT OPTION FOR privilege ON object FROM grantee."""
+        return sql.SQL("REVOKE GRANT OPTION FOR {} FROM {}").format(
+            _privilege_on(self.privilege, self.object_type, self.object_name),
+            _grantee(self.grantee, self.grantee_identity),
+        )
+
+
 class RemoveMember(Operation):
     """Take ``member`` out of ``role`` (a group or role on Redshift)."""
 
@@ -711,6 +732,7 @@ AnyOperation = Annotated[
     | AddMember
     | Grant
     | Revoke
+    | RevokeGrantOption
     | RemoveMember
     | CreatePolicy
     | AlterPolicy

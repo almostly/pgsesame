@@ -27,6 +27,7 @@ from pgsesame.ops import (
     GrantDefault,
     Operation,
     RemoveMember,
+    RevokeGrantOption,
     Revoke,
     RevokeDefault,
 )
@@ -333,6 +334,18 @@ def make(
     for p in sorted(have_privileges - want_privileges):
         plan.operations.append(
             Revoke(
+                grantee=p.grantee,
+                object_type=p.object_type,
+                object_name=p.object_name,
+                privilege=p.privilege,
+                grantee_identity=identity(p.grantee),
+            )
+        )
+    # a spec never gives the right to grant on: where a privilege it keeps is held
+    # WITH GRANT OPTION, the option is drift (a privilege revoked takes it along)
+    for p in sorted(current.grant_options & have_privileges & want_privileges):
+        plan.operations.append(
+            RevokeGrantOption(
                 grantee=p.grantee,
                 object_type=p.object_type,
                 object_name=p.object_name,

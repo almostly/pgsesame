@@ -186,6 +186,27 @@ def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
 
 
+def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
+    # Redshift gives a grant option to users only
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'GRANT UPDATE ON rs_test.daily TO "{P}alice" WITH GRANT OPTION')
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'- REVOKE GRANT OPTION FOR UPDATE ON TABLE "rs_test"."daily" FROM "{P}alice"'
+        in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # UPDATE itself stays
+        assert conn.execute(
+            "SELECT privilege_type, admin_option FROM svv_relation_privileges "
+            f"WHERE identity_name = '{P}alice' AND relation_name = 'daily'"
+        ).fetchall() == [("UPDATE", False)]
+
+
 def test_memberships_are_removed_only_when_allowed(dsn, tmp_path):
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
     changed = SPEC.replace(

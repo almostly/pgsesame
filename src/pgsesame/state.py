@@ -100,6 +100,9 @@ class State:
     sees_everything: bool = True
     memberships: set[Membership] = field(default_factory=set)
     privileges: set[Privilege] = field(default_factory=set)
+    # the privileges above held WITH GRANT OPTION: the grantee may grant them on
+    # (read for databases, schemas, tables and views; a spec never gives one)
+    grant_options: set[Privilege] = field(default_factory=set)
     # every object the database has, by type: lets the planner expand schema.*
     objects: dict[str, set[str]] = field(default_factory=dict)
     # who owns each object: (object type, name) -> owner
