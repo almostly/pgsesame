@@ -399,11 +399,19 @@ def test_a_type_change_replaces_the_policy_behind_allow_drop():
 def test_roles_with_one_policy_share_a_priority():
     from pgsesame.masking import role_priorities
 
-    assert role_priorities("m", ["a", "b"]) == [20, 30]  # each outranks the last
-    assert role_priorities(None, ["a", "a"]) == [20, 20]  # one policy: one priority
-    assert role_priorities("m", ["m", "b"]) == [10, 20]  # the mask's own policy
-    assert role_priorities(None, ["a", "a", "b", "a"]) == [20, 20, 30, 40]
-    assert role_priorities("m", []) == []
+    assert role_priorities(["a", "b"]) == [20, 30]  # each outranks the last
+    assert role_priorities(["a", "a"]) == [20, 20]  # one policy: one priority
+    assert role_priorities(["a", "a", "b", "a"]) == [20, 20, 30, 40]
+    assert role_priorities([]) == []
+
+
+def test_a_role_with_the_masks_policy_never_shares_publics_priority():
+    # on Redshift, attaching a policy to a role at the priority PUBLIC holds it
+    # at replaces PUBLIC's attachment: everyone else would read the raw value
+    from pgsesame.masking import MASK_PRIORITY, role_priorities
+
+    assert role_priorities(["m", "b"]) == [20, 30]
+    assert MASK_PRIORITY not in role_priorities(["m", "m", "b", "m"])
 
 
 def test_import_of_one_policy_on_two_roles_at_priority_0_plans_nothing():

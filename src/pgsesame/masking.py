@@ -250,18 +250,21 @@ def normalize(db: Connection, spec: Spec, state: State) -> Normalized | None:
 # ---------------------------------------------------------------------------
 # Planning
 # ---------------------------------------------------------------------------
-def role_priorities(mask: str | None, roles: list[str]) -> list[int]:
+def role_priorities(roles: list[str]) -> list[int]:
     """Return the priority of each role's policy, in the order the spec lists them.
 
     Each role outranks the one before it, so a later entry wins for a user in
-    both; but a role whose policy is the previous one's (the mask's, for the
-    first) shares its priority. Redshift lets one policy be attached to several
-    grantees at one priority, and refuses two different policies there, so the
-    shared number says the same thing and matches a database that attached one
-    policy to several roles at one priority (often 0, the default).
+    both; but a role whose policy is the previous role's shares its priority.
+    Redshift lets one policy be attached to several roles at one priority, and
+    refuses two different policies there, so the shared number says the same
+    thing and matches a database that attached one policy to several roles at
+    one priority (often 0, the default). The first role never shares the mask's
+    priority, even with the mask's policy: attaching a policy to a role at the
+    priority PUBLIC holds it at replaces PUBLIC's attachment on Redshift, which
+    would leave everyone else reading the column unmasked.
     """
     out: list[int] = []
-    policy, priority = mask, MASK_PRIORITY
+    policy, priority = None, MASK_PRIORITY  # None: no role's policy matches it
     for role_policy in roles:
         if role_policy != policy:  # another policy outranks the one before
             priority = max(ROLE_PRIORITY, priority + STEP)
@@ -304,7 +307,7 @@ def _wanted_attachments(
 
         if c.mask:
             attach(c.mask, "public", "public", MASK_PRIORITY)
-        ranks = role_priorities(c.mask, list(c.roles.values()))
+        ranks = role_priorities(list(c.roles.values()))
         for (role, policy), priority in zip(c.roles.items(), ranks):
             attach(policy, role, grantee_type(role), priority)
         for role in c.unmasked:

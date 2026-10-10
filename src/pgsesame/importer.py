@@ -276,7 +276,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
                 )
             )
         roles = entry.get("roles", {})
-        ranks = role_priorities(entry.get("mask"), list(roles.values()))
+        ranks = role_priorities(list(roles.values()))
         for (grantee, policy), priority in zip(roles.items(), ranks):
             gtype = winning[grantee].grantee_type
             then.append(

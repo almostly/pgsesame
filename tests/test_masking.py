@@ -179,18 +179,19 @@ def test_roles_reordered_move_priorities_without_a_revoke(db, tmp_path):
     )
     code, out = _sesame("apply", _spec(tmp_path, swapped))  # no --allow-revoke
     assert code == 0, out
-    # fraud's policy is the mask's, so it shares the mask's priority; support,
-    # written after it, still outranks it
-    assert ("sesame_redact", "sesame_ddm_fraud", "role", 10, '["email"]') in _attached(
-        db
-    )
+    # fraud's policy is the mask's, but it never shares PUBLIC's priority: on
+    # Redshift that ATTACH replaces PUBLIC's own, unmasking the column for
+    # everyone else. Support, written after it, outranks it
+    attached = _attached(db)
+    assert ("sesame_redact", "public", "public", 10, '["email"]') in attached
+    assert ("sesame_redact", "sesame_ddm_fraud", "role", 20, '["email"]') in attached
     assert (
         "sesame_email_domain",
         "sesame_ddm_support",
         "role",
-        20,
+        30,
         '["email"]',
-    ) in _attached(db)
+    ) in attached
     assert _sesame("plan", _spec(tmp_path, swapped))[0] == 0
 
 
