@@ -20,7 +20,8 @@ from typing import Annotated, Any, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-Engine = Literal["postgres", "redshift"]
+# dsql: Amazon Aurora DSQL, PostgreSQL 16 for roles and grants, with less of it
+Engine = Literal["postgres", "redshift", "dsql"]
 ObjectType = Literal[
     "databases", "schemas", "tables", "views", "sequences", "functions", "columns"
 ]
@@ -30,11 +31,15 @@ DEFAULT_TYPES = ("databases", "schemas", "tables", "views", "sequences", "functi
 # what ALTER ... OWNER TO is planned for, per engine
 OWNABLE = {
     "postgres": ("databases", "schemas", "tables", "views", "sequences"),
+    # ALTER ... OWNER on Aurora DSQL needs SET ROLE on the new owner and its
+    # CREATE on the schema: not planned
+    "dsql": (),
     "redshift": ("schemas", "tables", "views"),
 }
 # ... and the ones each engine's ALTER DEFAULT PRIVILEGES takes (views are tables)
 DEFAULT_PRIVILEGE_TYPES = {
     "postgres": ("tables", "sequences", "functions", "schemas"),
+    "dsql": ("tables", "sequences", "functions", "schemas"),
     "redshift": ("tables", "functions"),
 }
 
@@ -75,7 +80,7 @@ Privilege = Literal[
     "usage",
 ]
 # PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
-MAX_NAME_BYTES = {"postgres": 63, "redshift": 127}
+MAX_NAME_BYTES = {"postgres": 63, "redshift": 127, "dsql": 63}
 
 # privileges each object type accepts, per engine
 _COMMON = {
@@ -90,8 +95,13 @@ _COMMON = {
 PRIVILEGES: dict[str, dict[str, set[str]]] = {
     # MAINTAIN (VACUUM, ANALYZE, REFRESH ...) exists from PostgreSQL 17 on
     "postgres": {**_COMMON, "tables": _COMMON["tables"] | {"trigger", "maintain"}},
+    # Aurora DSQL: no database privileges (GRANT ... ON DATABASE is unsupported)
+    # and no MAINTAIN
+    "dsql": {**_COMMON, "databases": set(), "tables": _COMMON["tables"] | {"trigger"}},
     "redshift": {
         **_COMMON,
+        # Redshift has no CONNECT: GRANT CONNECT ON DATABASE is a syntax error
+        "databases": _COMMON["databases"] - {"connect"},
         "schemas": _COMMON["schemas"] | {"alter", "drop"},
         "tables": _COMMON["tables"] | {"alter", "drop"},
         "views": _COMMON["views"] | {"alter", "drop"},
@@ -110,6 +120,8 @@ class SpecError(Exception):
 
 
 class _Model(BaseModel):
+    """A spec section: unknown keys are errors, and nothing changes once loaded."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -136,6 +148,12 @@ class Principal(_Model):
     )
     password: Literal["disabled"] | None = Field(
         None, description="'disabled' for no password; never a password itself."
+    )
+    iam: list[
+        Annotated[str, StringConstraints(pattern=r"^arn:aws[\w-]*:iam::\d{12}:\S+$")]
+    ] = Field(
+        default_factory=list,
+        description="Aurora DSQL: IAM users or roles (ARNs) that sign in as it.",
     )
 
     @property
@@ -303,6 +321,7 @@ def json_schema() -> dict[str, Any]:
 
 
 def _describe(err: Any) -> str:
+    """Return one validation error as ``path: message``, the way the CLI prints it."""
     # pydantic marks a bad mapping key with a "[key]" step; the path names the key
     path = ".".join(str(part) for part in err["loc"] if part != "[key]") or "spec"
     if err["type"] == "extra_forbidden":
@@ -316,10 +335,18 @@ def _check(spec: Spec) -> list[str]:
     """Check what pydantic can't: engine rules and references between principals."""
     problems: list[str] = []
     redshift = spec.engine == "redshift"
+    dsql = spec.engine == "dsql"
     principals = spec.principals
     limit = MAX_NAME_BYTES[spec.engine]
     for name, p in principals.items():
         where = f"principals.{name}"
+        if name.lower() == "public" and (name != "public" or p.type != "builtin"):
+            problems.append(
+                f"{where}: PUBLIC (every user) is declared as public: "
+                "{type: builtin}, with only its privileges"
+            )
+        if "public" in p.member_of or "public" in p.groups:
+            problems.append(f"{where}: every user is in PUBLIC already")
         if len(name.encode()) > limit:
             problems.append(f"{where}: longer than {spec.engine}'s {limit} bytes")
         if p.type == "builtin":
@@ -354,7 +381,7 @@ def _check(spec: Spec) -> list[str]:
         if "columns" in p.owns:
             problems.append(f"{where}.owns.columns: a column is owned with its table")
         ownable = OWNABLE[spec.engine]
-        for kind in p.owns:
+        for kind in p.owns if ownable else ():  # none at all: said once, below
             if kind != "columns" and kind not in ownable:
                 problems.append(
                     f"{where}.owns.{kind}: pgsesame plans ownership of "
@@ -379,8 +406,38 @@ def _check(spec: Spec) -> list[str]:
                     problems.append(
                         f"{where}: {pattern}: three parts name a column (use columns)"
                     )
+        if dsql:
+            if p.password or p.password_env:
+                problems.append(
+                    f"{where}: Aurora DSQL signs in with IAM only; link IAM identities "
+                    "with iam: [arn] instead of a password"
+                )
+            if p.iam and not p.can_login:
+                problems.append(
+                    f"{where}.iam: an IAM identity signs in as it, so it needs login: true"
+                )
+            if "databases" in p.privileges:
+                problems.append(
+                    f"{where}.privileges.databases: Aurora DSQL has no database "
+                    "privileges (one database, postgres, open to every role)"
+                )
+            if p.owns:
+                problems.append(
+                    f"{where}.owns: ownership isn't planned on Aurora DSQL (ALTER ... "
+                    "OWNER needs SET ROLE on the new owner)"
+                )
+        elif p.iam:
+            problems.append(f"{where}.iam: IAM links are Aurora DSQL's (engine: dsql)")
+        if redshift and "functions" in p.privileges:
+            problems.append(
+                f"{where}.privileges.functions: pgsesame doesn't plan grants on "
+                "Redshift functions yet; grant EXECUTE by hand and leave it out of "
+                "the spec (default_privileges on functions are planned)"
+            )
         for kind, grants in p.privileges.items():
             allowed = PRIVILEGES[spec.engine][kind]
+            if not allowed:  # the engine has none of the kind: said once above
+                continue
             for privilege in grants:
                 if privilege not in allowed:
                     problems.append(
@@ -406,7 +463,11 @@ def _check(spec: Spec) -> list[str]:
         where = f"default_privileges[{i}]"
         # the owner need not be declared (often the ETL or admin user that
         # creates the objects); the plan says if it doesn't exist
-        if rule.grantee not in principals:
+        if rule.grantee == "public":
+            problems.append(
+                f"{where}.grantee: default privileges for PUBLIC aren't planned yet"
+            )
+        elif rule.grantee not in principals:
             problems.append(f"{where}.grantee: {rule.grantee} is not declared")
         elif principals[rule.grantee].type == "group" and not redshift:
             problems.append(f"{where}.grantee: groups exist on Redshift only")
@@ -434,6 +495,8 @@ def _check(spec: Spec) -> list[str]:
                         f"{where}.{kind}: {privilege} is not a {spec.engine} "
                         f"privilege on {kind}"
                     )
+    if redshift:
+        problems += _check_case(spec)
     problems += _check_rls(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
@@ -441,11 +504,59 @@ def _check(spec: Spec) -> list[str]:
     return problems
 
 
+def _folded(name: str) -> bool:
+    """Return whether Redshift would store ``name`` in lower case, unlike written.
+
+    Redshift folds identifiers, quoted or not, to lower case unless
+    enable_case_sensitive_identifier is on. IAM users and roles (IAM:..., IAMR:...)
+    are named by Redshift itself and keep their case.
+    """
+    return name != name.lower() and not name.startswith(("IAM:", "IAMR:"))
+
+
+def _check_case(spec: Spec) -> list[str]:
+    """On Redshift, refuse a name with upper-case letters, which Redshift folds."""
+    named: list[tuple[str, str]] = []
+    for name, p in spec.principals.items():
+        where = f"principals.{name}"
+        named.append((where, name))
+        for kind, patterns in [
+            *((f"owns.{k}", v) for k, v in p.owns.items()),
+            *(
+                (f"privileges.{k}", [x for names in grants.values() for x in names])
+                for k, grants in p.privileges.items()
+            ),
+        ]:
+            named += [(f"{where}.{kind}", pattern) for pattern in patterns]
+    for i, rule in enumerate(spec.default_privileges):
+        named += [(f"default_privileges[{i}]", rule.owner)]
+        if rule.in_schema:
+            named.append((f"default_privileges[{i}].schema", rule.in_schema))
+    if spec.masking is not None:
+        for name, policy in spec.masking.policies.items():
+            named.append((f"masking.policies.{name}", name))
+            named += [(f"masking.policies.{name}.input", n) for n in policy.input or {}]
+        for column, c in spec.masking.columns.items():
+            named.append((f"masking.columns.{column}", column))
+            named += [(f"masking.columns.{column}.inputs", n) for n in c.inputs or []]
+    named += [("manage.schemas", n) for n in spec.manage.schemas]
+    named += [("manage.prefixes", n) for n in spec.manage.prefixes]
+    return [
+        f"{where}: {name}: Redshift stores names in lower case (unless "
+        f"enable_case_sensitive_identifier is on), so it would be {name.lower()}; "
+        "write it that way"
+        for where, name in named
+        if _folded(name)
+    ]
+
+
 def _check_rls(spec: Spec) -> list[str]:
     """Check the row-level security section: engine, roles and clauses per command."""
     problems: list[str] = []
     if spec.row_level_security and spec.engine == "redshift":
         return ["row_level_security: Redshift's RLS policies come in a later version"]
+    if spec.row_level_security and spec.engine == "dsql":
+        return ["row_level_security: Aurora DSQL has no row-level security"]
     for table, rls in spec.row_level_security.items():
         for name, policy in rls.policies.items():
             where = f"row_level_security.{table}.policies.{name}"

@@ -38,18 +38,20 @@ RELATIONS = (
     "where c.relkind in ('r', 'v') and " + _USER_SCHEMA.format(col="n.nspname")
 )
 DATABASE_PRIVILEGES = """
-select identity_name, identity_type, database_name, lower(privilege_type)
+select identity_name, identity_type, database_name, lower(privilege_type),
+       admin_option
 from svv_database_privileges
 where database_name = current_database() and privilege_scope = 'DATABASE'
 """
 SCHEMA_PRIVILEGES = """
-select identity_name, identity_type, namespace_name, lower(privilege_type)
+select identity_name, identity_type, namespace_name, lower(privilege_type),
+       admin_option
 from svv_schema_privileges
 where privilege_scope = 'SCHEMA'
 """
 RELATION_PRIVILEGES = """
 select identity_name, identity_type, namespace_name, relation_name,
-       lower(privilege_type)
+       lower(privilege_type), admin_option
 from svv_relation_privileges
 """
 # every column, needed only when a spec grants on columns (svv_columns, like
@@ -88,6 +90,56 @@ from svv_column_privileges
 """
 
 
+# who holds the system permission that shows every row of the SVV views (a
+# non-superuser sees its own grants of it, and those of its roles)
+SYSTEM_TABLE_ACCESS = """
+select identity_name, identity_type from svv_system_privileges
+where system_privilege = 'ACCESS SYSTEM TABLE'
+"""
+
+
+def _reads_system_tables(db: Connection, me: str, rows: dict[str, list]) -> bool:
+    """Return whether ``me`` holds ACCESS SYSTEM TABLE, itself or through its roles.
+
+    Its own role grants are visible to it, so the roles it holds are known; a
+    catalog without svv_system_privileges (an older redshift-local) says no.
+    """
+    held = {role for user, role in rows["user_roles"] if user == me}
+    grants = rows["role_roles"]
+    while True:  # roles granted to its roles, and so on
+        more = {granted for role, granted in grants if role in held} - held
+        if not more:
+            break
+        held |= more
+    try:
+        holders = db.rows(SYSTEM_TABLE_ACCESS)
+    except Exception:  # no such view: nothing tells, so the safe answer
+        return False
+    return any(
+        (kind == "user" and name == me) or (kind == "role" and name in held)
+        for name, kind in holders
+    )
+
+
+def is_redshift(db: Connection) -> bool:
+    """Return whether the database has Redshift's SVV views (Redshift or redshift-local).
+
+    version() doesn't tell: redshift-local reports PostgreSQL's. pg_views lists
+    the SVV views on both, and none on PostgreSQL.
+    """
+    rows = db.rows(
+        "select count(*) from pg_views where viewname in ('svv_roles', 'svv_user_grants')"
+    )
+    return bool(rows and rows[0][0])
+
+
+def _true(value: Any) -> bool:
+    """Return a boolean column: a bool over a driver, maybe 't'/'true' as text."""
+    if isinstance(value, str):
+        return value.lower() in ("t", "true")
+    return bool(value)
+
+
 def _int_array(value: Any) -> list[int]:
     """Return an int[] column: a list over a driver, ``{1,2}`` text over the Data API."""
     if value is None:
@@ -106,7 +158,7 @@ def read(db: Connection, columns: bool = True) -> State:
     Data API they run at the same time, each an HTTP round trip.
     """
     queries = {
-        "me": "select usesuper from pg_user where usename = current_user",
+        "me": "select usename, usesuper from pg_user where usename = current_user",
         "users": USERS,
         "groups": GROUPS,
         "roles": ROLES,
@@ -127,8 +179,11 @@ def read(db: Connection, columns: bool = True) -> State:
 
     state = State()
     me = rows["me"]
-    # a non-superuser sees only its own grants in the SVV views (and no masking)
-    state.sees_everything = bool(me and me[0][0])
+    # a non-superuser sees only its own grants in the SVV views (and no masking),
+    # unless it holds ACCESS SYSTEM TABLE: then it sees every row, as a superuser
+    state.sees_everything = bool(me and me[0][1]) or (
+        bool(me) and _reads_system_tables(db, me[0][0], rows)
+    )
     users: dict[int, str] = {}
     for sysid, name, superuser in rows["users"]:
         users[sysid] = name
@@ -151,22 +206,29 @@ def read(db: Connection, columns: bool = True) -> State:
         kinds[f"{schema}.{name}"] = kind
         state.objects[kind].add(f"{schema}.{name}")
 
-    def privilege(grantee: str, identity: str, kind: str, name: str, priv: str) -> None:
-        if identity == "public":  # PUBLIC isn't managed yet; its schema grants are
-            if kind == "schemas":  # read to warn about
-                state.public_privileges.add(Privilege("public", kind, name, priv))
-            return
+    def privilege(
+        grantee: str, identity: str, kind: str, name: str, priv: str, option=False
+    ) -> None:
+        """Record one SVV privilege row; PUBLIC's only as a schema grant to warn about."""
         if priv == "temp":  # one spelling, as the planner writes it
             priv = "temporary"
+        if identity == "public":  # PUBLIC: managed where the spec declares it, and
+            grantee = "public"  # its schema grants read to warn about where not
+            if kind == "schemas":
+                state.public_privileges.add(Privilege("public", kind, name, priv))
         state.privileges.add(Privilege(grantee, kind, name, priv))
+        if _true(option):
+            state.grant_options.add(Privilege(grantee, kind, name, priv))
 
-    for grantee, identity, name, priv in rows["database_privileges"]:
-        privilege(grantee, identity, "databases", name, priv)
-    for grantee, identity, name, priv in rows["schema_privileges"]:
-        privilege(grantee, identity, "schemas", name, priv)
-    for grantee, identity, schema, relation, priv in rows["relation_privileges"]:
+    for grantee, identity, name, priv, option in rows["database_privileges"]:
+        privilege(grantee, identity, "databases", name, priv, option)
+    for grantee, identity, name, priv, option in rows["schema_privileges"]:
+        privilege(grantee, identity, "schemas", name, priv, option)
+    for grantee, identity, schema, relation, priv, option in rows[
+        "relation_privileges"
+    ]:
         full = f"{schema}.{relation}"
-        privilege(grantee, identity, kinds.get(full, "tables"), full, priv)
+        privilege(grantee, identity, kinds.get(full, "tables"), full, priv, option)
     for kind, name, owner in rows["owners"]:
         state.owners[(kind, name)] = owner
     for owner, schema, kind, grantee, gtype, priv in rows["default_privileges"]:

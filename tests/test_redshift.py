@@ -186,6 +186,77 @@ def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
 
 
+def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
+    # Redshift gives a grant option to users only
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'GRANT UPDATE ON rs_test.daily TO "{P}alice" WITH GRANT OPTION')
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'- REVOKE GRANT OPTION FOR UPDATE ON TABLE "rs_test"."daily" FROM "{P}alice"'
+        in out
+    ), out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # UPDATE itself stays
+        assert conn.execute(
+            "SELECT privilege_type, admin_option FROM svv_relation_privileges "
+            f"WHERE identity_name = '{P}alice' AND relation_name = 'daily'"
+        ).fetchall() == [("UPDATE", False)]
+
+
+def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
+    # Redshift shows no password, disabled or not: plan signs in with password_env
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn, env=ENV)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'ALTER USER "{P}alice" PASSWORD DISABLE')
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=ENV)
+    assert code == 2, out
+    assert f"~ ALTER USER \"{P}alice\" PASSWORD '********'" in out, out
+    assert "doesn't sign in with RS_TEST_ALICE_PASSWORD" in out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=ENV)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=ENV)[0] == 0
+    alice = make_conninfo(dsn, user=f"{P}alice", password=ENV["RS_TEST_ALICE_PASSWORD"])
+    psycopg.connect(alice).close()
+
+
+def test_grants_to_public(dsn, tmp_path):
+    public = f"""
+version: 1
+engine: redshift
+principals:
+  public:
+    type: builtin
+    privileges:
+      schemas: {{usage: [rs_test]}}
+      tables: {{select: [rs_test.daily]}}
+  {P}nobody:
+    type: user
+    password_env: RS_TEST_NOBODY_PW
+"""
+    env = {"RS_TEST_NOBODY_PW": "Nobody-pw-123"}
+    spec = _spec(tmp_path, public)
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'GRANT SELECT ON TABLE "rs_test"."daily" TO PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    nobody = make_conninfo(dsn, user=f"{P}nobody", password="Nobody-pw-123")
+    with psycopg.connect(nobody) as conn:  # holds nothing itself: PUBLIC's
+        conn.execute("SELECT count(*) FROM rs_test.daily")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("GRANT INSERT ON rs_test.daily TO PUBLIC")
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'REVOKE INSERT ON TABLE "rs_test"."daily" FROM PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # for the next test
+        conn.execute("REVOKE ALL ON rs_test.daily FROM PUBLIC")
+        conn.execute("REVOKE USAGE ON SCHEMA rs_test FROM PUBLIC")
+
+
 def test_memberships_are_removed_only_when_allowed(dsn, tmp_path):
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
     changed = SPEC.replace(
@@ -314,6 +385,9 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
             "ORDER BY 1"
         ).fetchall()
     assert grants == [(f"{P}analysts", "SELECT"), (f"{P}reader", "SELECT")]
+    # those grants came from the spec's default privileges: not drift
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
 
 
 def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
@@ -340,6 +414,17 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert code == 0, out
 
 
+def test_import_without_engine_finds_redshift(dsn, tmp_path):
+    # from --dsn alone: the catalog says Redshift, and groups stay groups
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame("import", "--dsn", dsn, "--prefix", P, "-o", str(imported))
+    assert code == 0, out
+    assert "engine: redshift, from the catalog" in out
+    text = imported.read_text()
+    assert "engine: redshift" in text and f"{P}analysts:\n    type: group" in text
+
+
 def test_ownership(dsn, tmp_path):
     owners = f"""
 version: 1
@@ -357,7 +442,9 @@ principals:
     assert code == 2, out
     assert f'~ ALTER SCHEMA "rs_test" OWNER TO "{P}etl"' in out, out
     assert f'~ ALTER TABLE "rs_test"."events" OWNER TO "{P}etl"' in out, out
-    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    code, out = _sesame("apply", spec, "--dsn", dsn)  # no flag: shown, skipped
+    assert code == 0 and "skipped: needs --allow-owner" in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-owner")[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
     with psycopg.connect(dsn, autocommit=True) as conn:  # hand them back for cleanup
         me = sql.Identifier(conn.info.user)
@@ -385,7 +472,8 @@ def test_a_user_that_sees_only_its_own_grants_imports_nothing(dsn, tmp_path):
         "import", "--dsn", limited, "--engine", "redshift", "-o", str(out_file)
     )
     assert code == 1, out
-    assert "import needs a superuser on Redshift" in out
+    assert "import needs to see every grant" in out
+    assert "ACCESS SYSTEM TABLE" in out
     assert not out_file.exists()
 
     spec = _spec(
@@ -393,4 +481,39 @@ def test_a_user_that_sees_only_its_own_grants_imports_nothing(dsn, tmp_path):
         f"version: 1\nengine: redshift\nprincipals:\n  {P}limited: {{type: user}}\n",
     )
     code, out = _sesame("plan", spec, "--dsn", limited)
-    assert "this user isn't a superuser" in out, out
+    assert "this user isn't a superuser and doesn't hold ACCESS SYSTEM TABLE" in out, (
+        out
+    )
+
+
+def test_access_system_table_through_a_role_sees_everything(dsn, tmp_path):
+    # the least-privileged way to read every grant: no superuser needed
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE USER {P}limited PASSWORD 'Limited-pw-1'")
+        conn.execute(f"CREATE ROLE {P}catalog")
+        try:
+            conn.execute(f"GRANT ACCESS SYSTEM TABLE TO ROLE {P}catalog")
+        except psycopg.Error:
+            pytest.skip("this Redshift has no ACCESS SYSTEM TABLE permission")
+        conn.execute(f"GRANT ROLE {P}catalog TO {P}limited")
+    assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=ENV)[0] == 0
+    limited = make_conninfo(dsn, user=f"{P}limited", password="Limited-pw-1")
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        limited,
+        "--prefix",
+        P,
+        "--schema",
+        "rs_test",
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    # what a non-superuser can't see without it: others' memberships and grants
+    assert f"member_of:\n    - {P}writer" in text and "groups:" in text, text
+    code, out = _sesame("plan", _spec(tmp_path), "--dsn", limited)
+    assert "ACCESS SYSTEM TABLE" not in out, out  # no partial-view warning
+    assert f'GRANT ROLE "{P}writer" TO "{P}alice"' not in out, out

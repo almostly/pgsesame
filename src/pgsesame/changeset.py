@@ -30,7 +30,7 @@ from pydantic import (
 )
 
 from pgsesame import spec as spec_module
-from pgsesame.ops import AnyOperation, CreateRole, Operation
+from pgsesame.ops import AlterPassword, AnyOperation, CreateRole, Operation
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -92,7 +92,7 @@ class ChangeSet(BaseModel):
         """Return the operations with passwords read again from the environment."""
         out: list[Operation] = []
         for op in self.operations:
-            if isinstance(op, CreateRole) and op.password_env:
+            if isinstance(op, (CreateRole, AlterPassword)) and op.password_env:
                 password = os.environ.get(op.password_env)
                 secret = SecretStr(password) if password is not None else None
                 op = op.model_copy(update={"password": secret})
@@ -117,5 +117,6 @@ def is_changeset(path: str | Path) -> bool:
 
 
 def _sha256(raw: dict[str, Any]) -> str:
+    """Return the SHA-256 of ``raw`` as canonical JSON (sorted keys, no spaces)."""
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

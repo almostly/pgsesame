@@ -21,6 +21,9 @@ inputs:
   allow-revoke:
     description: "apply: also run revokes and membership removals"
     default: "false"
+  allow-owner:
+    description: "apply: also run owner changes (the old owner loses what owning gave it)"
+    default: "false"
   comment:
     description: "plan on a pull request: post the plan as a comment, updated in place on each push"
     default: "true"
@@ -144,6 +147,7 @@ runs:
         PACKAGE: ${{ inputs.package }}
         CHANGES: ${{ inputs.change-set }}
         ALLOW_REVOKE: ${{ inputs.allow-revoke }}
+        ALLOW_OWNER: ${{ inputs.allow-owner }}
         ARGS: ${{ inputs.args }}
       run: |
         if [ ! -f "$CHANGES" ]; then
@@ -153,6 +157,7 @@ runs:
         fi
         flags=""
         if [ "$ALLOW_REVOKE" = "true" ]; then flags="--allow-revoke"; fi
+        if [ "$ALLOW_OWNER" = "true" ]; then flags="$flags --allow-owner"; fi
         # shellcheck disable=SC2086
         uvx --from "$PACKAGE" sesame apply "$CHANGES" $flags $ARGS
         echo "exit-code=0" >> "$GITHUB_OUTPUT"

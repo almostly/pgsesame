@@ -6,6 +6,7 @@ from pathlib import Path
 
 import os
 import sys
+from typing import NoReturn
 
 import psycopg
 import typer
@@ -17,7 +18,7 @@ from typer import rich_utils
 from pgsesame import __version__, masking, planner, postgres, redshift, spec, targets
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import console, err, header, operation
-from pgsesame.db import Connection, Database
+from pgsesame.db import Connection, Database, PartiallyApplied
 
 # pgcli's green for the help screens, in place of Typer's cyan and yellow
 for _name, _style in {
@@ -42,6 +43,7 @@ SpecPath = typer.Argument(..., exists=True, dir_okay=False, help="The spec (YAML
 
 
 def _version(value: bool) -> None:
+    """Print the version and exit, for ``--version``."""
     if value:
         console.print(f"[accent]sesame[/accent] {__version__}")
         raise typer.Exit()
@@ -97,6 +99,7 @@ DsnOption = typer.Option(
 
 
 def _load(path: Path) -> spec.Spec:
+    """Load a spec, or print each of its problems and exit 1."""
     try:
         return spec.load(path)
     except spec.SpecError as e:
@@ -106,7 +109,8 @@ def _load(path: Path) -> spec.Spec:
 
 
 def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
-    reader = redshift.read if loaded.engine == "redshift" else postgres.read
+    """Read the database and return the plan that makes it match ``loaded``."""
+    reader = _reader(loaded.engine)
     try:
         normalized = (
             postgres.normalize_policies(db, loaded)
@@ -117,6 +121,7 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         # makes it the biggest read
         columns = any("columns" in p.privileges for p in loaded.principals.values())
         current = reader(db, columns)
+        _check_passwords(loaded, db, current)
         masks = None
         if loaded.masking is not None:
             masking.read(db, loaded, current)
@@ -129,6 +134,8 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
         for problem in e.problems:
             err.print(f"[error]✗[/error] {escape(problem)}")
         raise typer.Exit(1) from None
+    except psycopg.errors.UndefinedTable as e:
+        _missing_view(e, loaded.engine)
     except Exception as e:
         # a Data API's error while reading (access denied, the API not enabled
         # yet ...): said plainly; anything else is a bug and keeps its traceback
@@ -138,6 +145,46 @@ def _plan(loaded: spec.Spec, db: Connection) -> planner.Plan:
             f"[error]✗ reading the database through AWS failed:[/error] {escape(str(e))}"
         )
         raise typer.Exit(1) from None
+
+
+def _reader(engine: str):
+    """Return the catalog reader for an engine."""
+    from pgsesame import dsql
+
+    return {"redshift": redshift.read, "dsql": dsql.read}.get(engine, postgres.read)
+
+
+def _check_passwords(loaded: spec.Spec, db: Connection, current) -> None:
+    """Sign in as each user the spec gives a password_env, to see it still works.
+
+    Neither Redshift nor PostgreSQL (without a superuser's pg_authid) shows a
+    password, or that it was disabled: signing in is the only way to tell. Only
+    a direct connection can; over the Data API ``passwords_refused`` stays None.
+    """
+    if not isinstance(db, Database):
+        return
+    refused: set[str] = set()
+    for name, p in sorted(loaded.principals.items()):
+        role = current.roles.get(name)
+        password = os.environ.get(p.password_env) if p.password_env else None
+        if role is None or role.superuser or not p.can_login or password is None:
+            continue
+        if db.signs_in(name, password) is False:
+            refused.add(name)
+    current.passwords_refused = refused
+
+
+def _missing_view(e: Exception, engine: str) -> NoReturn:
+    """Say which catalog view the database lacks, and exit 1."""
+    what = str(e).strip().splitlines()[0]
+    hint = (
+        "pgsesame reads Redshift's SVV views (svv_roles, svv_user_grants, ...); "
+        "on oblako's redshift-local, use an image from 2026-10-07 or later"
+        if engine == "redshift"
+        else "is this PostgreSQL? For Redshift, set engine: redshift (or --engine)"
+    )
+    err.print(f"[error]✗ can't read the catalog:[/error] {escape(what)}; {hint}")
+    raise typer.Exit(1) from None
 
 
 class ConnectOptions:
@@ -162,13 +209,14 @@ class ConnectOptions:
         rds: str | None = None,
         region: str | None = None,
         profile: str | None = None,
+        dsql: str | None = None,
     ):
         """Keep the options; the DSN as a SecretStr, as it may carry a password."""
         self.dsn = SecretStr(dsn)
-        self.rds = rds
+        self.rds, self.dsql = rds, dsql
         self.region, self.profile = region, profile
         # Redshift's default database is dev, PostgreSQL's postgres
-        database = database or ("postgres" if rds else "dev")
+        database = database or ("postgres" if rds or dsql else "dev")
         self.cluster, self.workgroup, self.database = cluster, workgroup, database
         self.iam, self.data_api = iam, data_api
         self.secret_arn, self.db_user = secret_arn, db_user
@@ -182,7 +230,7 @@ class ConnectOptions:
         aws.configure(self.profile, self.region)  # AWS paths; harmless for others
         if self.iam and self.data_api:
             raise ValueError("choose --iam or --data-api, not both")
-        if self.dsn.get_secret_value() or self.iam or self.data_api:
+        if self.dsn.get_secret_value() or self.iam or self.data_api or self.dsql:
             return self._from_flags()
         name = self.target or os.environ.get("SESAME_TARGET") or targets.default_name()
         if name:
@@ -191,6 +239,11 @@ class ConnectOptions:
         return Database(self.dsn)  # libpq's PG* variables, ~/.pgpass, services
 
     def _from_flags(self) -> Connection:
+        """Return the connection the command-line flags (or libpq's PG* variables) describe."""
+        if self.dsql:
+            from pgsesame.aws import dsql_database
+
+            return dsql_database(self.dsql, self.db_user)
         if self.rds:
             return _rds(
                 self.rds,
@@ -261,6 +314,8 @@ def _from_target(
     from pgsesame import aws
 
     aws.configure_defaults(target.profile, target.region)
+    if target.dsql:
+        return aws.dsql_database(target.dsql, target.db_user)
     if target.rds:
         return _rds(
             target.rds,
@@ -301,7 +356,8 @@ AWS_PANEL = r"AWS (needs pgsesame\[redshift], \[rds] or \[aurora])"
 RegionOption = typer.Option(
     None,
     "--region",
-    help="AWS region (default: AWS_REGION, then the profile's).",
+    help="AWS region (default: AWS_REGION, then AWS_DEFAULT_REGION, then the "
+    "profile's).",
     rich_help_panel=AWS_PANEL,
 )
 ProfileOption = typer.Option(
@@ -339,6 +395,13 @@ RdsOption = typer.Option(
     "--rds",
     help="Aurora cluster or RDS instance identifier (or endpoint), with --iam or "
     "--data-api.",
+    rich_help_panel=AWS_PANEL,
+)
+DsqlOption = typer.Option(
+    None,
+    "--dsql",
+    help="Aurora DSQL cluster identifier (or endpoint): signs in with an IAM token, "
+    "as admin or --db-user.",
     rich_help_panel=AWS_PANEL,
 )
 DataApiOption = typer.Option(
@@ -380,6 +443,7 @@ def _where(options: ConnectOptions, db: Connection) -> str:
 
 
 def _connect(target: ConnectOptions) -> Connection:
+    """Connect, or print why it failed and exit 1."""
     try:
         return target.connect()
     except (
@@ -396,19 +460,23 @@ def _connect(target: ConnectOptions) -> Connection:
 
 
 PARTIAL = (
-    "this user isn't a superuser, and Redshift shows a non-superuser only its own "
-    "grants: this plan can't see the rest, so grants it adds may already exist and "
-    "drift elsewhere goes unseen. Plan as a superuser to see everything."
+    "this user isn't a superuser and doesn't hold ACCESS SYSTEM TABLE, so Redshift "
+    "shows it only its own grants: this plan can't see the rest, so grants it adds "
+    "may already exist and drift elsewhere goes unseen. To see everything without "
+    "a superuser: GRANT ACCESS SYSTEM TABLE TO ROLE <a role this user holds>."
 )
 
 
 def _warn_if_partial(result: planner.Plan) -> None:
+    """Warn when the plan was made from part of the catalog."""
     if result.partial:
         err.print(f"[change]! {escape(PARTIAL)}[/change]")
 
 
 def _show(result: planner.Plan, db: Connection, gated: bool = True) -> None:
-    """Print the notes and operations; ``gated`` labels those a flag must allow."""
+    """Print the warnings, notes and operations; ``gated`` labels those a flag must allow."""
+    for warning in result.warnings:
+        err.print(f"[change]! {escape(warning)}[/change]")
     for note in result.notes:
         console.print(f"[muted]note: {escape(note)}[/muted]")
     for op in result.operations:
@@ -417,6 +485,7 @@ def _show(result: planner.Plan, db: Connection, gated: bool = True) -> None:
 
 
 def _summary(result: planner.Plan) -> str:
+    """Return the plan's counts: to add, to change, to remove."""
     counts = {"create": 0, "change": 0, "remove": 0}
     for op in result.operations:
         counts[op.kind] += 1
@@ -440,6 +509,7 @@ def plan(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    dsql: str | None = DsqlOption,
     region: str | None = RegionOption,
     profile: str | None = ProfileOption,
     out: Path | None = typer.Option(
@@ -469,15 +539,18 @@ def plan(
         rds,
         region=region,
         profile=profile,
+        dsql=dsql,
     )
     db = _connect(options)
     header("plan", _where(options, db))
     result = _plan(loaded, db)
     _warn_if_partial(result)
+    # the notes first, with or without changes: an empty plan can still have
+    # something to say (PUBLIC can create in a schema, a superuser left alone)
+    _show(result, db)
     if not result.operations:
         console.print("[ok]✓[/ok] the database matches the spec; nothing to do")
         raise typer.Exit(0)
-    _show(result, db)
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
     if out is not None:
         ChangeSet.build(loaded, db.target, result.operations).save(out)
@@ -505,7 +578,35 @@ def show(
     console.print(f"\n[accent]Plan:[/accent] {_summary(result)}")
 
 
+@app.command(name="grants")
+def grants_command(
+    path: Path = SpecPath,
+    only: str | None = typer.Option(
+        None,
+        "--object",
+        help="Only what one object gets (schema.table): its own grants and its "
+        "schema's *.",
+    ),
+    fmt: str = typer.Option("json", "--format", help="json or csv."),
+) -> None:
+    """List the grants the spec declares, as JSON or CSV (no database needed).
+
+    For tools that rebuild tables (dbt, Glue): a rebuilt table loses its grants, and
+    this is what to put back, as pgsesame reads the spec. schema.* stays * .
+    """
+    from pgsesame import grants
+
+    if fmt not in ("json", "csv"):
+        err.print("[error]✗[/error] --format is json or csv")
+        raise typer.Exit(1)
+    if only is not None and only.count(".") != 1:
+        err.print("[error]✗[/error] --object is schema.table")
+        raise typer.Exit(1)
+    sys.stdout.write(grants.dump(grants.rows(_load(path), only), fmt))
+
+
 def _load_changeset(path: Path) -> ChangeSet:
+    """Load a saved change set, or print why it can't be used and exit 1."""
     try:
         return ChangeSet.load(path)
     except ChangeSetError as e:
@@ -528,12 +629,18 @@ def apply(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    dsql: str | None = DsqlOption,
     region: str | None = RegionOption,
     profile: str | None = ProfileOption,
     allow_revoke: bool = typer.Option(
         False, "--allow-revoke", help="Also run revokes and membership removals."
     ),
     allow_drop: bool = typer.Option(False, "--allow-drop", help="Also run drops."),
+    allow_owner: bool = typer.Option(
+        False,
+        "--allow-owner",
+        help="Also run owner changes (the old owner loses what owning gave it).",
+    ),
 ) -> None:
     """Make the database match the spec, in one transaction.
 
@@ -555,6 +662,7 @@ def apply(
         rds,
         region=region,
         profile=profile,
+        dsql=dsql,
     )
     db = _connect(options)
     header("apply", _where(options, db))
@@ -575,15 +683,28 @@ def apply(
             _show(result, db)
             err.print("plan again (sesame plan -o) and review the new change set")
             raise typer.Exit(1)
-        result = planner.Plan(saved.with_secrets(), result.notes)
-    runnable = result.allowed(allow_revoke, allow_drop)
+        result = planner.Plan(
+            saved.with_secrets(), result.notes, warnings=result.warnings
+        )
+    runnable = result.allowed(allow_revoke, allow_drop, allow_owner)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:
+        # the warnings and notes, as plan prints them
+        _show(planner.Plan([], result.notes, warnings=result.warnings), db)
         console.print("[ok]✓[/ok] nothing to apply")
     else:
-        _show(planner.Plan(runnable, result.notes), db, gated=False)  # allowed
+        allowed = planner.Plan(runnable, result.notes, warnings=result.warnings)
+        _show(allowed, db, gated=False)
         try:
             db.run([op.statement() for op in runnable])
+        except PartiallyApplied as e:
+            err.print(
+                f"[error]apply stopped at statement {e.done + 1} of {e.total}:[/error] "
+                f"{escape(str(e))}\nAurora DSQL runs each statement in its own "
+                f"transaction, so the {e.done} before it were applied; plan again to "
+                "see what remains"
+            )
+            raise typer.Exit(1) from None
         except (
             Exception
         ) as e:  # psycopg's or the Data API's: the transaction rolled back
@@ -612,12 +733,13 @@ def import_spec(
     secret_arn: str | None = SecretArnOption,
     db_user: str | None = DbUserOption,
     rds: str | None = RdsOption,
+    dsql: str | None = DsqlOption,
     region: str | None = RegionOption,
     profile: str | None = ProfileOption,
     engine: str | None = typer.Option(
         None,
         "--engine",
-        help="postgres or redshift (default: the target's, else postgres).",
+        help="postgres, redshift or dsql (default: the target's, else the catalog's).",
     ),
     schema: list[str] = typer.Option(
         [],
@@ -651,25 +773,48 @@ def import_spec(
         rds,
         region=region,
         profile=profile,
+        dsql=dsql,
     )
     db = _connect(options)
     if engine is None:
         saved = targets.get(options.label).engine if options.label else None
-        engine = saved or ("redshift" if cluster or workgroup else "postgres")
-    if engine not in ("postgres", "redshift"):
-        err.print("[error]✗[/error] --engine is postgres or redshift")
+        engine = saved or (
+            "redshift" if cluster or workgroup else "dsql" if dsql else None
+        )
+    if engine is None:
+        # neither said nor saved: the catalog tells (Redshift has its SVV views,
+        # Aurora DSQL its sys.iam_pg_role_mappings), or a Redshift spec would come
+        # out as postgres, its groups as roles
+        from pgsesame import dsql as dsql_reader
+
+        if redshift.is_redshift(db):
+            engine = "redshift"
+        elif dsql_reader.is_dsql(db):
+            engine = "dsql"
+        else:
+            engine = "postgres"
+        if engine != "postgres":
+            err.print(
+                f"[muted]note: engine: {engine}, from the catalog; --engine sets "
+                "it[/muted]"
+            )
+    if engine not in ("postgres", "redshift", "dsql"):
+        err.print("[error]✗[/error] --engine is postgres, redshift or dsql")
         raise typer.Exit(1)
-    reader = redshift.read if engine == "redshift" else postgres.read
-    state = reader(db, False)  # column grants come from their own view
+    reader = _reader(engine)
+    try:
+        state = reader(db, False)  # column grants come from their own view
+    except psycopg.errors.UndefinedTable as e:
+        _missing_view(e, engine)
     if not state.sees_everything:
         # what it can't see would be missing from the spec, and a superuser's plan
         # of that spec would revoke it: write nothing
         err.print(
-            "[error]✗[/error] import needs a superuser on Redshift: it shows a "
-            "non-superuser only its own grants, so the spec would leave out everyone "
-            "else's memberships and grants, and a superuser's plan of it would revoke "
-            "them. Connect as a superuser (an IAM user is one after ALTER USER "
-            "\"IAM:...\" PASSWORD '...' CREATEUSER)."
+            "[error]✗[/error] import needs to see every grant: Redshift shows this "
+            "user only its own, so the spec would leave out everyone else's "
+            "memberships and grants, and a plan of it would revoke them. Grant it "
+            "ACCESS SYSTEM TABLE through a role (GRANT ACCESS SYSTEM TABLE TO ROLE "
+            "<a role it holds>), or connect as a superuser."
         )
         raise typer.Exit(1)
     (me,) = db.rows("select current_user")[0]
@@ -700,7 +845,9 @@ def login(
     name: str = typer.Argument(
         ..., help="A name for the target: prod, staging, local ..."
     ),
-    engine: str = typer.Option("postgres", "--engine", help="postgres or redshift."),
+    engine: str = typer.Option(
+        "postgres", "--engine", help="postgres or redshift (dsql: with --dsql)."
+    ),
     host: str | None = typer.Option(
         None, "--host", help="Server host (password logins)."
     ),
@@ -741,6 +888,12 @@ def login(
     profile: str | None = typer.Option(
         None, "--profile", help="AWS profile (IAM, Data API)."
     ),
+    dsql: str | None = typer.Option(
+        None,
+        "--dsql",
+        help="Aurora DSQL cluster (identifier or endpoint): IAM sign-in, as admin "
+        "or --db-user.",
+    ),
     password_stdin: bool = typer.Option(
         False, "--password-stdin", help="Read the password from stdin (scripts)."
     ),
@@ -768,11 +921,13 @@ def login(
     except ValueError as e:
         err.print(f"[error]✗[/error] {escape(str(e))}")
         raise typer.Exit(1) from None
-    if engine not in ("postgres", "redshift"):
-        err.print("[error]✗[/error] --engine is postgres or redshift")
+    if dsql:
+        engine, iam = "dsql", True  # IAM is the only way in
+    if engine not in ("postgres", "redshift", "dsql"):
+        err.print("[error]✗[/error] --engine is postgres or redshift (or --dsql)")
         raise typer.Exit(1)
     method = "iam" if iam else "data-api" if data_api else "password"
-    if method != "password" and engine != "redshift" and not rds:
+    if method != "password" and engine == "postgres" and not rds:
         err.print(
             "[error]✗[/error] --iam and --data-api need --rds on PostgreSQL (an RDS "
             "instance or Aurora cluster)"
@@ -818,6 +973,8 @@ def login(
                 show_default=False,
             )
             secret = SecretStr(typed) if typed else None
+    elif dsql:
+        database = "postgres"  # Aurora DSQL has one database
     elif rds:
         database = database or "postgres"
         db_user = (
@@ -830,7 +987,7 @@ def login(
             )
         database = database or _ask("Database", interactive, "dev")
     target = targets.Target(
-        engine="redshift" if engine == "redshift" else "postgres",
+        engine=engine if engine in ("redshift", "dsql") else "postgres",
         method=method,
         host=host,
         port=port or (5439 if engine == "redshift" else 5432),
@@ -844,6 +1001,7 @@ def login(
         region=region,
         password_env=password_env,
         rds=rds,
+        dsql=dsql,
         profile=profile,
     )
     header("login", name)
@@ -865,6 +1023,7 @@ def login(
 
 
 def _valid_name(name: str) -> str:
+    """Return ``name`` if it can name a target, else raise ValueError."""
     import re
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
@@ -875,6 +1034,7 @@ def _valid_name(name: str) -> str:
 
 
 def _ask(label: str, interactive: bool, default: str | None = None) -> str:
+    """Prompt for a value, or without a terminal use the default or exit 1."""
     if not interactive:
         if default is not None:
             return default
@@ -889,13 +1049,15 @@ def _check_target(target: targets.Target, name: str, secret: SecretStr | None) -
     """Connect once, show who pgsesame is there, and whether it can manage roles."""
     try:
         db = _from_target(target, name, secret)
-        if target.engine == "postgres":
+        if target.engine in ("postgres", "dsql"):  # Aurora DSQL: pg_roles too
             user, superuser, createrole, version = db.rows(
                 "select current_user, rolsuper, rolcreaterole, current_setting('server_version') "
                 "from pg_roles where rolname = current_user"
             )[0]
             can_manage = superuser or createrole
-            server = f"PostgreSQL {version}"
+            server = (
+                "Aurora DSQL" if target.engine == "dsql" else f"PostgreSQL {version}"
+            )
         else:
             user, superuser = db.rows(
                 "select current_user, usesuper from pg_user where usename = current_user"

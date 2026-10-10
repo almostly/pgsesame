@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from pgsesame.planner import _system_role, public_create_notes
+from pgsesame.planner import _system_role, public_create_notes, unmanaged_notes
 from pgsesame.masking import (
     passes_through,
     role_priorities,
@@ -40,6 +40,7 @@ from pgsesame.state import Privilege, State
 
 
 def _in_schemas(p: Privilege, schemas: set[str]) -> bool:
+    """Return whether a grant is on one of ``schemas`` (every grant when none)."""
     if not schemas or p.object_type == "databases":
         return True
     schema = (
@@ -62,6 +63,7 @@ def build(
     notes: list[str] = []
 
     def selectable(name: str) -> bool:
+        """Return whether import writes this role: not a superuser, system role or the importer."""
         role = state.roles[name]
         if role.superuser or _system_role(name) or name == me:
             return False
@@ -70,6 +72,7 @@ def build(
     selected = sorted(name for name in state.roles if selectable(name))
     principals: dict[str, dict[str, Any]] = {}
     referred: set[str] = set()
+    unmanaged: set[Privilege] = set()
 
     for name in selected:
         role = state.roles[name]
@@ -108,10 +111,7 @@ def build(
             if p.grantee != name or not _in_schemas(p, in_scope):
                 continue
             if p.privilege not in known.get(p.object_type, ()):
-                notes.append(
-                    f"{name}: {p.privilege.upper()} on {p.object_name} isn't a privilege "
-                    "pgsesame manages; left out"
-                )
+                unmanaged.add(p)  # one note per privilege and type, after the loop
                 continue
             grants[p.object_type][p.privilege].add(p.object_name)
         owned: dict[str, list[str]] = defaultdict(list)
@@ -123,6 +123,9 @@ def build(
                 owned[kind].append(obj)
         if owned:
             entry["owns"] = dict(sorted(owned.items()))
+        links = sorted(arn for role, arn in state.iam_links if role == name)
+        if links:  # Aurora DSQL: the IAM identities that sign in as it
+            entry["iam"] = links
         if grants:
             entry["privileges"] = {
                 kind: {priv: sorted(objects) for priv, objects in sorted(by.items())}
@@ -132,6 +135,7 @@ def build(
 
     for name in sorted(referred - set(principals)):
         principals[name] = {"type": "builtin"}  # referred to, not managed
+    notes += unmanaged_notes(unmanaged, "left out")
 
     defaults: dict[tuple[str, str, str], dict[str, set[str]]] = defaultdict(
         lambda: defaultdict(set)
@@ -209,6 +213,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
     policies = state.mask_policies
 
     def raw(name: str) -> bool:
+        """Return whether ``name`` is a policy that passes its value through."""
         return name in policies and passes_through(policies[name])
 
     by_column: dict[tuple[str, str], list[Any]] = defaultdict(list)
@@ -276,7 +281,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
                 )
             )
         roles = entry.get("roles", {})
-        ranks = role_priorities(entry.get("mask"), list(roles.values()))
+        ranks = role_priorities(list(roles.values()))
         for (grantee, policy), priority in zip(roles.items(), ranks):
             gtype = winning[grantee].grantee_type
             then.append(

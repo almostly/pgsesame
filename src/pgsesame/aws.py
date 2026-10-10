@@ -28,13 +28,20 @@ connection: ``rows``, ``run``, ``render``, ``database`` and ``target``.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
+import psycopg
 from psycopg import sql
 from pydantic import SecretStr
 
-from pgsesame.db import Database
+from pgsesame.db import Database, PartiallyApplied
+
+# BatchExecuteStatement takes at most 40 SQL statements
+BATCH_LIMIT = 40
+# how long a Data API session outlives its last statement, in seconds
+SESSION_KEEP_ALIVE = 300
 
 
 _SESSION: dict[str, str | None] = {"profile": None, "region": None}
@@ -52,10 +59,17 @@ def configure_defaults(profile: str | None, region: str | None) -> None:
 
 
 def _boto3(service: str = ""):
+    """Return the boto3 module, or say which extra installs it."""
     try:
         import boto3
     except ImportError as e:
-        extra = "rds" if service.startswith("rds") else "redshift"
+        extra = (
+            "rds"
+            if service.startswith("rds")
+            else "dsql"
+            if service == "dsql"
+            else "redshift"
+        )
         raise RuntimeError(
             f"connecting through AWS needs boto3, which comes with the {extra} extra: "
             f"uv tool install --force 'pgsesame[{extra}]' (or pip install "
@@ -70,8 +84,11 @@ def _client(service: str) -> Any:
     The region comes from --region, else AWS_REGION / AWS_DEFAULT_REGION, else the
     profile's ``region`` in ~/.aws/config; without one, say where to set it.
     """
+    # boto3 reads AWS_DEFAULT_REGION but not AWS_REGION (the AWS CLI and the other
+    # SDKs read both, AWS_REGION first): read it here, so either works
+    region = _SESSION["region"] or os.environ.get("AWS_REGION") or None
     session = _boto3(service).session.Session(
-        profile_name=_SESSION["profile"], region_name=_SESSION["region"]
+        profile_name=_SESSION["profile"], region_name=region
     )
     if not session.region_name:
         profile = _SESSION["profile"] or session.profile_name
@@ -162,6 +179,7 @@ class DataApiDatabase:
         return self._label
 
     def _wait(self, statement_id: str) -> dict[str, Any]:
+        """Poll a statement until it finishes; raise its error if it failed."""
         delay = 0.1
         while True:
             described = self.client.describe_statement(Id=statement_id)
@@ -202,6 +220,7 @@ class DataApiDatabase:
     def _result(
         self, statement_id: str, described: dict[str, Any]
     ) -> list[tuple[Any, ...]]:
+        """Return a finished statement's rows, following every page."""
         if not described.get("HasResultSet"):
             return []
         out: list[tuple[Any, ...]] = []
@@ -223,8 +242,17 @@ class DataApiDatabase:
         return statement.as_string()
 
     def run(self, statements: list[sql.Composed]) -> None:
-        """Run the statements as one batch, which Redshift runs as one transaction."""
+        """Run the statements as one transaction.
+
+        Up to ``BATCH_LIMIT`` statements go as one batch, which Redshift runs as
+        one transaction. A longer plan would be refused as a batch, so it runs in a
+        Data API session instead: BEGIN, each statement, COMMIT, one call each on
+        the session's connection, and ROLLBACK if any of them fails.
+        """
         sqls = [self.render(statement) for statement in statements]
+        if len(sqls) > BATCH_LIMIT:
+            self._run_in_session(sqls)
+            return
         try:
             started = self.client.batch_execute_statement(Sqls=sqls, **self._where)
         except Exception as e:
@@ -238,11 +266,41 @@ class DataApiDatabase:
             raise
         self._wait(started["Id"])
 
+    def _run_in_session(self, sqls: list[str]) -> None:
+        """Run ``sqls`` between BEGIN and COMMIT on one Data API session's connection.
+
+        BEGIN opens the session (named by the database and credentials); every
+        statement after it names only the session, so all of them share its
+        transaction. The first failure rolls it back and is raised.
+        """
+        started = self.client.execute_statement(
+            Sql="BEGIN", SessionKeepAliveSeconds=SESSION_KEEP_ALIVE, **self._where
+        )
+        self._wait(started["Id"])
+        session = started["SessionId"]
+
+        def call(text: str) -> None:
+            """Run one statement on the session and wait for it to finish."""
+            # a session already names the database and the credentials
+            self._wait(self.client.execute_statement(Sql=text, SessionId=session)["Id"])
+
+        try:
+            for text in sqls:
+                call(text)
+        except Exception:
+            try:
+                call("ROLLBACK")
+            except Exception:  # the session ending rolls the transaction back too
+                pass
+            raise
+        call("COMMIT")
+
     def close(self) -> None:
         """Nothing to close: each call is its own HTTPS request."""
 
 
 def _value(field: dict[str, Any]) -> Any:
+    """Return a Data API field (one typed key, or isNull) as a Python value."""
     if field.get("isNull"):
         return None
     for key in ("stringValue", "longValue", "booleanValue", "doubleValue"):
@@ -446,9 +504,53 @@ def _rds_value(field: dict[str, Any]) -> Any:
 
 
 def _rds_array(array: dict[str, Any]) -> list[Any]:
+    """Return an RDS Data API arrayValue as a list, nested arrays included."""
     if "arrayValues" in array:
         return [_rds_array(a) for a in array["arrayValues"]]
     for key in ("stringValues", "longValues", "booleanValues", "doubleValues"):
         if key in array:
             return list(array[key])
     return []
+
+
+class DsqlDatabase(Database):
+    """An Aurora DSQL database: PostgreSQL, but one DDL statement per transaction."""
+
+    def run(self, statements: list[sql.Composed]) -> None:
+        """Run each statement in its own transaction, in order.
+
+        Aurora DSQL refuses a second DDL statement in a transaction, and a GRANT
+        is DDL, so a plan can't be one transaction. A failure stops the run and
+        says how many statements before it were applied.
+        """
+        for done, statement in enumerate(statements):
+            try:
+                self.conn.execute(statement)
+            except psycopg.Error as e:
+                raise PartiallyApplied(done, len(statements), e) from None
+
+
+def dsql_database(
+    cluster: str, db_user: str | None = None, client: Any = None
+) -> DsqlDatabase:
+    """Connect to an Aurora DSQL cluster (identifier or endpoint) with an IAM token.
+
+    As ``admin`` (the default) the token is an admin one (dsql:DbConnectAdmin);
+    as another role, a role the caller's IAM identity is linked to
+    (dsql:DbConnect, after AWS IAM GRANT).
+    """
+    client = client or _client("dsql")
+    region = client.meta.region_name
+    host = cluster if "." in cluster else f"{cluster}.dsql.{region}.on.aws"
+    user = db_user or "admin"
+    token = (
+        client.generate_db_connect_admin_auth_token(host, region)
+        if user == "admin"
+        else client.generate_db_connect_auth_token(host, region)
+    )
+    from psycopg.conninfo import make_conninfo
+
+    dsn = make_conninfo(
+        host=host, dbname="postgres", user=user, password=token, sslmode="require"
+    )
+    return DsqlDatabase(SecretStr(dsn))

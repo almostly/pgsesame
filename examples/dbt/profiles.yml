@@ -1,0 +1,14 @@
+# Connection from the environment (the test sets these for redshift-local).
+pgsesame_rebuild:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      host: "{{ env_var('DBT_HOST') }}"
+      port: "{{ env_var('DBT_PORT', '5439') | int }}"
+      user: "{{ env_var('DBT_USER') }}"
+      password: "{{ env_var('DBT_PASSWORD') }}"
+      dbname: "{{ env_var('DBT_DATABASE') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'marts') }}"
+      sslmode: "{{ env_var('DBT_SSLMODE', 'require') }}"
+      threads: 1

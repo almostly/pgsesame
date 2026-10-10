@@ -235,3 +235,49 @@ def test_without_batch_rights_expressions_simply_arent_compared():
 
     db = DataApiDatabase("dev", workgroup="wg", client=ProbingDataApi(deny_batch=True))
     assert masking.normalize(db, _masking_spec(), State()) is None
+
+
+class _NoDatabase:
+    """A connection that's never queried: the plan is made up by the test."""
+
+    database = "dev"
+    target = "fake:dev"
+
+    def render(self, statement):
+        """Return a statement as text, as a real connection would."""
+        return statement.as_string(None)
+
+    def close(self):
+        """Nothing to close."""
+
+
+@pytest.mark.parametrize("command", ["plan", "apply"])
+def test_notes_are_printed_when_there_is_nothing_to_do(command, tmp_path, monkeypatch):
+    # an import followed by an empty plan mustn't hide that PUBLIC can still create
+    from pgsesame import cli, planner
+
+    note = "schema public: PUBLIC (every user) can CREATE in it"
+    monkeypatch.setattr(cli, "_connect", lambda options: _NoDatabase())
+    monkeypatch.setattr(cli, "_plan", lambda loaded, db: planner.Plan([], [note]))
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: redshift\nprincipals: {}\n")
+    result = CliRunner().invoke(
+        app, [command, str(spec), "--dsn", "host=x"], env={"NO_COLOR": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    assert f"note: {note}" in result.output
+    assert "nothing to" in result.output
+
+
+@pytest.mark.parametrize("variable", ["AWS_REGION", "AWS_DEFAULT_REGION"])
+def test_the_region_comes_from_either_variable(variable, tmp_path, monkeypatch):
+    # boto3 itself reads only AWS_DEFAULT_REGION; the error says AWS_REGION works
+    config = tmp_path / "config"
+    config.write_text("[default]\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "none"))
+    for name in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "eu-west-1")
+    aws.configure(None, None)
+    assert aws._client("sts").meta.region_name == "eu-west-1"

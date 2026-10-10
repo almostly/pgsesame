@@ -41,20 +41,21 @@ where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
 """
 
 DATABASE_PRIVILEGES = """
-select g.rolname, d.datname, lower(a.privilege_type)
+select coalesce(g.rolname, 'public'), d.datname, lower(a.privilege_type), a.is_grantable
 from pg_database d, aclexplode(d.datacl) a
-join pg_roles g on g.oid = a.grantee
+left join pg_roles g on g.oid = a.grantee
 where d.datname = current_database() and a.grantee <> d.datdba
 """
 
 SCHEMA_PRIVILEGES = f"""
-select g.rolname, n.nspname, lower(a.privilege_type)
+select coalesce(g.rolname, 'public'), n.nspname, lower(a.privilege_type), a.is_grantable
 from pg_namespace n, aclexplode(n.nspacl) a
-join pg_roles g on g.oid = a.grantee
+left join pg_roles g on g.oid = a.grantee
 where {_USER_SCHEMA} and a.grantee <> n.nspowner
 """
 
-# grantee 0 is PUBLIC: not a role, so the join above leaves it out
+# grantee 0 is PUBLIC (the queries above name it public): its schema grants
+# again on their own, for the CREATE warning where the spec doesn't manage them
 PUBLIC_SCHEMA_PRIVILEGES = f"""
 select n.nspname, lower(a.privilege_type)
 from pg_namespace n, aclexplode(n.nspacl) a
@@ -62,16 +63,16 @@ where {_USER_SCHEMA} and a.grantee = 0
 """
 
 RELATION_PRIVILEGES = f"""
-select g.rolname,
+select coalesce(g.rolname, 'public'),
        case c.relkind when 'S' then 'sequences'
                       when 'v' then 'views' when 'm' then 'views'
                       else 'tables' end,
        n.nspname || '.' || c.relname,
-       lower(a.privilege_type)
+       lower(a.privilege_type), a.is_grantable
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace,
      aclexplode(c.relacl) a
-join pg_roles g on g.oid = a.grantee
+left join pg_roles g on g.oid = a.grantee
 where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
   and a.grantee <> c.relowner
 """
@@ -88,13 +89,13 @@ where c.relkind in ('r', 'p', 'v', 'm', 'f') and a.attnum > 0 and not a.attisdro
 """
 
 COLUMN_PRIVILEGES = f"""
-select g.rolname, n.nspname || '.' || c.relname || '.' || a.attname,
+select coalesce(g.rolname, 'public'), n.nspname || '.' || c.relname || '.' || a.attname,
        lower(x.privilege_type)
 from pg_attribute a
 join pg_class c on c.oid = a.attrelid
 join pg_namespace n on n.oid = c.relnamespace,
      aclexplode(a.attacl) x
-join pg_roles g on g.oid = x.grantee
+left join pg_roles g on g.oid = x.grantee
 where a.attnum > 0 and not a.attisdropped and {_USER_SCHEMA}
   and x.grantee <> c.relowner
 """
@@ -197,14 +198,20 @@ def read(db: Connection, columns: bool = True) -> State:
     for name, kind in db.rows(RELATIONS):
         state.objects.setdefault(kind, set()).add(name)
 
-    for grantee, name, privilege in db.rows(DATABASE_PRIVILEGES):
-        state.privileges.add(Privilege(grantee, "databases", name, privilege))
-    for grantee, name, privilege in db.rows(SCHEMA_PRIVILEGES):
-        state.privileges.add(Privilege(grantee, "schemas", name, privilege))
+    def held(p: Privilege, grantable: bool) -> None:
+        """Record a privilege, and its grant option when it has one."""
+        state.privileges.add(p)
+        if grantable:
+            state.grant_options.add(p)
+
+    for grantee, name, privilege, grantable in db.rows(DATABASE_PRIVILEGES):
+        held(Privilege(grantee, "databases", name, privilege), grantable)
+    for grantee, name, privilege, grantable in db.rows(SCHEMA_PRIVILEGES):
+        held(Privilege(grantee, "schemas", name, privilege), grantable)
     for name, privilege in db.rows(PUBLIC_SCHEMA_PRIVILEGES):
         state.public_privileges.add(Privilege("public", "schemas", name, privilege))
-    for grantee, kind, name, privilege in db.rows(RELATION_PRIVILEGES):
-        state.privileges.add(Privilege(grantee, kind, name, privilege))
+    for grantee, kind, name, privilege, grantable in db.rows(RELATION_PRIVILEGES):
+        held(Privilege(grantee, kind, name, privilege), grantable)
     if columns:
         state.objects["columns"] = {name for (name,) in db.rows(COLUMNS)}
     for grantee, name, privilege in db.rows(COLUMN_PRIVILEGES):

@@ -26,7 +26,11 @@ from pgsesame.ops import (
     Grant,
     GrantDefault,
     Operation,
+    AlterPassword,
+    LinkIam,
     RemoveMember,
+    RevokeGrantOption,
+    UnlinkIam,
     Revoke,
     RevokeDefault,
 )
@@ -54,16 +58,26 @@ class Plan:
     operations: list[Operation] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     partial: bool = False  # read by a user the catalog shows only part of
+    # objects the spec names that the database doesn't have: their grants are
+    # skipped, so a dropped table (a dbt model removed) doesn't block every apply
+    warnings: list[str] = field(default_factory=list)
 
-    def allowed(self, allow_revoke: bool, allow_drop: bool) -> list[Operation]:
+    def allowed(
+        self, allow_revoke: bool, allow_drop: bool, allow_owner: bool = False
+    ) -> list[Operation]:
         """Return the operations apply may run with these flags."""
-        gates = {"revoke": allow_revoke, "drop": allow_drop}
+        gates = {"revoke": allow_revoke, "drop": allow_drop, "owner": allow_owner}
         return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 
-def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]]:
-    """Return the memberships and privileges the spec asks for, patterns expanded."""
-    problems: list[str] = []
+def desired(
+    spec: Spec, current: State
+) -> tuple[set[Membership], set[Privilege], list[str]]:
+    """Return the memberships and privileges the spec asks for, patterns expanded.
+
+    And what it names that doesn't exist, whose grants are left out of the plan.
+    """
+    missing: list[str] = []
     memberships = {
         Membership(name, parent)
         for name, p in spec.principals.items()
@@ -79,19 +93,18 @@ def desired(spec: Spec, current: State) -> tuple[set[Membership], set[Privilege]
                 for pattern in patterns:
                     matched = _expand(pattern, existing)
                     if not matched and not pattern.endswith(".*"):
-                        problems.append(
+                        missing.append(
                             f"principals.{name}.privileges.{kind}.{privilege}: "
-                            f"{pattern} does not exist"
+                            f"{pattern} does not exist; skipped"
                         )
                     # one spelling for TEMP and TEMPORARY, as the readers report it
                     spelt = "temporary" if privilege == "temp" else privilege
                     privileges |= {Privilege(name, kind, obj, spelt) for obj in matched}
-    if problems:
-        raise PlanError(problems)
-    return memberships, privileges
+    return memberships, privileges, missing
 
 
 def _expand(pattern: str, existing: set[str]) -> set[str]:
+    """Return the objects a pattern names: ``schema.*`` or one name, if it exists."""
     if pattern.endswith(".*"):
         schema = pattern[:-2]
         return {obj for obj in existing if obj.split(".", 1)[0] == schema}
@@ -117,7 +130,8 @@ def make(
     plan = Plan(partial=not current.sees_everything)
     redshift = spec.engine == "redshift"
     managed = set(spec.principals)
-    want_members, want_privileges = desired(spec, current)
+    want_members, want_privileges, missing = desired(spec, current)
+    plan.warnings += missing
 
     def identity(name: str) -> Identity:
         """Return the kind of identity a name is: the spec's word, else the database's."""
@@ -141,11 +155,21 @@ def make(
                 f"principals.{name}.member_of: {', '.join(joined)} is a group; "
                 "planned as groups (groups: [...] says so in the spec)"
             )
-    plan.notes += public_create_notes(current, spec.manage.schemas)
+    # where the spec declares PUBLIC's grants, it manages them: no warning there
+    managed_public = (
+        _scope(spec.principals["public"])[0] if "public" in spec.principals else set()
+    )
+    plan.notes += [
+        note
+        for note in public_create_notes(current, spec.manage.schemas)
+        if note.split(":", 1)[0].removeprefix("schema ") not in managed_public
+    ]
     builtins = {name for name, p in spec.principals.items() if p.type == "builtin"}
     for name, p in sorted(spec.principals.items()):
         role = current.roles.get(name)
         if p.type == "builtin":
+            if name == "public":  # PUBLIC isn't a role: nothing to find
+                continue
             if role is None:
                 problems.append(
                     f"principals.{name}: the built-in role doesn't exist on this server"
@@ -186,6 +210,29 @@ def make(
             )
         elif not redshift and role.login != p.can_login:
             plan.operations.append(AlterLogin(name=name, login=p.can_login))
+        if p.password_env and name in (current.passwords_refused or ()):
+            # the password in the environment doesn't sign it in: disabled or
+            # changed by hand since; set it again
+            plan.notes.append(
+                f"{name}: doesn't sign in with {p.password_env} (its password was "
+                "disabled or changed); setting it again"
+            )
+            password = os.environ.get(p.password_env)
+            plan.operations.append(
+                AlterPassword(
+                    name=name,
+                    identity=identity(name),
+                    password=password,
+                    password_env=p.password_env,
+                )
+            )
+    if current.passwords_refused is None and any(
+        p.password_env and name in current.roles for name, p in spec.principals.items()
+    ):
+        plan.notes.append(
+            "passwords aren't checked over the Data API (no connection to sign in "
+            "on): one disabled or changed by hand isn't seen"
+        )
     if problems:
         raise PlanError(problems)
 
@@ -237,11 +284,7 @@ def make(
     # is reported and left in place: never planned, never revoked, never fatal
     known = PRIVILEGES[spec.engine]
     unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
-    for p in sorted(unknown):
-        plan.notes.append(
-            f"{p.grantee} holds {p.privilege.upper()} on {p.object_name}, which "
-            "pgsesame doesn't manage; left as it is"
-        )
+    plan.notes += unmanaged_notes(unknown, "left as they are")
     # a built-in role's privileges are managed only where the spec speaks for it:
     # the schemas (and databases) its privileges name. Elsewhere they are the
     # platform's (Supabase grants anon and authenticated a lot in public), and
@@ -266,8 +309,9 @@ def make(
             for pattern in patterns:
                 matched = _expand(pattern, existing)
                 if not matched and not pattern.endswith(".*"):
-                    problems.append(
-                        f"principals.{name}.owns.{kind}: {pattern} does not exist"
+                    plan.warnings.append(
+                        f"principals.{name}.owns.{kind}: {pattern} does not exist; "
+                        "skipped"
                     )
                 for obj in sorted(matched):
                     owner_of[(kind, obj)] = name
@@ -282,6 +326,7 @@ def make(
                         )
 
     def implied(p: Privilege) -> bool:
+        """Return whether the grantee holds this by owning the object."""
         if p.object_type == "columns":
             table = p.object_name.rsplit(".", 1)[0]
             return p.grantee in (
@@ -289,6 +334,32 @@ def make(
                 owner_of.get(("views", table)),
             )
         return owner_of.get((p.object_type, p.object_name)) == p.grantee
+
+    # what the spec's own default privileges give an object its owner made later
+    # (owner, schema, grantee, privilege): granted by the database, so not drift
+    defaulted: set[tuple[str, str, str, str, str]] = set()
+    for rule in spec.default_privileges:
+        for kind, names in rule.grants().items():
+            for privilege in names:
+                defaulted.add(
+                    (kind, rule.owner, rule.in_schema or "", rule.grantee, privilege)
+                )
+
+    def explained(p: Privilege) -> bool:
+        """Return whether one of the spec's default privileges gave this grant."""
+        # ON TABLES covers views too
+        kind = "tables" if p.object_type == "views" else p.object_type
+        if kind not in ("tables", "sequences", "schemas"):
+            return False
+        schema = p.object_name.split(".", 1)[0]
+        owner = owner_of.get((p.object_type, p.object_name))
+        if owner is None:
+            return False
+        anywhere = (kind, owner, "", p.grantee, p.privilege) in defaulted
+        here = kind != "schemas" and (
+            (kind, owner, schema, p.grantee, p.privilege) in defaulted
+        )
+        return anywhere or here
 
     want_privileges = {p for p in want_privileges if not implied(p)}
     have_privileges = {p for p in have_privileges if not implied(p)}
@@ -302,7 +373,9 @@ def make(
                 grantee_identity=identity(p.grantee),
             )
         )
-    for p in sorted(have_privileges - want_privileges):
+    # explained grants only escape a revoke: one the spec also names is still
+    # compared, or it would look missing and be granted again
+    for p in sorted(p for p in have_privileges - want_privileges if not explained(p)):
         plan.operations.append(
             Revoke(
                 grantee=p.grantee,
@@ -312,7 +385,21 @@ def make(
                 grantee_identity=identity(p.grantee),
             )
         )
+    # a spec never gives the right to grant on: where a privilege it keeps is held
+    # WITH GRANT OPTION, the option is drift (a privilege revoked takes it along)
+    for p in sorted(current.grant_options & have_privileges & want_privileges):
+        plan.operations.append(
+            RevokeGrantOption(
+                grantee=p.grantee,
+                object_type=p.object_type,
+                object_name=p.object_name,
+                privilege=p.privilege,
+                grantee_identity=identity(p.grantee),
+            )
+        )
 
+    if spec.engine == "dsql":
+        plan.operations += _plan_iam(spec, current, managed - builtins)
     plan.operations += _plan_defaults(
         spec, current, identity, problems, managed - builtins, plan.notes
     )
@@ -358,6 +445,7 @@ def _scope(principal) -> tuple[set[str], set[str]]:
 
 
 def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
+    """Return whether a grant is on an object the spec's scope covers."""
     schemas, databases = scope
     if p.object_type == "databases":
         return p.object_name in databases
@@ -435,6 +523,7 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
     created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
 
     def reachable(role: str) -> bool:
+        """Return whether the plan may alter this role: it creates or administers it."""
         return role in created or role in administers
 
     kept: list[Operation] = []
@@ -505,6 +594,7 @@ def _plan_defaults(
     have = {d for d in have if d.privilege in known.get(d.object_type, ())}
 
     def op(cls, d: DefaultGrant) -> Operation:
+        """Return the operation (``cls``) for a default privilege."""
         return cls(
             owner=d.owner,
             in_schema=d.schema,
@@ -523,14 +613,15 @@ def _plan_defaults(
 def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:
     """Return a warning per schema in scope where PUBLIC (every user) may CREATE.
 
-    pgsesame doesn't manage PUBLIC's grants yet, so this is said, not revoked:
-    any user can create objects there (and on PostgreSQL before 15, functions
-    that shadow ones other users call).
+    Unless the spec declares PUBLIC's grants for the schema, this is said, not
+    revoked: any user can create objects there (and on PostgreSQL before 15,
+    functions that shadow ones other users call).
     """
     return [
         f"schema {p.object_name}: PUBLIC (every user) can CREATE in it, which "
-        "pgsesame doesn't manage yet; REVOKE CREATE ON SCHEMA "
-        f"{p.object_name} FROM PUBLIC closes it"
+        "the spec doesn't manage; REVOKE CREATE ON SCHEMA "
+        f"{p.object_name} FROM PUBLIC closes it (or declare public: "
+        "{type: builtin} with its grants)"
         for p in sorted(state.public_privileges)
         if p.object_type == "schemas"
         and p.privilege == "create"
@@ -538,11 +629,44 @@ def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:
     ]
 
 
+def _plan_iam(spec: Spec, current: State, managed: set[str]) -> list[Operation]:
+    """Return the AWS IAM GRANT and REVOKE that link the spec's IAM identities."""
+    want = {(name, arn) for name, p in spec.principals.items() for arn in p.iam}
+    have = {(role, arn) for role, arn in current.iam_links if role in managed}
+    return [LinkIam(role=r, arn=a) for r, a in sorted(want - have)] + [
+        UnlinkIam(role=r, arn=a) for r, a in sorted(have - want)
+    ]
+
+
+def unmanaged_notes(privileges: set[Privilege], outcome: str) -> list[str]:
+    """Return one note per privilege and object type pgsesame doesn't manage.
+
+    A warehouse can hold thousands (GRANT ALL on views gives Redshift's INSERT,
+    DELETE ... on each): a count and a few examples, not a line each.
+    """
+    by_kind: dict[tuple[str, str], list[Privilege]] = {}
+    for p in sorted(privileges):
+        by_kind.setdefault((p.privilege, p.object_type), []).append(p)
+    notes = []
+    for (privilege, kind), held in sorted(by_kind.items()):
+        examples = ", ".join(f"{p.grantee} on {p.object_name}" for p in held[:3])
+        more = f", and {len(held) - 3} more" if len(held) > 3 else ""
+        if len(held) == 1:
+            count, said = "1 grant", outcome.replace("they are", "it is")
+        else:
+            count, said = f"{len(held)} grants", outcome
+        notes.append(
+            f"{privilege.upper()} on {kind} isn't a privilege pgsesame manages: "
+            f"{count} {said} ({examples}{more})"
+        )
+    return notes
+
+
 def _system_role(name: str) -> bool:
     """Return whether a role is the platform's own (never adopted by prefix)."""
     return name.startswith(
         ("pg_", "rds", "sys:", "cloudsql", "alloydb", "supabase")
-    ) or name in ("postgres", "PUBLIC")
+    ) or name in ("postgres", "PUBLIC", "dbowner")  # dbowner: Aurora DSQL's
 
 
 def _in_managed_schemas(p: Privilege, spec: Spec) -> bool:

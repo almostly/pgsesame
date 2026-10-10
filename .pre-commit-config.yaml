@@ -18,11 +18,19 @@ repos:
   - repo: https://github.com/PyCQA/pydocstyle
     rev: 6.3.0
     hooks:
-      - id: pydocstyle
+      - id: pydocstyle        # the docstrings' style; a missing one on public names
         files: ^src/pgsesame/.*\.py$
 
   - repo: local
     hooks:
+      - id: docstrings
+        name: docstrings (private and nested too)
+        # pydocstyle asks for a docstring only on public names; this asks everywhere
+        entry: uv run --frozen pytest -q tests/test_docstrings.py
+        language: system
+        files: ^src/pgsesame/.*\.py$
+        pass_filenames: false
+
       - id: ty
         name: ty check
         # through uv, so ty resolves imports against the project's environment

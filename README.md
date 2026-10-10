@@ -28,7 +28,8 @@ revokes and drops but applies them only when you ask.
 
 ## Where it runs
 
-PostgreSQL 14 to 18 and Amazon Redshift (provisioned or Serverless). PostgreSQL
+PostgreSQL 14 to 18, Amazon Redshift (provisioned or Serverless) and Amazon
+Aurora DSQL. PostgreSQL
 services work through the same connection, as the platform's admin role: Supabase
 (tested, with its built-in roles and row-level security), Google's AlloyDB, Amazon
 RDS and Aurora, Cloud SQL, Neon.
@@ -50,12 +51,40 @@ Data API runs apply in one transaction. The admin user isn't a superuser: from
 PostgreSQL 16 on it changes only the roles it has ADMIN OPTION on, so a login or
 membership change it can't make is noted in the plan, not attempted.
 
+Amazon Aurora DSQL is `engine: dsql`: PostgreSQL 16's roles, memberships, grants
+and default privileges, plus the IAM identities that sign in as a role:
+
+```yaml
+version: 1
+engine: dsql
+principals:
+  app:
+    type: user                       # a role that logs in
+    iam: [arn:aws:iam::123456789012:role/app-task]   # AWS IAM GRANT app TO '...'
+    privileges:
+      schemas: {usage: [orders]}
+      tables: {select: [orders.*]}
+```
+
+```bash
+sesame plan permissions.yaml --dsql abc123xyz          # as admin, with an IAM token
+sesame login dsql --dsql abc123xyz                     # or save it as a target
+```
+
+DSQL signs in with IAM only, so a spec gives it no passwords, and it has no
+database privileges, row-level security or ownership changes: a spec naming them
+is refused with the reason. It also allows one DDL statement per transaction,
+and a GRANT is one, so apply runs each statement in its own transaction; if one
+fails, apply says how many before it were applied, and the next plan shows what
+remains.
+
 ## Install
 
 ```bash
 uv tool install pgsesame               # installs the `sesame` command
 uv tool install "pgsesame[redshift]"   # Redshift through IAM or the Data API
 uv tool install "pgsesame[rds]"        # RDS and Aurora through IAM or the Data API (or [aurora])
+uv tool install "pgsesame[dsql]"       # Aurora DSQL
 uvx pgsesame --help                    # or try it without installing
 pip install pgsesame                   # or into an environment
 ```
@@ -110,6 +139,7 @@ the Data API keeps no secret at all:
 sesame login prod --host db.example.com --user admin --database app   # asks for the password
 sesame login analytics --engine redshift --iam --workgroup analytics --database dev
 sesame login aurora --iam --rds my-cluster            # RDS or Aurora: an IAM token
+sesame login dsql --dsql abc123xyz                    # Aurora DSQL: an IAM token
 sesame targets                     # the saved targets; * marks the default
 sesame use prod                    # the default for plan and apply
 sesame plan permissions.yaml --target analytics
@@ -149,7 +179,7 @@ The same file then serves CI, with `STAGING_DB_PASSWORD` as a repository secret.
 ```bash
 sesame validate permissions.yaml
 sesame plan permissions.yaml       # exit code 2 when there are changes
-sesame apply permissions.yaml      # revokes and drops need --allow-revoke / --allow-drop
+sesame apply permissions.yaml      # revokes, drops and owner changes need --allow-revoke / --allow-drop / --allow-owner
 
 sesame plan permissions.yaml -o changes.json   # save the plan as a change set
 sesame show changes.json                       # review it, no database needed
@@ -161,8 +191,20 @@ use IAM, or set `password: disabled`.
 
 A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
 builtin`: granted to and joined, never created or altered, and their privileges are
-managed only in the schemas the spec names for them. Row-level security is
-declared per table:
+managed only in the schemas the spec names for them. PUBLIC, every user, is one too,
+named `public`: its grants are planned `TO PUBLIC` and revoked as drift only in
+the schemas its privileges name, so its defaults elsewhere (CONNECT on the
+database, USAGE on `public`) are left alone:
+
+```yaml
+principals:
+  public:
+    type: builtin
+    privileges:
+      tables: {select: [reference.countries]}
+```
+
+Row-level security is declared per table:
 
 ```yaml
 principals:
@@ -222,7 +264,10 @@ and dropped in the same plan (never attached), which needs
 Ownership is declared on the owner, and planned as `ALTER ... OWNER TO` for the
 objects it lists (`schema.*` for every table in a schema). Objects the spec
 doesn't list keep their owner; an owner's privileges on its own objects are
-implied, so they're neither granted nor revoked. On Redshift the owner is a user:
+implied, so they're neither granted nor revoked. A change of owner takes from the
+old owner everything owning gave it, so apply runs it only with `--allow-owner`;
+without it, the plan shows it and apply skips it. pgsesame never drops a schema,
+table, view, user, group or role. On Redshift the owner is a user:
 
 ```yaml
 principals:
@@ -245,15 +290,47 @@ default_privileges:
     tables: [select]
 ```
 
+### Tables that are rebuilt
+
+A grant belongs to one table, so a tool that rebuilds tables (dbt's table
+materialization, Glue, a stored procedure) drops its grants with the old one.
+`sesame grants` lists what the spec grants, from the spec alone, for such a tool
+to put back right after a rebuild, without parsing the YAML itself:
+
+```bash
+sesame grants permissions.yaml --object bianalytics.loans          # JSON
+sesame grants permissions.yaml --format csv > declared_grants.csv  # every grant
+```
+
+Each row is `object_type`, `schema`, `object` (`*` for `schema.*`, as the spec
+writes it), `column`, `privilege`, `grantee` and `grantee_type` (on Redshift user,
+group or role, which decides the `GRANT` syntax). `--object schema.table` keeps
+the rows that reach that table: its own and its schema's `*`.
+
+[examples/dbt](examples/dbt) is the pattern for dbt: after each apply,
+`publish_grants.py` loads `sesame grants --format csv` into
+`monitoring.declared_grants`, and one shared post-hook, `pgsesame_regrant()`,
+grants a model's rows right after it builds, in the same transaction, skipping
+grantees that don't exist. dbt's own `grants:` config would revoke everything
+else on each build; this only adds back what the spec declares.
+`tests/test_dbt.py` runs it with dbt against redshift-local.
+
 ### Adopting an existing database
 
 `sesame import` writes the spec that reproduces what the database grants today,
 so a first plan has nothing to do, and the spec is edited from there. On Redshift
-it needs a superuser: Redshift shows anyone else only their own grants, and a
-spec missing the rest would have a superuser's plan revoke them, so import
-refuses rather than write it (an IAM user becomes a superuser with
-`ALTER USER "IAM:..." PASSWORD '...' CREATEUSER`, and IAM sign-in keeps working).
-Plan and apply as a non-superuser say so before anything else:
+it needs to see every grant: Redshift shows a user only its own, unless it is a
+superuser or holds the `ACCESS SYSTEM TABLE` system permission, and a spec missing
+the rest would have a plan revoke them, so import refuses rather than write it.
+The permission is the least-privileged way, through a role:
+
+```sql
+CREATE ROLE sesame_reader;
+GRANT ACCESS SYSTEM TABLE TO ROLE sesame_reader;
+GRANT ROLE sesame_reader TO "IAM:deployer";
+```
+
+Plan and apply without it say so before anything else:
 
 ```bash
 sesame import --target dwh --schema collections --schema risk_engine -o permissions.yaml
@@ -325,7 +402,8 @@ jobs:
 
 On a pull request the plan is posted as one comment, updated on each push. On
 merge, `apply` runs exactly the change set the plan job saved, or refuses if the
-database changed since. Revokes need `allow-revoke: true`. The step's outputs
+database changed since. Revokes need `allow-revoke: true`, owner changes
+`allow-owner: true`. The step's outputs
 (`has-changes`, `to-add`, `to-change`, `to-remove`) can drive other steps. For
 Redshift with IAM, sign in with `aws-actions/configure-aws-credentials` and pass
 `args: --iam --workgroup analytics`.

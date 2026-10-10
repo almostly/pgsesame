@@ -2,7 +2,8 @@
 
 Each operation knows its kind (``create``, ``change`` or ``remove``, which the plan
 colours green, yellow and red), whether it takes something away (revokes and
-membership removals need ``--allow-revoke``, drops ``--allow-drop``), and how to
+membership removals need ``--allow-revoke``, drops ``--allow-drop``, owner changes
+``--allow-owner``), and how to
 render itself with ``psycopg.sql``, so names are always quoted and never pasted
 into SQL text.
 """
@@ -21,7 +22,9 @@ if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
     from typing_extensions import LiteralString
 
 Kind = Literal["create", "change", "remove"]
-Gate = Literal["revoke", "drop"]
+# what apply needs a flag for: taking access away (revoke), dropping (drop), and
+# changing an owner (owner: the old owner loses what owning gave it)
+Gate = Literal["revoke", "drop", "owner"]
 
 # GRANT's keyword for each object type, and each privilege's keyword, written out
 # as constants: psycopg.sql only takes literal strings as SQL
@@ -57,6 +60,7 @@ assert set(_PRIVILEGE) >= set().union(
 
 
 def _object(object_type: str, name: str) -> sql.Composed:
+    """Return what a GRANT is ON: ``TABLE s.t``, ``SCHEMA s``; a column's table."""
     if object_type == "columns":  # the table a column grant is ON
         name = name.rsplit(".", 1)[0]
     parts = (
@@ -78,6 +82,7 @@ def _privilege_on(privilege: str, object_type: str, name: str) -> sql.Composed:
 
 
 def _privilege(privilege: str) -> sql.SQL:
+    """Return a privilege's SQL keyword."""
     return _PRIVILEGE[privilege]
 
 
@@ -106,6 +111,8 @@ class Operation(BaseModel):
 
 def _grantee(name: str, identity: Identity) -> sql.Composed:
     """Return a grantee as GRANT and REVOKE name it: Redshift says GROUP and ROLE."""
+    if name == "public":  # PUBLIC, every user: a keyword (no role can be named so)
+        return sql.SQL("{}").format(sql.SQL("PUBLIC"))
     if identity == "group":
         return sql.SQL("GROUP {}").format(sql.Identifier(name))
     if identity == "role":
@@ -129,6 +136,7 @@ class CreateRole(Operation):
     password_disabled: bool = False
 
     def _sql(self, password: sql.Composable | None) -> sql.Composed:
+        """Return the CREATE statement for this principal, with ``password``."""
         name = sql.Identifier(self.name)
         if self.identity == "group":
             return sql.SQL("CREATE GROUP {}").format(name)
@@ -156,6 +164,39 @@ class CreateRole(Operation):
         """Return the CREATE statement with the password masked."""
         if self.password is None or self.password_disabled:
             return self._sql(None)
+        return self._sql(sql.SQL("'********'"))
+
+
+class AlterPassword(Operation):
+    """Set a user's password again, from the environment variable the spec names."""
+
+    kind: ClassVar[Kind] = "change"
+    # it overrides a password someone set or disabled by hand: --allow-revoke
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 20
+    op: Literal["alter_password"] = "alter_password"
+    name: str
+    identity: Identity = "pg"
+    password: SecretStr | None = Field(None, exclude=True)  # never saved
+    password_env: str
+
+    def _sql(self, password: sql.Composable) -> sql.Composed:
+        """Return ALTER USER (Redshift) or ALTER ROLE ... PASSWORD ``password``."""
+        verb = "ALTER USER" if self.identity == "user" else "ALTER ROLE"
+        return sql.SQL("{} {} PASSWORD {}").format(
+            sql.SQL(verb), sql.Identifier(self.name), password
+        )
+
+    def statement(self) -> sql.Composed:
+        """Return the statement with the password, read when the plan was made."""
+        if self.password is None:
+            raise ValueError(
+                f"{self.password_env} is not set: no password for {self.name}"
+            )
+        return self._sql(sql.Literal(self.password.get_secret_value()))
+
+    def display(self) -> sql.Composed:
+        """Return the statement with the password masked."""
         return self._sql(sql.SQL("'********'"))
 
 
@@ -188,6 +229,8 @@ class AlterOwner(Operation):
     """Give an object to the principal the spec says owns it."""
 
     kind: ClassVar[Kind] = "change"
+    # the old owner loses every right owning gave it: run only with --allow-owner
+    gate: ClassVar[Gate | None] = "owner"
     order: ClassVar[int] = 15  # after the owners exist, before grants
     op: Literal["alter_owner"] = "alter_owner"
     object_type: str
@@ -294,6 +337,59 @@ class Revoke(Operation):
         )
 
 
+class RevokeGrantOption(Operation):
+    """Take back the right to grant a privilege on, keeping the privilege itself."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 50
+    op: Literal["revoke_grant_option"] = "revoke_grant_option"
+    grantee: str
+    object_type: str
+    object_name: str
+    privilege: str
+    grantee_identity: Identity = "pg"
+
+    def statement(self) -> sql.Composed:
+        """Return REVOKE GRANT OPTION FOR privilege ON object FROM grantee."""
+        return sql.SQL("REVOKE GRANT OPTION FOR {} FROM {}").format(
+            _privilege_on(self.privilege, self.object_type, self.object_name),
+            _grantee(self.grantee, self.grantee_identity),
+        )
+
+
+class LinkIam(Operation):
+    """Aurora DSQL: let an IAM identity sign in as a role (AWS IAM GRANT)."""
+
+    order: ClassVar[int] = 25  # after the role is created and can log in
+    op: Literal["link_iam"] = "link_iam"
+    role: str
+    arn: str
+
+    def statement(self) -> sql.Composed:
+        """Return AWS IAM GRANT role TO 'arn'."""
+        return sql.SQL("AWS IAM GRANT {} TO {}").format(
+            sql.Identifier(self.role), sql.Literal(self.arn)
+        )
+
+
+class UnlinkIam(Operation):
+    """Aurora DSQL: stop an IAM identity signing in as a role (AWS IAM REVOKE)."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 60
+    op: Literal["unlink_iam"] = "unlink_iam"
+    role: str
+    arn: str
+
+    def statement(self) -> sql.Composed:
+        """Return AWS IAM REVOKE role FROM 'arn'."""
+        return sql.SQL("AWS IAM REVOKE {} FROM {}").format(
+            sql.Identifier(self.role), sql.Literal(self.arn)
+        )
+
+
 class RemoveMember(Operation):
     """Take ``member`` out of ``role`` (a group or role on Redshift)."""
 
@@ -314,17 +410,20 @@ class RemoveMember(Operation):
 
 
 def _table(name: str) -> sql.Composed:
+    """Return ``schema.table`` as a quoted identifier."""
     schema, table = name.split(".", 1)
     return sql.SQL("{}").format(sql.Identifier(schema, table))
 
 
 def _roles(roles: tuple[str, ...]) -> sql.Composed:
+    """Return a policy's roles for TO: quoted names, PUBLIC as a keyword."""
     return sql.SQL(", ").join(
         sql.SQL("PUBLIC") if r == "public" else sql.Identifier(r) for r in roles
     )
 
 
 def _expression(text: str) -> sql.SQL:
+    """Return a policy expression from the spec as SQL."""
     # a policy's USING / WITH CHECK is SQL by design: it comes from the reviewed
     # spec, and goes into the statement as written
     return sql.SQL(cast("LiteralString", text))
@@ -340,6 +439,7 @@ _COMMAND = {
 
 
 def _clauses(using: str | None, with_check: str | None) -> list[sql.Composable]:
+    """Return a policy's USING and WITH CHECK clauses, the ones it has."""
     parts: list[sql.Composable] = []
     if using:
         parts.append(sql.SQL("USING ({})").format(_expression(using)))
@@ -472,6 +572,8 @@ _DEFAULT_ON = {
 
 
 class _Default(Operation):
+    """An ALTER DEFAULT PRIVILEGES entry: what ``grantee`` gets on ``owner``'s new objects."""
+
     owner: str
     in_schema: str  # "" for every schema
     object_type: str
@@ -481,6 +583,7 @@ class _Default(Operation):
     owner_identity: Identity = "pg"
 
     def _alter(self, verb: str) -> sql.Composed:
+        """Return the ALTER DEFAULT PRIVILEGES statement that grants or revokes it."""
         # Redshift names an owner FOR USER; PostgreSQL FOR ROLE (any role)
         target = sql.SQL("FOR {} {}").format(
             sql.SQL("ROLE" if self.owner_identity == "pg" else "USER"),
@@ -533,26 +636,33 @@ class RevokeDefault(_Default):
 # Redshift dynamic data masking
 # ---------------------------------------------------------------------------
 def _type(text: str) -> sql.SQL:
+    """Return a policy input's type as SQL."""
     # a policy input's type, from the spec (checked to be words and an optional
     # (n) or (p, s)) or from Redshift's catalog
     return sql.SQL(cast("LiteralString", text))
 
 
 def _mask_grantee(grantee: str, grantee_type: str) -> sql.Composable:
+    """Return a masking grantee: PUBLIC, ROLE name, or a user's name."""
     if grantee_type == "public":
-        return sql.SQL("PUBLIC")
+        return sql.SQL("{}").format(sql.SQL("PUBLIC"))
     if grantee_type == "role":
         return sql.SQL("ROLE {}").format(sql.Identifier(grantee))
     return sql.Identifier(grantee)
 
 
 def _columns(names: tuple[str, ...]) -> sql.Composed:
+    """Return column names as a quoted, comma-separated list."""
     return sql.SQL(", ").join(sql.Identifier(n) for n in names)
 
 
 class _Replaceable(Operation):
-    # part of replacing a policy ALTER can't change (detach everywhere, drop,
-    # create, attach again): all of it needs --allow-drop, or none of it runs
+    """A masking operation that may be part of replacing a policy.
+
+    A policy ALTER can't change is replaced: detach it everywhere, drop it, create
+    it, attach it again. All of that needs --allow-drop, or none of it runs.
+    """
+
     replacing: bool = False
 
     @property
@@ -611,6 +721,8 @@ class DropMaskingPolicy(Operation):
 
 
 class _Attachment(_Replaceable):
+    """A masking policy attached to columns of a table, for one grantee."""
+
     policy: str
     table: str
     columns: tuple[str, ...]
@@ -646,6 +758,7 @@ class AttachMaskingPolicy(_Attachment):
 
 
 def _detach(op: _Attachment) -> sql.Composed:
+    """Return the DETACH MASKING POLICY statement for an attachment."""
     return sql.SQL("DETACH MASKING POLICY {} ON {} ({}) FROM {}").format(
         sql.Identifier(op.policy),
         _table(op.table),
@@ -688,9 +801,13 @@ AnyOperation = Annotated[
     CreateRole
     | AlterOwner
     | AlterLogin
+    | AlterPassword
     | AddMember
     | Grant
     | Revoke
+    | RevokeGrantOption
+    | LinkIam
+    | UnlinkIam
     | RemoveMember
     | CreatePolicy
     | AlterPolicy

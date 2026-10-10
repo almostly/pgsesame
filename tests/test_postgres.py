@@ -122,6 +122,75 @@ def test_plan_apply_then_nothing_to_do(dsn, tmp_path):
         assert conn.execute("SELECT count(*) FROM analytics.daily").fetchone() == (0,)
 
 
+def test_a_grant_option_the_spec_doesnt_give_is_drift(dsn, tmp_path):
+    spec = _spec(tmp_path)
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # the right to grant it on
+        conn.execute(
+            f'GRANT SELECT ON analytics.events TO "{P}reader" WITH GRANT OPTION'
+        )
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert (
+        f'- REVOKE GRANT OPTION FOR SELECT ON TABLE "analytics"."events" '
+        f'FROM "{P}reader"  needs --allow-revoke'
+    ) in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:  # SELECT itself stays
+        assert conn.execute(
+            "SELECT has_table_privilege(%s, 'analytics.events', 'SELECT'), "
+            "has_table_privilege(%s, 'analytics.events', 'SELECT WITH GRANT OPTION')",
+            (f"{P}reader", f"{P}reader"),
+        ).fetchone() == (True, False)
+
+
+def test_a_disabled_password_is_seen_and_set_again(dsn, tmp_path):
+    spec, env = _spec(tmp_path), {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-1"}
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f'ALTER ROLE "{P}alice" PASSWORD NULL')
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 2, out
+    assert f"~ ALTER ROLE \"{P}alice\" PASSWORD '********'" in out, out
+    assert "needs --allow-revoke" in out  # it overrides what was done by hand
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    psycopg.connect(make_conninfo(dsn, user=f"{P}alice", password="alice-pw-1")).close()
+
+
+def test_grants_to_public(dsn, tmp_path):
+    public = f"""
+version: 1
+engine: postgres
+principals:
+  public:
+    type: builtin
+    privileges:
+      schemas: {{usage: [analytics]}}
+      tables: {{select: [analytics.daily]}}
+  {P}nobody:
+    type: user
+    password_env: NOBODY_PW
+"""
+    env = {"NOBODY_PW": "nobody-pw-1"}
+    spec = _spec(tmp_path, public)
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'GRANT SELECT ON TABLE "analytics"."daily" TO PUBLIC' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+    nobody = make_conninfo(dsn, user=f"{P}nobody", password="nobody-pw-1")
+    with psycopg.connect(nobody) as conn:  # holds nothing itself: PUBLIC's
+        conn.execute("SELECT count(*) FROM analytics.daily")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("GRANT INSERT ON analytics.daily TO PUBLIC")
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert 'REVOKE INSERT ON TABLE "analytics"."daily" FROM PUBLIC' in out, out
+    assert "CONNECT" not in out  # PUBLIC's database default: not in its scope
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke", env=env)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn, env=env)[0] == 0
+
+
 def test_drift_is_revoked_only_when_allowed(dsn, tmp_path):
     spec = _spec(tmp_path)
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
@@ -168,13 +237,19 @@ def test_roles_outside_the_spec_are_left_alone(dsn, tmp_path):
         ).fetchone() == (True,)
 
 
-def test_a_missing_object_stops_the_plan(dsn, tmp_path):
+def test_a_missing_object_is_warned_about_and_skipped(dsn, tmp_path):
+    # a table the spec names may be dropped (a dbt model removed): the rest of the
+    # plan still applies, and the warning says which grant was skipped
     spec = _spec(
         tmp_path, SPEC.replace("insert: [analytics.events]", "insert: [analytics.nope]")
     )
-    code, out = _sesame("plan", spec, "--dsn", dsn)
-    assert code == 1
-    assert "analytics.nope does not exist" in out
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-1"}
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 2, out
+    assert "! principals." in out and "analytics.nope does not exist; skipped" in out
+    assert _sesame("apply", spec, "--dsn", dsn, env=env)[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", dsn, env=env)
+    assert code == 0 and "analytics.nope does not exist; skipped" in out, out
 
 
 def test_a_change_set_applies_exactly_what_was_planned(dsn, tmp_path):
@@ -498,6 +573,10 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
             "SELECT has_table_privilege(%s, 'analytics.made_later', 'SELECT')",
             (f"{P}reader",),
         ).fetchone() == (True,)
+        # the grant the default privilege gave the new table isn't drift (the
+        # CREATE given by hand just above is)
+        code, out = _sesame("plan", spec, "--dsn", dsn)
+        assert "made_later" not in out, out
         conn.execute("DROP TABLE analytics.made_later")
         conn.execute(f"REVOKE CREATE ON SCHEMA analytics FROM {P}etl")
         # a default privilege made by hand for a managed grantee is drift
@@ -588,10 +667,31 @@ def test_ownership(dsn, tmp_path):
     assert f'~ ALTER SCHEMA "analytics" OWNER TO "{P}etl"' in out
     assert f'~ ALTER TABLE "analytics"."events" OWNER TO "{P}etl"' in out
     assert "GRANT SELECT" not in out
-    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert "needs --allow-owner" in out
+    code, out = _sesame("apply", spec, "--dsn", dsn)  # no flag: shown, skipped
+    assert code == 0 and "skipped: needs --allow-owner" in out, out
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 2
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-owner")[0] == 0
     with psycopg.connect(dsn) as conn:
         owners = conn.execute(
             "SELECT tableowner FROM pg_tables WHERE schemaname = 'analytics'"
         ).fetchall()
     assert {o for (o,) in owners} == {f"{P}etl"}
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
+def test_a_redshift_spec_against_postgresql_says_what_is_missing(tmp_path):
+    # Redshift's SVV views aren't on PostgreSQL: a clear error, not a traceback
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: redshift\nprincipals: {}\n")
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert code == 1, out
+    assert "can't read the catalog" in out and "svv_" in out
+    assert "Traceback" not in out and "Undefined" not in out
+
+
+def test_import_without_engine_finds_postgresql(tmp_path):
+    out_file = tmp_path / "imported.yaml"
+    code, out = _sesame("import", "--dsn", DSN, "-o", str(out_file))
+    assert code == 0, out
+    assert "engine: postgres" in out_file.read_text()

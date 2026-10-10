@@ -78,6 +78,51 @@ def test_privileges_are_checked_per_engine():
     assert loaded.principals["r"].privileges == {"tables": {"alter": ["s.t"]}}
 
 
+def test_redshift_has_no_connect_privilege():
+    # GRANT CONNECT ON DATABASE is a syntax error on Redshift
+    connect = {"type": "user", "privileges": {"databases": {"connect": ["dev"]}}}
+    problems = _problems(engine="redshift", principals={"u": connect})
+    assert problems == [
+        "principals.u.privileges.databases.connect: not a redshift privilege on "
+        "databases (create, temp, temporary)"
+    ]
+    assert _parse(principals={"u": {**connect, "type": "role"}})  # PostgreSQL has it
+
+
+def test_function_grants_are_refused_on_redshift_not_skipped():
+    execute = {"type": "role", "privileges": {"functions": {"execute": ["s.f"]}}}
+    problems = _problems(engine="redshift", principals={"r": execute})
+    assert len(problems) == 1
+    assert problems[0].startswith("principals.r.privileges.functions: pgsesame doesn't")
+    # default privileges on functions are planned on Redshift, and stay allowed
+    _parse(
+        engine="redshift",
+        principals={"r": {"type": "role"}},
+        default_privileges=[{"owner": "etl", "grantee": "r", "functions": ["execute"]}],
+    )
+
+
+def test_redshift_refuses_names_it_would_fold_to_lower_case():
+    problems = _problems(
+        engine="redshift",
+        principals={
+            "Analyst": {
+                "type": "role",
+                "privileges": {"tables": {"select": ["Sales.t"]}},
+            },
+            "IAMR:Etl-TaskRole-AbC1": {"type": "user"},  # named by Redshift: kept
+        },
+        manage={"schemas": ["Sales"]},
+    )
+    assert [p.split(": ", 2)[:2] for p in problems] == [
+        ["principals.Analyst", "Analyst"],
+        ["principals.Analyst.privileges.tables", "Sales.t"],
+        ["manage.schemas", "Sales"],
+    ]
+    assert "it would be analyst; write it that way" in problems[0]
+    _parse(principals={"Analyst": {"type": "role"}})  # PostgreSQL keeps the case
+
+
 def test_passwords_never_go_in_the_spec():
     problems = _problems(principals={"u": {"type": "user", "password": "hunter2"}})
     assert problems[0].startswith("principals.u.password: input should be 'disabled'")
@@ -290,3 +335,43 @@ def test_default_privileges_take_the_types_each_engine_has():
     assert problems == [
         "default_privileges[0].schemas: default privileges on schemas take no schema"
     ]
+
+
+def test_dsql_refuses_what_aurora_dsql_lacks_once_each():
+    arn = "arn:aws:iam::123456789012:role/app"
+    problems = _problems(
+        engine="dsql",
+        principals={
+            "app": {
+                "type": "role",
+                "iam": [arn],
+                "password_env": "APP_PW",
+                "owns": {"schemas": ["s"]},
+                "privileges": {
+                    "databases": {"create": ["postgres"]},
+                    "tables": {"maintain": ["s.t"]},
+                },
+            }
+        },
+        row_level_security={"s.t": {}},
+    )
+    assert [p.split(":")[0] for p in problems] == [
+        "principals.app",
+        "principals.app.iam",
+        "principals.app.privileges.databases",
+        "principals.app.owns",
+        "principals.app.privileges.tables.maintain",
+        "row_level_security",
+    ]
+
+
+def test_iam_links_are_aurora_dsqls():
+    arn = "arn:aws:iam::123456789012:role/app"
+    loaded = _parse(engine="dsql", principals={"app": {"type": "user", "iam": [arn]}})
+    assert loaded.principals["app"].iam == [arn]
+    problems = _problems(principals={"app": {"type": "user", "iam": [arn]}})
+    assert problems == [
+        "principals.app.iam: IAM links are Aurora DSQL's (engine: dsql)"
+    ]
+    with pytest.raises(spec.SpecError):  # not an ARN
+        _parse(engine="dsql", principals={"app": {"type": "user", "iam": ["app"]}})

@@ -1,0 +1,11 @@
+# A dbt project whose tables keep the grants pgsesame declares, through rebuilds.
+# Every model runs pgsesame_regrant() after it builds: see macros/.
+name: pgsesame_rebuild
+version: "1.0"
+config-version: 2
+profile: pgsesame_rebuild
+
+models:
+  pgsesame_rebuild:
+    +materialized: table
+    +post-hook: "{{ pgsesame_regrant() }}"

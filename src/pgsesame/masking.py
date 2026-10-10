@@ -82,10 +82,12 @@ class MaskingError(Exception):
 # Reading
 # ---------------------------------------------------------------------------
 def _json(value: Any) -> Any:
+    """Return a JSON column decoded: text over the Data API, already parsed otherwise."""
     return json.loads(value) if isinstance(value, str) else value
 
 
 def _policy(name: str, inputs: Any, expression: Any) -> MaskPolicy:
+    """Return a masking policy from svv_masking_policy's JSON columns."""
     columns = _json(inputs) or []
     (expr,) = _json(expression) or [{"expr": "", "type": ""}]
     return MaskPolicy(
@@ -250,18 +252,21 @@ def normalize(db: Connection, spec: Spec, state: State) -> Normalized | None:
 # ---------------------------------------------------------------------------
 # Planning
 # ---------------------------------------------------------------------------
-def role_priorities(mask: str | None, roles: list[str]) -> list[int]:
+def role_priorities(roles: list[str]) -> list[int]:
     """Return the priority of each role's policy, in the order the spec lists them.
 
     Each role outranks the one before it, so a later entry wins for a user in
-    both; but a role whose policy is the previous one's (the mask's, for the
-    first) shares its priority. Redshift lets one policy be attached to several
-    grantees at one priority, and refuses two different policies there, so the
-    shared number says the same thing and matches a database that attached one
-    policy to several roles at one priority (often 0, the default).
+    both; but a role whose policy is the previous role's shares its priority.
+    Redshift lets one policy be attached to several roles at one priority, and
+    refuses two different policies there, so the shared number says the same
+    thing and matches a database that attached one policy to several roles at
+    one priority (often 0, the default). The first role never shares the mask's
+    priority, even with the mask's policy: attaching a policy to a role at the
+    priority PUBLIC holds it at replaces PUBLIC's attachment on Redshift, which
+    would leave everyone else reading the column unmasked.
     """
     out: list[int] = []
-    policy, priority = mask, MASK_PRIORITY
+    policy, priority = None, MASK_PRIORITY  # None: no role's policy matches it
     for role_policy in roles:
         if role_policy != policy:  # another policy outranks the one before
             priority = max(ROLE_PRIORITY, priority + STEP)
@@ -273,6 +278,7 @@ def role_priorities(mask: str | None, roles: list[str]) -> list[int]:
 def _wanted_attachments(
     spec: Spec, state: State, grantee_type, problems: list[str]
 ) -> set[Attachment]:
+    """Return the attachments the spec's masked columns ask for."""
     assert spec.masking is not None
     out: set[Attachment] = set()
     for column, c in sorted(spec.masking.columns.items()):
@@ -288,6 +294,7 @@ def _wanted_attachments(
                 )
 
         def attach(policy: str, grantee: str, gtype: str, priority: int) -> None:
+            """Add one wanted attachment of ``policy`` on this column."""
             reads = spec.masking.policies.get(policy) if spec.masking else None
             several = reads is not None and len(reads.inputs()) > 1
             out.add(
@@ -304,7 +311,7 @@ def _wanted_attachments(
 
         if c.mask:
             attach(c.mask, "public", "public", MASK_PRIORITY)
-        ranks = role_priorities(c.mask, list(c.roles.values()))
+        ranks = role_priorities(list(c.roles.values()))
         for (role, policy), priority in zip(c.roles.items(), ranks):
             attach(policy, role, grantee_type(role), priority)
         for role in c.unmasked:
@@ -336,6 +343,7 @@ def plan(
     managed_columns = {tuple(c.rsplit(".", 1)) for c in spec.masking.columns}
 
     def managed(a: Attachment) -> bool:
+        """Return whether an attachment is on a column the spec masks."""
         return any((a.table, col) in managed_columns for col in a.columns)
 
     have = {a for a in state.attachments if managed(a)}
@@ -372,6 +380,7 @@ def plan(
     # per policy, column and grantee: one DETACH removes every priority, so a
     # change of priorities is a detach and the attaches that follow it
     def key(a: Attachment) -> tuple:
+        """Return what one DETACH names: policy, column and grantee."""
         return (a.policy, a.table, a.columns, a.grantee, a.grantee_type)
 
     detached: set[tuple] = set()
@@ -429,6 +438,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
     """
 
     def ident(a: Attachment) -> tuple:
+        """Return an attachment's identity, without its priority."""
         return (a.policy, a.grantee, a.grantee_type, a.inputs)
 
     if len({ident(a) for a in now}) != len(now) or len(now) != len(then):
@@ -439,6 +449,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
         return False
 
     def sign(x: int) -> int:
+        """Return -1, 0 or 1: how one priority compares with another."""
         return (x > 0) - (x < 0)
 
     keys = list(have)
@@ -448,6 +459,7 @@ def same_order(now: list[Attachment], then: list[Attachment]) -> bool:
 
 
 def _attach(a: Attachment, replacing: bool = False) -> AttachMaskingPolicy:
+    """Return the ATTACH operation for an attachment."""
     return AttachMaskingPolicy(
         policy=a.policy,
         table=a.table,
@@ -461,6 +473,7 @@ def _attach(a: Attachment, replacing: bool = False) -> AttachMaskingPolicy:
 
 
 def _detach(a: Attachment, kind, replacing: bool = False) -> Operation:
+    """Return the DETACH operation (of ``kind``) for an attachment."""
     return kind(
         policy=a.policy,
         table=a.table,
