@@ -11,6 +11,37 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.6 (2026-10-10)
+
+Fixes from a parity run on Redshift Serverless against redshift-local, Aurora DSQL
+as an engine, and feedback from planning a real warehouse.
+
+### Fixed
+
+- **Redshift**: a role whose masking policy is the column's mask no longer gets PUBLIC's priority; on Redshift that attach replaced PUBLIC's and unmasked the column for everyone else
+- **Data API**: a plan over 40 statements runs in one session transaction (BEGIN, each statement, COMMIT), as `BatchExecuteStatement` refuses more than 40
+- **Redshift**: a user holding `ACCESS SYSTEM TABLE`, directly or through a role, sees every grant, so plan, apply and import need no superuser; without it they say so
+- **Planner**: a grant the spec's own default privileges gave a table created later isn't drift, so `apply --allow-revoke` no longer takes it back
+- **AWS**: `AWS_REGION` is read, as the error and `--help` say
+- **Import**: without `--engine`, import detects Redshift from its SVV views; a missing catalog view gets a plain error, not a traceback
+- **CLI**: plan and apply print their notes even when there's nothing to do
+
+### Changed
+
+- **Planner**: an object the spec names that doesn't exist is warned about and its grant skipped, not fatal; privileges pgsesame doesn't manage get one note per kind, not one per grant
+- **Apply**: owner changes run only with the new `--allow-owner` (the old owner loses what owning gave it), and a password reset only with `--allow-revoke`; the Action takes `allow-owner`
+- **Spec**: on Redshift, CONNECT and function grants are refused instead of failing or being skipped, and so are names Redshift would fold to lower case
+
+### Added
+
+- **DSQL**: Aurora DSQL as `engine: dsql`: IAM links (`iam:`) planned as `AWS IAM GRANT`/`REVOKE`; `--dsql` and `sesame login --dsql` sign in with an IAM token; apply runs one statement per transaction and, if one fails, says how many ran
+- **Planner**: a grant option the spec doesn't give, on a privilege it keeps, is drift: `REVOKE GRANT OPTION FOR`, with `--allow-revoke`
+- **Planner**: plan signs in as each user that has a `password_env`; a password disabled or changed by hand is set again, since no catalog shows it
+- **Spec**: grants to PUBLIC, declared as `public: {type: builtin}`, read back on both engines and revoked as drift only in the schemas its privileges name
+- **CLI**: `sesame grants` lists the grants a spec declares as JSON or CSV, for tools that rebuild tables to put them back
+- **Docs**: `examples/dbt`: a table dbt rebuilds keeps its declared grants through one post-hook
+- **Hooks**: pydocstyle, and a test that asks for a docstring on every function and class, private and nested ones too
+
 ## v0.2.5 (2026-10-09)
 
 Fixes from importing a masked Redshift Serverless warehouse: `sesame import`
