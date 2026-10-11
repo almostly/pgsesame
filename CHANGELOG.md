@@ -11,6 +11,16 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.2.8 (2026-10-11)
+
+A clean plan no longer turns into a failed apply on Redshift's default privileges,
+and a failed apply says which statement failed.
+
+### Fixed
+
+- **Planner**: on Redshift, a default privilege for one schema whose owner can't create there (no CREATE directly, through a group or role, or PUBLIC, and not the schema's owner or a superuser) is warned about and skipped, as Redshift refuses it even to a superuser and the whole apply failed; a revoke there is skipped too. Default privileges are now revoked before any privilege is
+- **Apply**: a failed apply names the statement that failed and its position, as the plan shows it, on every connection (the Data API said only `Query #10 failed`)
+
 ## v0.2.7 (2026-10-10)
 
 What a superuser owns is planned.
