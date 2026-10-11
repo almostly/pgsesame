@@ -324,7 +324,10 @@ def test_a_failed_apply_changes_nothing(dsn, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli.planner, "make", make_with_a_failure)
     code, out = _sesame("apply", _spec(tmp_path), "--dsn", dsn)
-    assert code == 1 and "apply failed, nothing was changed" in out, out
+    assert code == 1 and "nothing was changed" in out, out
+    # which statement failed, as the plan shows it: the last one
+    assert "apply failed at statement" in out and "SELECT 1 / 0" in out, out
+    assert "division by zero" in out, out
     with psycopg.connect(dsn) as conn:  # the roles created before it rolled back
         assert conn.execute(
             "SELECT count(*) FROM pg_roles WHERE rolname LIKE %s", (f"{P}%",)

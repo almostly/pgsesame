@@ -18,6 +18,7 @@ from pgsesame.ops import (
 )
 from pgsesame.state import (
     Attachment,
+    DefaultGrant,
     Membership,
     MaskPolicy,
     Privilege,
@@ -1090,3 +1091,150 @@ def test_public_is_declared_only_as_a_builtin():
     ) == [
         "default_privileges[0].grantee: default privileges for PUBLIC aren't planned yet"
     ]
+
+
+def _creator_spec(*rules, **principals):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "redshift",
+            "principals": {"reader": {"type": "group"}, **principals},
+            "default_privileges": list(rules),
+        }
+    )
+
+
+def _creator_rule(owner, schema="ds_reporting"):
+    return {"owner": owner, "schema": schema, "grantee": "reader", "tables": ["select"]}
+
+
+def _creator_state(*extra_roles, **kw):
+    return _state(
+        Role("reader", False, identity="group"),
+        *extra_roles,
+        objects={"schemas": {"ds_reporting", "other"}},
+        **kw,
+    )
+
+
+def test_a_default_privilege_whose_owner_cant_create_there_is_skipped_on_redshift():
+    # Redshift refuses ALTER DEFAULT PRIVILEGES FOR USER x IN SCHEMA s unless x
+    # may create in s, superuser or not: one such entry failed the whole apply
+    loaded = _creator_spec(_creator_rule("iiashchuk"), _creator_rule("etl"))
+    current = _creator_state(
+        Role("iiashchuk", True, identity="user"),
+        Role("etl", True, identity="user"),
+        privileges={Privilege("etl", "schemas", "ds_reporting", "create")},
+    )
+    plan = planner.make(loaded, current)
+    assert [op.statement().as_string(None) for op in plan.operations] == [
+        'ALTER DEFAULT PRIVILEGES FOR USER "etl" IN SCHEMA "ds_reporting" '
+        'GRANT SELECT ON TABLES TO GROUP "reader"'
+    ]
+    (warning,) = plan.warnings
+    assert warning.startswith(
+        "default_privileges: iiashchuk can't create in ds_reporting"
+    ) and warning.endswith(")")
+    assert "skipped" in warning
+
+    # a revoke there is refused too: skipped, not run
+    current.default_privileges = {
+        DefaultGrant("iiashchuk", "ds_reporting", "tables", "reader", "select"),
+        DefaultGrant("iiashchuk", "ds_reporting", "tables", "reader", "insert"),
+    }
+    plan = planner.make(loaded, current)
+    assert not any(
+        "iiashchuk" in op.statement().as_string(None) for op in plan.operations
+    )
+    assert any("iiashchuk can't create in ds_reporting" in w for w in plan.warnings)
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        "group",
+        "role chain",
+        "public",
+        "planned grant",
+        "owner",
+        "superuser",
+        "all schemas",
+    ],
+)
+def test_every_way_to_create_counts_for_a_default_privileges_owner(how):
+    # as Redshift Serverless takes them: CREATE directly, through a group, a role
+    # (and a role's role), PUBLIC, owning the schema, a superuser; and a rule for
+    # every schema isn't checked at all
+    principals = {}
+    privileges, memberships, owners = set(), set(), {}
+    roles = [Role("x", True, identity="user")]
+    rule = _creator_rule("x")
+    if how == "group":
+        roles.append(Role("g", False, identity="group"))
+        memberships = {Membership("x", "g")}
+        privileges = {Privilege("g", "schemas", "ds_reporting", "create")}
+    elif how == "role chain":
+        roles += [
+            Role("r1", False, identity="role"),
+            Role("r2", False, identity="role"),
+        ]
+        memberships = {Membership("x", "r2"), Membership("r2", "r1")}
+        privileges = {Privilege("r1", "schemas", "ds_reporting", "create")}
+    elif how == "public":
+        privileges = {Privilege("public", "schemas", "ds_reporting", "create")}
+    elif how == "planned grant":  # the same apply grants it first
+        principals = {
+            "x": {
+                "type": "user",
+                "privileges": {"schemas": {"create": ["ds_reporting"]}},
+            }
+        }
+    elif how == "owner":
+        owners = {("schemas", "ds_reporting"): "x"}
+    elif how == "superuser":
+        roles = [Role("x", True, superuser=True, identity="user")]
+    else:
+        rule = {"owner": "x", "grantee": "reader", "tables": ["select"]}
+    loaded = _creator_spec(rule, **principals)
+    current = _creator_state(
+        *roles, privileges=privileges, memberships=memberships, owners=owners
+    )
+    plan = planner.make(loaded, current)
+    assert plan.warnings == []
+    assert any(type(op).__name__ == "GrantDefault" for op in plan.operations)
+
+
+def test_a_schema_owner_change_still_pending_doesnt_count_for_default_privileges():
+    # the change runs only with --allow-owner: without it the entry would fail
+    loaded = _creator_spec(
+        _creator_rule("x"), x={"type": "user", "owns": {"schemas": ["ds_reporting"]}}
+    )
+    current = _creator_state(
+        Role("x", True, identity="user"),
+        Role("etl", True, identity="user"),
+        owners={("schemas", "ds_reporting"): "etl"},
+    )
+    plan = planner.make(loaded, current)
+    assert any("x can't create in ds_reporting" in w for w in plan.warnings)
+
+
+def test_postgresql_doesnt_check_a_default_privileges_owner():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {"reader": {"type": "role"}},
+            "default_privileges": [_creator_rule("x")],
+        }
+    )
+    current = _state(
+        Role("reader", False), Role("x", True), objects={"schemas": {"ds_reporting"}}
+    )
+    plan = planner.make(loaded, current)
+    assert plan.warnings == [] and len(plan.operations) == 1
+
+
+def test_default_privileges_are_revoked_before_any_privilege_is():
+    from pgsesame.ops import Revoke, RevokeDefault
+
+    assert RevokeDefault.order < Revoke.order

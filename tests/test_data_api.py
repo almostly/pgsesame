@@ -4,6 +4,7 @@ import pytest
 from psycopg import sql
 
 from pgsesame.aws import DataApiDatabase, DataApiError
+from pgsesame.db import StatementFailed
 
 
 class AccessDenied(Exception):
@@ -143,8 +144,44 @@ def test_a_failure_in_a_longer_plan_rolls_it_back():
     statements = _grants(45)
     failing = statements[30].as_string()
     client = FakeSession(fail_on=failing)
-    with pytest.raises(DataApiError, match="boom"):
+    with pytest.raises(StatementFailed, match="boom") as failed:
         _db(client).run(statements)
+    assert (failed.value.index, failed.value.total) == (30, 45)
     sqls = client.sqls()
     assert sqls[-1] == "ROLLBACK" and "COMMIT" not in sqls
     assert sqls[-2] == failing  # nothing after the failed statement ran
+
+
+class FailedBatch(FakeDataApi):
+    """A batch whose statement ``failed`` (from 0) failed, described as Redshift does."""
+
+    def __init__(self, failed: int, total: int, sub_statements: bool = True):
+        super().__init__(status="FAILED")
+        self.failed, self.total, self.sub_statements = failed, total, sub_statements
+
+    def describe_statement(self, Id):
+        described = {
+            "Status": "FAILED",
+            "Error": f"ERROR: Query #{self.failed + 1} failed with ERROR: "
+            "permission denied for schema ds_reporting",
+        }
+        if self.sub_statements:
+            described["SubStatements"] = [
+                {
+                    "Id": f"b1:{i + 1}",
+                    "Status": "FAILED"
+                    if i == self.failed
+                    else ("FINISHED" if i < self.failed else "ABORTED"),
+                }
+                for i in range(self.total)
+            ]
+        return described
+
+
+@pytest.mark.parametrize("sub_statements", [True, False])
+def test_a_failed_batch_says_which_statement_failed(sub_statements):
+    # "Query #10 failed" alone made a reader count through the plan to find it
+    client = FailedBatch(failed=9, total=14, sub_statements=sub_statements)
+    with pytest.raises(StatementFailed, match="permission denied") as failed:
+        _db(client).run(_grants(14))
+    assert (failed.value.index, failed.value.total) == (9, 14)

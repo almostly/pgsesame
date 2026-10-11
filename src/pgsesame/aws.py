@@ -29,6 +29,7 @@ connection: ``rows``, ``run``, ``render``, ``database`` and ``target``.
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any
 
@@ -36,7 +37,7 @@ import psycopg
 from psycopg import sql
 from pydantic import SecretStr
 
-from pgsesame.db import Database, PartiallyApplied
+from pgsesame.db import Database, PartiallyApplied, StatementFailed
 
 # BatchExecuteStatement takes at most 40 SQL statements
 BATCH_LIMIT = 40
@@ -137,7 +138,31 @@ def iam_database(
 
 
 class DataApiError(Exception):
-    """A statement the Redshift Data API ran failed."""
+    """A statement the Redshift Data API ran failed.
+
+    ``described`` is what DescribeStatement said about it, for a batch: which of
+    its statements failed.
+    """
+
+    def __init__(self, message: str, described: dict[str, Any] | None = None):
+        """Keep the error's text and the statement's description."""
+        super().__init__(message)
+        self.described = described or {}
+
+
+def _failed_index(error: DataApiError, total: int) -> int | None:
+    """Return which statement of a batch failed (from 0), or None if unsaid.
+
+    DescribeStatement lists a batch's statements in order with their status; the
+    error's text also says ``Query #n failed`` (from 1).
+    """
+    for index, sub in enumerate(error.described.get("SubStatements") or ()):
+        if sub.get("Status") in ("FAILED", "ABORTED"):
+            return index
+    found = re.search(r"Query #(\d+)", str(error))
+    if found and 0 < int(found.group(1)) <= total:
+        return int(found.group(1)) - 1
+    return None
 
 
 class DataApiDatabase:
@@ -187,7 +212,7 @@ class DataApiDatabase:
             if status == "FINISHED":
                 return described
             if status in ("FAILED", "ABORTED"):
-                raise DataApiError(described.get("Error") or status)
+                raise DataApiError(described.get("Error") or status, described)
             time.sleep(delay)
             delay = min(delay * 2, 1.0)
 
@@ -264,7 +289,10 @@ class DataApiDatabase:
                     "ExecuteStatement, DescribeStatement and GetStatementResult)"
                 ) from None
             raise
-        self._wait(started["Id"])
+        try:
+            self._wait(started["Id"])
+        except DataApiError as e:
+            raise StatementFailed(_failed_index(e, len(sqls)), len(sqls), e) from e
 
     def _run_in_session(self, sqls: list[str]) -> None:
         """Run ``sqls`` between BEGIN and COMMIT on one Data API session's connection.
@@ -284,14 +312,17 @@ class DataApiDatabase:
             # a session already names the database and the credentials
             self._wait(self.client.execute_statement(Sql=text, SessionId=session)["Id"])
 
+        index = 0
         try:
-            for text in sqls:
+            for index, text in enumerate(sqls):
                 call(text)
-        except Exception:
+        except Exception as e:
             try:
                 call("ROLLBACK")
             except Exception:  # the session ending rolls the transaction back too
                 pass
+            if isinstance(e, DataApiError):
+                raise StatementFailed(index, len(sqls), e) from e
             raise
         call("COMMIT")
 
@@ -469,17 +500,21 @@ class RdsDataApiDatabase:
             secretArn=self._where["secretArn"],
             database=self._database,
         )["transactionId"]
+        index = 0
         try:
-            for statement in statements:
+            for index, statement in enumerate(statements):
                 self.client.execute_statement(
                     sql=self.render(statement), transactionId=tx, **self._where
                 )
-        except Exception:
+        except Exception as e:
             self.client.rollback_transaction(
                 resourceArn=self._where["resourceArn"],
                 secretArn=self._where["secretArn"],
                 transactionId=tx,
             )
+            # the service's own error (a botocore ClientError): this statement's
+            if getattr(e, "response", None):
+                raise StatementFailed(index, len(statements), e) from e
             raise
         self.client.commit_transaction(
             resourceArn=self._where["resourceArn"],

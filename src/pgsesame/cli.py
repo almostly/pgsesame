@@ -17,8 +17,8 @@ from typer import rich_utils
 
 from pgsesame import __version__, masking, planner, postgres, redshift, spec, targets
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
-from pgsesame.console import console, err, header, operation
-from pgsesame.db import Connection, Database, PartiallyApplied
+from pgsesame.console import SYMBOL, console, err, header, operation
+from pgsesame.db import Connection, Database, PartiallyApplied, StatementFailed
 
 # pgcli's green for the help screens, in place of Typer's cyan and yellow
 for _name, _style in {
@@ -459,6 +459,15 @@ def _connect(target: ConnectOptions) -> Connection:
         raise typer.Exit(1) from None
 
 
+def _failed(runnable: list, e: StatementFailed, db: Connection) -> str:
+    """Return the statement that failed, as the plan shows it, and the error."""
+    shown = ""
+    if e.index is not None and e.index < len(runnable):
+        op = runnable[e.index]
+        shown = f"\n  {SYMBOL[op.kind]} {escape(db.render(op.display()))}"
+    return f"{shown}\n  {escape(str(e).strip())}"
+
+
 PARTIAL = (
     "this user isn't a superuser and doesn't hold ACCESS SYSTEM TABLE, so Redshift "
     "shows it only its own grants: this plan can't see the rest, so grants it adds "
@@ -699,10 +708,21 @@ def apply(
             db.run([op.statement() for op in runnable])
         except PartiallyApplied as e:
             err.print(
-                f"[error]apply stopped at statement {e.done + 1} of {e.total}:[/error] "
-                f"{escape(str(e))}\nAurora DSQL runs each statement in its own "
-                f"transaction, so the {e.done} before it were applied; plan again to "
-                "see what remains"
+                f"[error]apply stopped at statement {e.done + 1} of {e.total}:[/error]"
+                f"{_failed(runnable, e, db)}\nAurora DSQL runs each statement in its "
+                f"own transaction, so the {e.done} before it were applied; plan again "
+                "to see what remains"
+            )
+            raise typer.Exit(1) from None
+        except StatementFailed as e:
+            where = (
+                f" at statement {e.index + 1} of {e.total}"
+                if e.index is not None
+                else ""
+            )
+            err.print(
+                f"[error]apply failed{where}, nothing was changed:[/error]"
+                f"{_failed(runnable, e, db)}"
             )
             raise typer.Exit(1) from None
         except (

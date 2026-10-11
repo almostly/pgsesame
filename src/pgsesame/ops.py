@@ -624,7 +624,9 @@ class RevokeDefault(_Default):
 
     kind: ClassVar[Kind] = "remove"
     gate: ClassVar[Gate | None] = "revoke"
-    order: ClassVar[int] = 55
+    # before any privilege is revoked: Redshift changes a user's default
+    # privileges in a schema only while it may still create there
+    order: ClassVar[int] = 49
     op: Literal["revoke_default"] = "revoke_default"
 
     def statement(self) -> sql.Composed:
