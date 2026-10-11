@@ -408,9 +408,19 @@ def make(
 
     if spec.engine == "dsql":
         plan.operations += _plan_iam(spec, current, managed - builtins)
-    plan.operations += _plan_defaults(
+    defaults = _plan_defaults(
         spec, current, identity, problems, managed - builtins, plan.notes
     )
+    if redshift:
+        defaults = _owners_can_create(
+            defaults,
+            current,
+            owner_of,
+            current.memberships | want_members,
+            current.privileges | want_privileges,
+            plan.warnings,
+        )
+    plan.operations += defaults
     plan.operations += _plan_rls(spec, current, normalized or {}, problems)
     if spec.masking is not None:
         plan.operations += masking.plan(
@@ -616,6 +626,69 @@ def _plan_defaults(
     return [op(GrantDefault, d) for d in sorted(want - have)] + [
         op(RevokeDefault, d) for d in sorted(have - want)
     ]
+
+
+def _owners_can_create(
+    defaults: list[Operation],
+    current: State,
+    owner_of: dict[tuple[str, str], str],
+    memberships: set[Membership],
+    privileges: set[Privilege],
+    warnings: list[str],
+) -> list[Operation]:
+    """Return the default privileges Redshift will take; warn about the rest.
+
+    Redshift refuses ``ALTER DEFAULT PRIVILEGES FOR USER x IN SCHEMA s`` unless
+    ``x`` may create in ``s``, even run by a superuser (PostgreSQL doesn't check).
+    Such an entry would fail the whole apply, so it's warned about and skipped.
+    Redshift refuses a revoke there too. ``memberships`` and ``privileges`` are
+    what holds once the plan's grants have run, as they run before default
+    privileges change (and its revokes after).
+    """
+    member_of: dict[str, set[str]] = {}
+    for m in memberships:
+        member_of.setdefault(m.member, set()).add(m.role)
+
+    def holders(name: str) -> set[str]:
+        """Return ``name``, every group and role it is in (through roles too), PUBLIC."""
+        found, todo = {name, "public"}, [name]
+        while todo:
+            for role in member_of.get(todo.pop(), ()):
+                if role not in found:
+                    found.add(role)
+                    todo.append(role)
+        return found
+
+    def can_create(owner: str, schema: str) -> bool:
+        """Return whether ``owner`` may create in ``schema`` once the plan is applied."""
+        role = current.roles.get(owner)
+        if role and role.superuser:
+            return True
+        # owning it counts only if it does now and keeps it: a change of owner
+        # runs only with --allow-owner, so the plan can't count on one
+        key = ("schemas", schema)
+        if current.owners.get(key) == owner and owner_of.get(key) == owner:
+            return True
+        return any(
+            Privilege(h, "schemas", schema, "create") in privileges
+            for h in holders(owner)
+        )
+
+    kept: list[Operation] = []
+    refused: set[tuple[str, str]] = set()
+    for op in defaults:
+        if isinstance(op, (GrantDefault, RevokeDefault)) and op.in_schema:
+            if not can_create(op.owner, op.in_schema):
+                refused.add((op.owner, op.in_schema))
+                continue
+        kept.append(op)
+    for owner, schema in sorted(refused):
+        warnings.append(
+            f"default_privileges: {owner} can't create in {schema}, and Redshift "
+            f"changes default privileges for a user only where it can; skipped "
+            f"(GRANT CREATE ON SCHEMA {schema} to it, or fix the entry's owner)"
+        )
+    return kept
 
 
 def public_create_notes(state: State, schemas: list[str] | None) -> list[str]:

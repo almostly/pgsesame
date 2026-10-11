@@ -15,13 +15,25 @@ from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 
-class PartiallyApplied(Exception):
+class StatementFailed(Exception):
+    """Statement ``index`` (from 0) of ``total`` failed, and the run rolled back.
+
+    ``index`` is None when the server didn't say which one.
+    """
+
+    def __init__(self, index: int | None, total: int, error: Exception):
+        """Keep which statement failed, and why."""
+        super().__init__(str(error))
+        self.index, self.total, self.error = index, total, error
+
+
+class PartiallyApplied(StatementFailed):
     """A statement failed after ``done`` of ``total`` were applied and committed."""
 
     def __init__(self, done: int, total: int, error: Exception):
         """Keep how far the apply got, and why it stopped."""
-        super().__init__(str(error))
-        self.done, self.total, self.error = done, total, error
+        super().__init__(done, total, error)
+        self.done = done
 
 
 class Connection(Protocol):
@@ -120,8 +132,11 @@ class Database:
     def run(self, statements: list[sql.Composed]) -> None:
         """Run statements in one transaction: all of them, or none."""
         with self.conn.transaction(), self.conn.cursor() as cur:
-            for statement in statements:
-                cur.execute(statement)
+            for index, statement in enumerate(statements):
+                try:
+                    cur.execute(statement)
+                except psycopg.Error as e:
+                    raise StatementFailed(index, len(statements), e) from e
 
     def close(self) -> None:
         """Close the connection."""

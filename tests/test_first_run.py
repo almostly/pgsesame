@@ -281,3 +281,51 @@ def test_the_region_comes_from_either_variable(variable, tmp_path, monkeypatch):
     monkeypatch.setenv(variable, "eu-west-1")
     aws.configure(None, None)
     assert aws._client("sts").meta.region_name == "eu-west-1"
+
+
+@pytest.mark.parametrize("index", [1, None])
+def test_a_failed_apply_names_the_statement(index, tmp_path, monkeypatch):
+    from psycopg import sql
+
+    from pgsesame import cli, planner
+    from pgsesame.db import StatementFailed
+    from pgsesame.ops import Grant, GrantDefault
+
+    ops = [
+        Grant(grantee="r", object_type="schemas", object_name="s", privilege="usage"),
+        GrantDefault(
+            owner="iiashchuk",
+            in_schema="ds_reporting",
+            object_type="tables",
+            privilege="select",
+            grantee="r",
+        ),
+    ]
+
+    class Failing(_NoDatabase):
+        """A connection whose apply fails at one statement."""
+
+        def run(self, statements: list[sql.Composed]) -> None:
+            """Fail the way Redshift does."""
+            raise StatementFailed(
+                index, len(statements), Exception("permission denied for schema")
+            )
+
+    monkeypatch.setattr(cli, "_connect", lambda options: Failing())
+    planned = planner.Plan(list(ops), [])
+    monkeypatch.setattr(cli, "_plan", lambda loaded, db: planned)
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("version: 1\nengine: postgres\nprincipals: {}\n")
+    result = CliRunner().invoke(
+        app, ["apply", str(spec), "--dsn", "host=x"], env={"NO_COLOR": "1"}
+    )
+    assert result.exit_code == 1, result.output
+    assert "permission denied for schema" in result.output
+    if index is None:
+        assert "apply failed, nothing was changed" in result.output
+    else:
+        assert "apply failed at statement 2 of 2, nothing was changed" in result.output
+        assert (
+            '+ ALTER DEFAULT PRIVILEGES FOR ROLE "iiashchuk" IN SCHEMA "ds_reporting"'
+            in result.output
+        )

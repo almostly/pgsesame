@@ -292,6 +292,11 @@ default_privileges:
     tables: [select]
 ```
 
+On Redshift an entry for one schema takes only if its owner may create there
+(directly, through a group or role, or as the schema's owner): Redshift refuses
+it otherwise, even to a superuser. The plan warns about such an entry and skips
+it, so the rest still applies.
+
 ### Tables that are rebuilt
 
 A grant belongs to one table, so a tool that rebuilds tables (dbt's table
