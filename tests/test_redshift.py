@@ -390,6 +390,53 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
     assert code == 0, out
 
 
+def test_default_privileges_of_an_owner_that_cant_create_are_skipped(dsn, tmp_path):
+    # Redshift refuses ALTER DEFAULT PRIVILEGES FOR USER x IN SCHEMA s unless x
+    # may create in s, even to a superuser: that entry is warned about and
+    # skipped, and the rest of the plan applies
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for user in ("etl", "intern"):
+            conn.execute(
+                sql.SQL("CREATE USER {} PASSWORD DISABLE").format(
+                    sql.Identifier(f"{P}{user}")
+                )
+            )
+        conn.execute(f"CREATE GROUP {P}loaders")
+        conn.execute(f"GRANT CREATE ON SCHEMA rs_test TO GROUP {P}loaders")
+        conn.execute(f"ALTER GROUP {P}loaders ADD USER {P}etl")
+    spec = _spec(
+        tmp_path,
+        f"""
+        version: 1
+        engine: redshift
+        principals:
+          {P}reader:
+            type: role
+            privileges:
+              schemas: {{usage: [rs_test]}}
+        default_privileges:
+          - {{owner: {P}etl, schema: rs_test, grantee: {P}reader, tables: [select]}}
+          - {{owner: {P}intern, schema: rs_test, grantee: {P}reader, tables: [select]}}
+        """,
+    )
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f"! default_privileges: {P}intern can't create in rs_test" in out, out
+    assert f'FOR USER "{P}etl" IN SCHEMA "rs_test"' in out, out  # through its group
+    assert f'FOR USER "{P}intern"' not in out.split("\n", 2)[2], out
+    code, out = _sesame("apply", spec, "--dsn", dsn)
+    assert code == 0, out
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0 and f"{P}intern can't create in rs_test" in out, out
+
+    # once it may create there, the entry is planned and applies
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"GRANT CREATE ON SCHEMA rs_test TO {P}intern")
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0 and "can't create" not in out, out
+
+
 def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     env = {"RS_TEST_ALICE_PASSWORD": "Alice-pw-1"}
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=env)[0] == 0
