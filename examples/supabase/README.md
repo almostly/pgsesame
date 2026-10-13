@@ -47,7 +47,7 @@ tables; [`permissions.yaml`](permissions.yaml) has everything else.
    export METABASE_PASSWORD=...
    sesame plan permissions.yaml -t supabase
    sesame apply permissions.yaml -t supabase
-   sesame plan permissions.yaml -t supabase     # nothing to do
+   sesame plan permissions.yaml -t supabase  # nothing to do
    ```
 
 From then on a change to who can do what is a change to `permissions.yaml`,

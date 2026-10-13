@@ -239,7 +239,7 @@ row-level security on, and `postgres` may add policies to it:
 row_level_security:
   storage.objects:
     policies:
-      avatars_own_folder:          # users/<their id>/... in the avatars bucket
+      avatars_own_folder:  # users/<their id>/... in the avatars bucket
         command: select
         to: [authenticated]
         using: "bucket_id = 'avatars' and (select auth.uid())::text = (storage.foldername(name))[1]"
@@ -252,7 +252,7 @@ extension's functions are left out:
 
 ```yaml
 principals:
-  supabase_auth_admin:            # Supabase's Auth hook
+  supabase_auth_admin:  # Supabase's Auth hook
     type: builtin
     privileges:
       schemas: {usage: [public]}
