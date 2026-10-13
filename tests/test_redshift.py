@@ -564,3 +564,40 @@ def test_access_system_table_through_a_role_sees_everything(dsn, tmp_path):
     code, out = _sesame("plan", _spec(tmp_path), "--dsn", limited)
     assert "ACCESS SYSTEM TABLE" not in out, out  # no partial-view warning
     assert f'GRANT ROLE "{P}writer" TO "{P}alice"' not in out, out
+
+
+SYSTEM = f"""
+version: 1
+engine: redshift
+principals:
+  "sys:monitor":
+    type: builtin
+  {P}auditor:
+    type: role
+    system: [access system table]
+    member_of: ["sys:monitor"]
+"""
+
+
+def test_system_permissions_and_sys_roles(dsn, tmp_path):
+    # redshift-local implements ACCESS SYSTEM TABLE of Redshift's system permissions
+    spec = _spec(tmp_path, SYSTEM)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f'+ GRANT ACCESS SYSTEM TABLE TO ROLE "{P}auditor"' in out, out
+    assert f'+ GRANT ROLE "sys:monitor" TO ROLE "{P}auditor"' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
+
+    imported = tmp_path / "imported.yaml"
+    assert _sesame("import", "--dsn", dsn, "--prefix", P, "-o", str(imported))[0] == 0
+    assert "system:\n    - access system table" in imported.read_text()
+
+    # no longer listed: drift, revoked only when allowed
+    _spec(tmp_path, SYSTEM.replace("system: [access system table]", "system: []"))
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert f'- REVOKE ACCESS SYSTEM TABLE FROM ROLE "{P}auditor"' in out, out
+    assert "needs --allow-revoke" in out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0

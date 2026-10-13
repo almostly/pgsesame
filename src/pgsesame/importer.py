@@ -145,6 +145,9 @@ def build(
             entry["type"] = "user" if role.login else "role"
         if role.attributes and engine == "postgres":
             entry["attributes"] = sorted(role.attributes)
+        system = sorted(s for r, s in state.system_privileges or () if r == name)
+        if system and redshift and entry["type"] == "role":
+            entry["system"] = system
         member_of = sorted(
             m.role
             for m in state.memberships

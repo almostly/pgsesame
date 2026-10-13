@@ -140,5 +140,8 @@ class State:
     administers: set[str] | None = None
     # the roles the connected user acts as (PostgreSQL); None: every role
     acts_as: set[str] | None = None
+    # Redshift system permissions held by roles: (role, permission, lower case);
+    # None where the catalog has no svv_system_privileges (older redshift-local)
+    system_privileges: set[tuple[str, str]] | None = field(default_factory=set)
     # the attributes the connected user may give or take; None: every one
     sets_attributes: set[str] | None = None

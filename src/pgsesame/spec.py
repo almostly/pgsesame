@@ -87,6 +87,9 @@ Privilege = Literal[
 # SUPERUSER is the superusers' business), in the order the reader reads them
 Attribute = Literal["createdb", "createrole", "replication", "bypassrls"]
 ATTRIBUTES: tuple[str, ...] = get_args(Attribute)
+# a Redshift system permission, as GRANT writes it: access system table, create
+# user ... Redshift has dozens and adds more, so it checks the name, not pgsesame
+SystemPermission = Annotated[str, StringConstraints(pattern=r"^[a-z]+( [a-z]+)*$")]
 # PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
 MAX_NAME_BYTES = {"postgres": 63, "redshift": 127, "dsql": 63}
 
@@ -155,6 +158,11 @@ class Principal(_Model):
     privileges: dict[ObjectType, dict[Privilege, list[ObjectPattern]]] = Field(
         default_factory=dict,
         description="Object type -> privilege -> objects (schema.* for all).",
+    )
+    system: list[SystemPermission] | None = Field(
+        None,
+        description="Redshift system permissions a role has, and no others; left "
+        "unmanaged when not given.",
     )
     password_env: EnvVar | None = Field(
         None, description="Environment variable holding the password."
@@ -380,6 +388,7 @@ def _check(spec: Spec) -> list[str]:
                 for key in (
                     "login",
                     "attributes",
+                    "system",
                     "password",
                     "password_env",
                     "groups",
@@ -410,6 +419,10 @@ def _check(spec: Spec) -> list[str]:
         if p.attributes is not None and spec.engine != "postgres":
             problems.append(
                 f"{where}.attributes: role attributes are planned on PostgreSQL only"
+            )
+        if p.system is not None and not (redshift and p.type == "role"):
+            problems.append(
+                f"{where}.system: Redshift grants system permissions to roles only"
             )
         if p.groups and not redshift:
             problems.append(f"{where}.groups: groups exist on Redshift only")

@@ -275,6 +275,51 @@ class SetAttribute(Operation):
         )
 
 
+# a system permission's words, checked again where they become SQL
+_SYSTEM_PERMISSION = re.compile(r"^[a-z]+( [a-z]+)*$")
+
+
+class _System(Operation):
+    """A Redshift system permission of a role (GRANT ... TO ROLE)."""
+
+    role: str
+    permission: str
+
+    def _permission(self) -> sql.SQL:
+        """Return the permission as SQL keywords, if it is only words."""
+        if not _SYSTEM_PERMISSION.match(self.permission):
+            raise ValueError(f"{self.permission}: not a system permission")
+        return sql.SQL(cast("LiteralString", self.permission.upper()))
+
+
+class GrantSystem(_System):
+    """Give a Redshift role a system permission."""
+
+    order: ClassVar[int] = 35  # after the role exists
+    op: Literal["grant_system"] = "grant_system"
+
+    def statement(self) -> sql.Composed:
+        """Return GRANT <permission> TO ROLE ..."""
+        return sql.SQL("GRANT {} TO ROLE {}").format(
+            self._permission(), sql.Identifier(self.role)
+        )
+
+
+class RevokeSystem(_System):
+    """Take a system permission from a Redshift role."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 55
+    op: Literal["revoke_system"] = "revoke_system"
+
+    def statement(self) -> sql.Composed:
+        """Return REVOKE <permission> FROM ROLE ..."""
+        return sql.SQL("REVOKE {} FROM ROLE {}").format(
+            self._permission(), sql.Identifier(self.role)
+        )
+
+
 _OWNED = {
     "databases": sql.SQL("DATABASE"),
     "schemas": sql.SQL("SCHEMA"),
@@ -896,6 +941,8 @@ AnyOperation = Annotated[
     | AlterLogin
     | AlterPassword
     | SetAttribute
+    | GrantSystem
+    | RevokeSystem
     | AddMember
     | Grant
     | Revoke

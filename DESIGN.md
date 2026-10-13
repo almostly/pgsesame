@@ -502,8 +502,11 @@ Done in 0.2.1 (2026-10-07), adoption:
   replication, bypassrls]`), managed once a principal lists them, taking one
   away behind `--allow-revoke`; what a non-superuser admin can't give is noted.
   Import writes them. Tested on PostgreSQL 14 and 17.
-- Redshift system permissions (`system: [...]` on a role, from
-  `svv_system_privileges`), and a test that joining `sys:` roles works.
+- Done: Redshift system permissions (`system: [...]` on a role, read from
+  `svv_system_privileges`), managed once a role lists them, revoking behind
+  `--allow-revoke`; any name Redshift knows, as words. Joining `sys:` roles works
+  as built-ins. Tested on redshift-local, which implements ACCESS SYSTEM TABLE;
+  the rest (CREATE USER ...) only on Amazon Redshift.
 - Superusers: `manage.superusers` lists who may be one; any other is warned
   about on every plan and demoted only with `--allow-superuser`, never the
   connected user. On RDS, Aurora and Supabase, where no one is, audit only.

@@ -90,6 +90,12 @@ from svv_column_privileges
 """
 
 
+# the system permissions each role holds
+SYSTEM_PRIVILEGES = """
+select identity_name, lower(system_privilege) from svv_system_privileges
+where identity_type = 'role'
+"""
+
 # who holds the system permission that shows every row of the SVV views (a
 # non-superuser sees its own grants of it, and those of its roles)
 SYSTEM_TABLE_ACCESS = """
@@ -242,6 +248,12 @@ def read(db: Connection, columns: bool = True) -> State:
         state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in rows["columns"]}
     for grantee, identity, schema, relation, column, priv in rows["column_privileges"]:
         privilege(grantee, identity, "columns", f"{schema}.{relation}.{column}", priv)
+    try:  # on its own: an older catalog has no such view
+        held = db.rows(SYSTEM_PRIVILEGES)
+    except Exception:
+        state.system_privileges = None
+    else:
+        state.system_privileges = {(role, permission) for role, permission in held}
     return state
 
 

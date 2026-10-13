@@ -35,7 +35,9 @@ from pgsesame.ops import (
     UnlinkIam,
     Revoke,
     RevokeDefault,
+    RevokeSystem,
     SetAttribute,
+    GrantSystem,
 )
 from pgsesame import masking
 from pgsesame.spec import ATTRIBUTES, PRIVILEGES, Spec
@@ -225,6 +227,10 @@ def make(
                 SetAttribute(name=name, attribute=a, enabled=True)
                 for a in sorted(set(p.attributes or ()))
             ]
+            plan.operations += [
+                GrantSystem(role=name, permission=permission)
+                for permission in sorted(set(p.system or ()))
+            ]
             continue
         if role.superuser:
             plan.notes.append(
@@ -247,6 +253,20 @@ def make(
             plan.operations += [
                 SetAttribute(name=name, attribute=a, enabled=a in want)
                 for a in sorted(want ^ role.attributes)
+            ]
+        if p.system is not None and current.system_privileges is None:
+            problems.append(
+                f"principals.{name}.system: this Redshift has no "
+                "svv_system_privileges, so its system permissions can't be read"
+            )
+        elif p.system is not None:  # not given: left as they are
+            want = set(p.system)
+            have = {s for r, s in current.system_privileges or () if r == name}
+            plan.operations += [
+                GrantSystem(role=name, permission=s) for s in sorted(want - have)
+            ]
+            plan.operations += [
+                RevokeSystem(role=name, permission=s) for s in sorted(have - want)
             ]
         if p.password_env and name in (current.passwords_refused or ()):
             # the password in the environment doesn't sign it in: disabled or

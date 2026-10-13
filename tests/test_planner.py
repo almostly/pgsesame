@@ -1609,3 +1609,38 @@ def test_role_attributes_are_postgresqls_and_not_a_builtins():
     assert "planned on PostgreSQL only" in err.value.problems[0]
     with pytest.raises(spec.SpecError, match="referred to, not managed"):
         _spec(anon={"type": "builtin", "attributes": ["createdb"]})
+
+
+def test_redshift_system_permissions_once_a_role_lists_them():
+    auditor = Role("auditor", False, identity="role")
+    s = _spec(
+        "redshift",
+        auditor={"type": "role", "system": ["access system table", "create user"]},
+    )
+    state = _state(
+        auditor,
+        system_privileges={("auditor", "create user"), ("auditor", "drop user")},
+    )
+    plan = planner.make(s, state)
+    assert _statements(plan) == [
+        'GRANT ACCESS SYSTEM TABLE TO ROLE "auditor"',
+        'REVOKE DROP USER FROM ROLE "auditor"',
+    ]
+    assert [op.needs for op in plan.operations] == [None, "revoke"]
+    # not listed: left as they are; an older catalog can't say
+    assert (
+        planner.make(_spec("redshift", auditor={"type": "role"}), state).operations
+        == []
+    )
+    with pytest.raises(planner.PlanError, match="no svv_system_privileges"):
+        planner.make(s, _state(auditor, system_privileges=None))
+
+
+def test_system_permissions_are_words_for_redshift_roles():
+    with pytest.raises(spec.SpecError) as err:
+        _spec("redshift", etl={"type": "user", "system": ["create user"]})
+    assert err.value.problems == [
+        "principals.etl.system: Redshift grants system permissions to roles only"
+    ]
+    with pytest.raises(spec.SpecError, match="should match pattern"):
+        _spec("redshift", odd={"type": "role", "system": ["create user; drop table t"]})

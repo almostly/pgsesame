@@ -219,6 +219,21 @@ principals:
     attributes: [createdb, createrole]
 ```
 
+On Redshift a role's system permissions are declared the same way, with `system`:
+Redshift grants them to roles only, and checks the names, so any of its permissions
+can be listed as GRANT writes it. Its `sys:` roles are built-in, joined with
+`member_of`:
+
+```yaml
+principals:
+  "sys:monitor":
+    type: builtin
+  auditor:
+    type: role
+    system: [access system table, create user]
+    member_of: ["sys:monitor"]
+```
+
 A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
 builtin`: granted to and joined, never created or altered, and their privileges are
 managed only in the schemas the spec names for them. PUBLIC, every user, is one too,
