@@ -500,6 +500,78 @@ def test_column_privileges(dsn, tmp_path):
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
 
 
+FUNCTIONS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}caller:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+      functions:
+        execute: [analytics.score, analytics.refresh, "analytics.convert(analytics.cents)"]
+  {P}other:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+default_privileges:
+  - owner: {P}owner
+    schema: analytics
+    grantee: {P}caller
+    functions: [execute]
+"""
+
+
+def test_function_privileges(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            f"""
+            CREATE ROLE {P}owner;
+            GRANT CREATE, USAGE ON SCHEMA analytics TO {P}owner;
+            CREATE DOMAIN analytics.cents AS bigint;
+            CREATE FUNCTION analytics.score(int) RETURNS int RETURN $1 * 2;
+            CREATE FUNCTION analytics.score(text) RETURNS int RETURN length($1);
+            CREATE FUNCTION analytics.convert(analytics.cents) RETURNS numeric
+                RETURN $1 / 100.0;
+            CREATE FUNCTION analytics.unnamed() RETURNS int RETURN 1;
+            CREATE PROCEDURE analytics.refresh() LANGUAGE sql BEGIN ATOMIC SELECT 1; END;
+            """
+        )
+    spec = _spec(tmp_path, FUNCTIONS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    for routine in (
+        '"analytics"."score"(integer)',
+        '"analytics"."score"(text)',
+        '"analytics"."refresh"()',
+        '"analytics"."convert"(analytics.cents)',
+    ):
+        # granted to the caller, and PostgreSQL's default EXECUTE for PUBLIC taken
+        assert f'+ GRANT EXECUTE ON ROUTINE {routine} TO "{P}caller"' in out, out
+        assert f"- REVOKE EXECUTE ON ROUTINE {routine} FROM PUBLIC" in out, out
+    assert "unnamed" not in out  # a function the spec doesn't name is left alone
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"SET ROLE {P}caller")
+        assert conn.execute(
+            "SELECT analytics.score(2), analytics.score('abc')"
+        ).fetchone() == (4, 3)
+        conn.execute("CALL analytics.refresh()")
+        conn.execute(f"SET ROLE {P}other")
+        assert conn.execute("SELECT analytics.unnamed()").fetchone() == (1,)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT analytics.score(1)")
+        # a function made later gets EXECUTE from the default privilege: not drift
+        conn.execute("RESET ROLE")
+        conn.execute(f"SET ROLE {P}owner")
+        conn.execute("CREATE FUNCTION analytics.later() RETURNS int RETURN 2")
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
 ADMIN_LIMITS = f"""
 version: 1
 engine: postgres
@@ -604,6 +676,11 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
         conn.execute(f"GRANT SELECT (amount) ON marts.sales TO {P}reader")
         conn.execute(f"CREATE ROLE {P}outside")
         conn.execute(f"GRANT {P}outside TO {P}reader")
+        # a function the spec will name: PUBLIC keeps its default EXECUTE, and a
+        # role outside the import holds it too
+        conn.execute("CREATE FUNCTION analytics.score(int) RETURNS int RETURN $1")
+        conn.execute(f"GRANT EXECUTE ON FUNCTION analytics.score TO {P}reader")
+        conn.execute(f"GRANT EXECUTE ON FUNCTION analytics.score TO {P}outside")
     imported = tmp_path / "imported.yaml"
     code, out = _sesame(
         "import",
@@ -646,6 +723,72 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert "manage:\n  schemas:\n  - analytics" in text and "marts." not in text
     code, out = _sesame("plan", str(scoped), "--dsn", dsn)
     assert code == 0, out  # marts' grants are outside: not drift
+
+
+def test_a_plan_written_as_a_migration(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE ROLE {P}reader")
+        conn.execute(f"GRANT INSERT ON analytics.daily TO {P}reader")  # drift
+    migrations = tmp_path / "supabase" / "migrations"
+    # a password the plan would set stays out of a file someone commits
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-5"}
+    code, out = _sesame(
+        "plan", _spec(tmp_path), "--dsn", dsn, "--migration", str(migrations), env=env
+    )
+    assert code == 1 and "sets a password for" in out, out
+    assert not migrations.exists()
+
+    code, out = _sesame(
+        "plan", _spec(tmp_path), "--dsn", dsn, "--migration", str(migrations)
+    )
+    assert code == 2, out
+    (written,) = migrations.glob("*_pgsesame.sql")
+    assert len(written.name) == len("20261013120000_pgsesame.sql")
+    text = written.read_text()
+    assert f'GRANT SELECT ON TABLE "analytics"."daily" TO "{P}reader";\n' in text
+    revoke = f'REVOKE INSERT ON TABLE "analytics"."daily" FROM "{P}reader";'
+    assert f"-- needs --allow-revoke: {revoke}" in text
+    assert "alice-pw" not in text
+
+    with psycopg.connect(dsn, autocommit=True) as conn:  # as supabase db push would
+        conn.execute(text.encode())
+    code, out = _sesame("plan", _spec(tmp_path), "--dsn", dsn)
+    assert code == 2 and "Plan: 0 to add, 0 to change, 1 to remove" in out, out
+
+
+PUBLICATION = """
+version: 1
+engine: postgres
+principals: {}
+publications:
+  sesame_test_changes:
+    tables: [analytics.events]
+"""
+
+
+def test_a_publications_tables(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE PUBLICATION sesame_test_changes FOR TABLE analytics.daily")
+    spec = _spec(tmp_path, PUBLICATION)
+    changes = tmp_path / "changes.json"
+    code, out = _sesame("plan", spec, "--dsn", dsn, "-o", str(changes))
+    assert code == 2, out
+    assert (
+        '+ ALTER PUBLICATION "sesame_test_changes" ADD TABLE "analytics"."events"'
+        in out
+    )
+    assert (
+        '- ALTER PUBLICATION "sesame_test_changes" DROP TABLE "analytics"."daily"'
+        in out
+    )
+    # a change set keeps both; apply runs the removal only when allowed
+    assert _sesame("apply", str(changes), "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT schemaname || '.' || tablename FROM pg_publication_tables "
+            "WHERE pubname = 'sesame_test_changes'"
+        ).fetchall() == [("analytics.events",)]
 
 
 OWNERSHIP = f"""

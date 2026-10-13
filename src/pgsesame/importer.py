@@ -18,6 +18,7 @@ pgsesame's model (see ``_masking``); row-level security is not imported yet.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import yaml
@@ -39,14 +40,62 @@ from pgsesame.spec import (
 from pgsesame.state import Privilege, State
 
 
+# Supabase's roles besides its supabase_* ones: the Data API's, and its tools'
+SUPABASE_ROLES = (
+    "anon",
+    "authenticated",
+    "service_role",
+    "authenticator",
+    "dashboard_user",
+    "pgbouncer",
+)
+# the ones the Data API acts as, whose grants outside the platform are the app's
+SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
+
+
+def _schema(p: Privilege) -> str | None:
+    """Return the schema a grant is in; None for a database."""
+    if p.object_type == "databases":
+        return None
+    if p.object_type == "schemas":
+        return p.object_name
+    return p.object_name.split(".", 1)[0]
+
+
 def _in_schemas(p: Privilege, schemas: set[str]) -> bool:
     """Return whether a grant is on one of ``schemas`` (every grant when none)."""
-    if not schemas or p.object_type == "databases":
-        return True
-    schema = (
-        p.object_name if p.object_type == "schemas" else p.object_name.split(".", 1)[0]
-    )
-    return schema in schemas
+    schema = _schema(p)
+    return not schemas or schema is None or schema in schemas
+
+
+def _platform(state: State) -> tuple[set[str], set[str]]:
+    """Return a platform's own roles and schemas: Supabase's, when it is one.
+
+    Its schemas are those its own roles own (auth, storage, realtime ...; public
+    is pg_database_owner's, so the app's), and extensions, which postgres owns but
+    the platform fills.
+    """
+    if "supabase_admin" not in state.roles:
+        return set(), set()
+    roles = {n for n in state.roles if n in SUPABASE_ROLES or _system_role(n)}
+    owners = {n for n in roles if n in SUPABASE_ROLES or n.startswith("supabase")}
+    schemas = {
+        name
+        for (kind, name), owner in state.owners.items()
+        if kind == "schemas" and owner in owners
+    }
+    return roles, schemas | {"extensions"}
+
+
+def _privileges(grants: set[Privilege]) -> dict[str, dict[str, list[str]]]:
+    """Return grants as a principal's privileges: type -> privilege -> objects."""
+    by: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for p in grants:
+        by[p.object_type][p.privilege].add(p.object_name)
+    return {
+        kind: {priv: sorted(objects) for priv, objects in sorted(privs.items())}
+        for kind, privs in sorted(by.items())
+    }
 
 
 def build(
@@ -61,11 +110,23 @@ def build(
     redshift = engine == "redshift"
     in_scope = set(schemas or [])
     notes: list[str] = []
+    known = PRIVILEGES[engine]
+    # the platform's roles are never managed, and its schemas are its own, unless
+    # asked for by name
+    platform_roles, platform_schemas = _platform(state)
+    if in_scope:
+        platform_schemas = set()
+
+    def kept(p: Privilege) -> bool:
+        """Return whether a grant is the app's: in scope, not in the platform's schemas."""
+        return _in_schemas(p, in_scope) and _schema(p) not in platform_schemas
 
     def selectable(name: str) -> bool:
         """Return whether import writes this role: not a superuser, system role or the importer."""
         role = state.roles[name]
         if role.superuser or _system_role(name) or name == me:
+            return False
+        if name in platform_roles:
             return False
         return not prefixes or name.startswith(tuple(prefixes))
 
@@ -73,6 +134,7 @@ def build(
     principals: dict[str, dict[str, Any]] = {}
     referred: set[str] = set()
     unmanaged: set[Privilege] = set()
+    imported: set[Privilege] = set()  # the selected roles' grants
 
     for name in selected:
         role = state.roles[name]
@@ -105,21 +167,23 @@ def build(
             entry["groups"] = groups
         referred |= set(member_of) | set(groups)
 
-        grants: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
-        known = PRIVILEGES[engine]
+        grants: set[Privilege] = set()
         for p in state.privileges:
-            if p.grantee != name or not _in_schemas(p, in_scope):
+            if p.grantee != name or not kept(p):
                 continue
             if p.privilege not in known.get(p.object_type, ()):
                 unmanaged.add(p)  # one note per privilege and type, after the loop
                 continue
-            grants[p.object_type][p.privilege].add(p.object_name)
+            grants.add(p)
+        imported |= grants
         owned: dict[str, list[str]] = defaultdict(list)
         for (kind, obj), owner in sorted(state.owners.items()):
             if owner != name or kind not in OWNABLE[engine]:
                 continue
             schema = obj if kind == "schemas" else obj.split(".", 1)[0]
-            if kind == "databases" or not in_scope or schema in in_scope:
+            if kind == "databases" or (
+                (not in_scope or schema in in_scope) and schema not in platform_schemas
+            ):
                 owned[kind].append(obj)
         if owned:
             entry["owns"] = dict(sorted(owned.items()))
@@ -127,14 +191,30 @@ def build(
         if links:  # Aurora DSQL: the IAM identities that sign in as it
             entry["iam"] = links
         if grants:
-            entry["privileges"] = {
-                kind: {priv: sorted(objects) for priv, objects in sorted(by.items())}
-                for kind, by in sorted(grants.items())
-            }
+            entry["privileges"] = _privileges(grants)
         principals[name] = entry
 
+    builtins = _builtins(state, selected, imported, platform_roles, kept)
+    for name, grants in sorted(builtins.items()):
+        unmanaged |= {
+            p for p in grants if p.privilege not in known.get(p.object_type, ())
+        }
+        grants = {p for p in grants if p.privilege in known.get(p.object_type, ())}
+        principals[name] = {"type": "builtin"}
+        if grants:
+            principals[name]["privileges"] = _privileges(grants)
     for name in sorted(referred - set(principals)):
         principals[name] = {"type": "builtin"}  # referred to, not managed
+    # a built-in role's memberships in the spec's own roles are managed (Supabase's
+    # authenticator joins the roles JWTs name), so they're written for each
+    for name in sorted(
+        (set(principals) - set(selected)) | (platform_roles & set(SUPABASE_ROLES))
+    ):
+        joined = sorted(
+            m.role for m in state.memberships if m.member == name and m.role in selected
+        )
+        if joined:
+            principals.setdefault(name, {"type": "builtin"})["member_of"] = joined
     notes += unmanaged_notes(unmanaged, "left out")
 
     defaults: dict[tuple[str, str, str], dict[str, set[str]]] = defaultdict(
@@ -142,8 +222,12 @@ def build(
     )
     allowed = DEFAULT_PRIVILEGE_TYPES[engine]
     for d in state.default_privileges:
-        if d.grantee not in selected or (in_scope and d.schema not in in_scope):
+        if d.grantee not in selected and d.grantee not in builtins:
             continue
+        if (in_scope and d.schema not in in_scope) or d.schema in platform_schemas:
+            continue
+        if state.acts_as is not None and d.owner not in state.acts_as:
+            continue  # another's (Supabase's supabase_admin): the plan leaves it
         if d.object_type not in allowed:
             notes.append(
                 f"default privileges of {d.owner} on {d.object_type} for {d.grantee}: "
@@ -194,7 +278,7 @@ def build(
                 for name in [*column.get("unmasked", []), *column.get("roles", {})]:
                     if name not in principals:
                         principals[name] = {"type": "builtin"}  # referred to
-    if state.policies:
+    if any(t.split(".", 1)[0] not in platform_schemas for t, _ in state.policies):
         notes.append("row-level security isn't imported yet; add it by hand")
     notes += public_create_notes(state, schemas)
     return spec, sorted(set(notes))
@@ -329,6 +413,60 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
                 "unmasked, where pgsesame uses its own sesame_unmasked_* policies"
             )
     return {"policies": written, "columns": columns}
+
+
+def _builtins(
+    state: State,
+    selected: list[str],
+    imported: set[Privilege],
+    platform_roles: set[str],
+    kept: Callable[[Privilege], bool],
+) -> dict[str, set[Privilege]]:
+    """Return the roles written as built-in for their grants, and those grants.
+
+    Supabase's Data API roles, for their grants outside its schemas; and whoever
+    else may execute a function the selected roles may, PUBLIC included, as a plan
+    takes every grant on a function the spec names as declared. A built-in role's
+    grants are managed in the schemas its privileges name, so all of its grants
+    there are written, which may name more functions: repeated until nothing grows.
+    """
+    out: dict[str, set[Privilege]] = {
+        name: {p for p in state.privileges if p.grantee == name and kept(p)}
+        for name in SUPABASE_API_ROLES
+        if name in platform_roles
+    }
+    while True:
+        named = {
+            p.object_name
+            for p in imported.union(*out.values())
+            if p.object_type == "functions"
+        }
+        before = sum(len(grants) for grants in out.values())
+        for p in state.privileges:
+            role = state.roles.get(p.grantee)
+            if (
+                p.object_type == "functions"
+                and p.object_name in named
+                and p.grantee not in selected
+                and not (role and role.superuser)
+                and kept(p)
+            ):
+                out.setdefault(p.grantee, set()).add(p)
+        for name, grants in out.items():
+            schemas = {_schema(p) for p in grants} - {None}
+            databases = {p.object_name for p in grants if p.object_type == "databases"}
+            grants |= {
+                p
+                for p in state.privileges
+                if p.grantee == name
+                and kept(p)
+                and (
+                    _schema(p) in schemas
+                    or (p.object_type == "databases" and p.object_name in databases)
+                )
+            }
+        if sum(len(grants) for grants in out.values()) == before:
+            return out
 
 
 def dump(spec: dict[str, Any], source: str) -> str:

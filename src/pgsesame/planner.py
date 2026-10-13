@@ -4,7 +4,7 @@ The spec's principals are managed; every other role is left alone. For a managed
 principal, its login attribute, its memberships and every privilege it holds on
 the object types pgsesame reads are compared with the spec, and each difference
 becomes one operation. ``schema.*`` expands to the objects of that type the schema
-has now; future objects are for default privileges (a later milestone).
+has now; future objects are for default privileges.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 
 from pgsesame.ops import (
     AddMember,
+    AddToPublication,
+    RemoveFromPublication,
     AlterOwner,
     AlterPolicy,
     CreatePolicy,
@@ -39,7 +41,15 @@ from pgsesame.spec import PRIVILEGES, Spec
 from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
-PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences", "columns")
+PLANNED_TYPES = (
+    "databases",
+    "schemas",
+    "tables",
+    "views",
+    "sequences",
+    "columns",
+    "functions",
+)
 
 
 class PlanError(Exception):
@@ -91,7 +101,7 @@ def desired(
             existing = current.objects.get(kind, set())
             for privilege, patterns in grants.items():
                 for pattern in patterns:
-                    matched = _expand(pattern, existing)
+                    matched = _expand(pattern, existing, kind)
                     if not matched and not pattern.endswith(".*"):
                         missing.append(
                             f"principals.{name}.privileges.{kind}.{privilege}: "
@@ -103,12 +113,21 @@ def desired(
     return memberships, privileges, missing
 
 
-def _expand(pattern: str, existing: set[str]) -> set[str]:
-    """Return the objects a pattern names: ``schema.*`` or one name, if it exists."""
+def _expand(pattern: str, existing: set[str], kind: str = "") -> set[str]:
+    """Return the objects a pattern names: ``schema.*`` or one name, if it exists.
+
+    A function is ``schema.name(types)``: ``schema.name`` names every overload,
+    and the types compare with spaces ignored.
+    """
     if pattern.endswith(".*"):
         schema = pattern[:-2]
         return {obj for obj in existing if obj.split(".", 1)[0] == schema}
-    return {pattern} & existing
+    if kind != "functions":
+        return {pattern} & existing
+    if "(" in pattern:
+        spaced = pattern.replace(" ", "")
+        return {obj for obj in existing if obj.replace(" ", "") == spaced}
+    return {obj for obj in existing if obj.split("(", 1)[0] == pattern}
 
 
 Normalized = dict[tuple[str, str], tuple[str | None, str | None]]
@@ -260,10 +279,16 @@ def make(
                 "is revoked with --allow-revoke"
             )
 
-    # a built-in role's own memberships are the platform's: never managed
+    # a built-in role's memberships are the platform's, but for those in the
+    # spec's own roles (Supabase's authenticator joins the roles JWTs name)
     members = managed - builtins
-    want_members = {m for m in want_members if m.member in members}
-    have_members = {m for m in current.memberships if m.member in members}
+    own = set(spec.principals) - builtins
+    want_members = {m for m in want_members if m.member in managed}
+    have_members = {
+        m
+        for m in current.memberships
+        if m.member in members or (m.member in managed and m.role in own)
+    }
     for m in sorted(want_members - have_members):
         plan.operations.append(
             AddMember(
@@ -283,27 +308,36 @@ def make(
             )
         )
 
+    # a built-in role's privileges are managed only where the spec speaks for it:
+    # the schemas (and databases) its privileges name. Elsewhere they are the
+    # platform's (Supabase grants anon and authenticated a lot in public), and
+    # left alone without a word
+    scope = {name: _scope(spec.principals[name]) for name in builtins}
+    # a function the spec grants on is declared in full: who may execute it is
+    # what the spec says, whether the grantee is declared or not, so the EXECUTE
+    # PostgreSQL gives PUBLIC by default, and Supabase gives anon and
+    # authenticated, is drift there
+    named = {p.object_name for p in want_privileges if p.object_type == "functions"}
     held = {
         p
         for p in current.privileges
-        if p.grantee in managed and p.object_type in PLANNED_TYPES
+        if (
+            p.grantee in managed
+            and p.object_type in PLANNED_TYPES
+            and (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
+        )
+        or (
+            p.object_type == "functions"
+            and p.object_name in named
+            and not _superuser(current, p.grantee)  # it executes anything anyway
+        )
     }
     # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
     # is reported and left in place: never planned, never revoked, never fatal
     known = PRIVILEGES[spec.engine]
     unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
     plan.notes += unmanaged_notes(unknown, "left as they are")
-    # a built-in role's privileges are managed only where the spec speaks for it:
-    # the schemas (and databases) its privileges name. Elsewhere they are the
-    # platform's (Supabase grants anon and authenticated a lot in public), and
-    # left alone without a word
-    scope = {name: _scope(spec.principals[name]) for name in builtins}
-    have_privileges = {
-        p
-        for p in held - unknown
-        if (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
-        and _in_managed_schemas(p, spec)
-    }
+    have_privileges = {p for p in held - unknown if _in_managed_schemas(p, spec)}
     want_privileges = {p for p in want_privileges if p.grantee in managed}
 
     # ownership: each object a principal owns goes to it; an owner's privileges
@@ -357,7 +391,7 @@ def make(
         """Return whether one of the spec's default privileges gave this grant."""
         # ON TABLES covers views too
         kind = "tables" if p.object_type == "views" else p.object_type
-        if kind not in ("tables", "sequences", "schemas"):
+        if kind not in ("tables", "sequences", "functions", "schemas"):
             return False
         schema = p.object_name.split(".", 1)[0]
         owner = owner_of.get((p.object_type, p.object_name))
@@ -409,7 +443,7 @@ def make(
     if spec.engine == "dsql":
         plan.operations += _plan_iam(spec, current, managed - builtins)
     defaults = _plan_defaults(
-        spec, current, identity, problems, managed - builtins, plan.notes
+        spec, current, identity, problems, managed, scope, plan.notes
     )
     if redshift:
         defaults = _owners_can_create(
@@ -421,7 +455,10 @@ def make(
             plan.warnings,
         )
     plan.operations += defaults
-    plan.operations += _plan_rls(spec, current, normalized or {}, problems)
+    plan.operations += _plan_rls(
+        spec, current, normalized or {}, problems, plan.warnings
+    )
+    plan.operations += _plan_publications(spec, current, problems, plan.warnings)
     if spec.masking is not None:
         plan.operations += masking.plan(
             spec,
@@ -434,16 +471,102 @@ def make(
     if problems:
         raise PlanError(problems)
 
-    for name, p in spec.principals.items():
-        unplanned = sorted(set(p.privileges) - set(PLANNED_TYPES))
-        if unplanned:
-            plan.notes.append(
-                f"{name}: privileges on {', '.join(unplanned)} are planned from a "
-                "later milestone"
-            )
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
+    if spec.engine == "postgres":
+        plan.warnings += _exposed(spec, current, plan.operations)
     return plan
+
+
+# the role Supabase's Data API signs in as, and what reads or writes a table's rows
+API_ROLE = "authenticator"
+_ROW_PRIVILEGES = ("select", "insert", "update", "delete")
+
+
+def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[str]:
+    """Warn where the Data API reaches rows past row-level security.
+
+    Supabase's Data API (PostgREST) signs in as ``authenticator`` and switches to
+    one of its roles: anon, authenticated, a custom JWT role. Anyone with the
+    project's anon key acts as one, so, once the plan has run, a table with
+    row-level security off, or a view that runs with its owner's rights, that such
+    a role can read or write in a schema it can use is said. A role that bypasses
+    row-level security (service_role) is the server's, and the platform's own
+    tables are its business: only what the connected user can change is said.
+    """
+    joins = {m for m in current.memberships if m.member == API_ROLE}
+    joins |= {
+        Membership(op.member, op.role)
+        for op in operations
+        if isinstance(op, AddMember) and op.member == API_ROLE
+    }
+    api = {
+        m.role
+        for m in joins
+        if not (
+            (role := current.roles.get(m.role)) and (role.superuser or role.bypassrls)
+        )
+    }
+    held = {p for p in current.privileges if p.grantee in api or p.grantee == "public"}
+    rls = {table: enabled for table, (enabled, _) in current.rls.items()}
+    for op in operations:
+        if isinstance(op, (Grant, Revoke)):
+            p = Privilege(op.grantee, op.object_type, op.object_name, op.privilege)
+            if isinstance(op, Grant):
+                held.add(p)
+            else:
+                held.discard(p)
+        elif isinstance(op, (EnableRowSecurity, DisableRowSecurity)):
+            rls[op.table] = isinstance(op, EnableRowSecurity)
+    usable = {
+        (p.grantee, p.object_name)
+        for p in held
+        if p.object_type == "schemas" and p.privilege == "usage"
+    }
+    reach: dict[str, dict[str, set[str]]] = {}
+    for p in held:
+        if p.object_type not in ("tables", "views", "columns"):
+            continue
+        if p.privilege not in _ROW_PRIVILEGES:
+            continue
+        relation = (
+            p.object_name.rsplit(".", 1)[0]
+            if p.object_type == "columns"
+            else p.object_name
+        )
+        schema = relation.split(".", 1)[0]
+        # what PUBLIC holds, every API role holds, as it does PUBLIC's USAGE
+        if p.grantee == "public":
+            who = "PUBLIC"
+            users = api | {"public"}
+        elif p.grantee in api:
+            who = p.grantee
+            users = {p.grantee, "public"}
+        else:
+            continue
+        if any((user, schema) in usable for user in users):
+            reach.setdefault(relation, {}).setdefault(who, set()).add(p.privilege)
+    warnings = []
+    for relation, by in sorted(reach.items()):
+        who = ", ".join(
+            f"{name} ({', '.join(sorted(privileges)).upper()})"
+            for name, privileges in sorted(by.items())
+        )
+        switchable = (
+            current.rls_switchable is None or relation in current.rls_switchable
+        )
+        if rls.get(relation) is False and switchable:
+            warnings.append(
+                f"{relation}: row-level security is off, and {who} can reach it: "
+                "every row is open to them"
+            )
+        elif relation in current.definer_views:
+            warnings.append(
+                f"{relation}: {who} can reach this view, which runs with its owner's "
+                "rights, past the row-level security of the tables it reads "
+                "(security_invoker = true makes it run with theirs)"
+            )
+    return warnings
 
 
 def _scope(principal) -> tuple[set[str], set[str]]:
@@ -473,21 +596,44 @@ def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
 
 
 def _plan_rls(
-    spec: Spec, current: State, normalized: Normalized, problems: list[str]
+    spec: Spec,
+    current: State,
+    normalized: Normalized,
+    problems: list[str],
+    warnings: list[str],
 ) -> list[Operation]:
-    """Plan row-level security for the tables the spec lists; others are left alone."""
+    """Plan row-level security for the tables the spec lists; others are left alone.
+
+    Only a table's owner switches its row-level security; on a table the connected
+    user can't act as the owner of (a platform's, such as Supabase's
+    storage.objects) a switch is warned about and skipped, and its policies are
+    still planned.
+    """
     ops: list[Operation] = []
     for table, rls in sorted(spec.row_level_security.items()):
         if table not in current.rls:
             problems.append(f"row_level_security.{table}: the table does not exist")
             continue
         enabled, forced = current.rls[table]
+        switches: list[Operation] = []
         if rls.enabled and not enabled:
-            ops.append(EnableRowSecurity(table=table))
+            switches.append(EnableRowSecurity(table=table))
         elif enabled and not rls.enabled:
-            ops.append(DisableRowSecurity(table=table))
+            switches.append(DisableRowSecurity(table=table))
         if rls.force != forced:
-            ops.append(ForceRowSecurity(table=table, force=rls.force))
+            switches.append(ForceRowSecurity(table=table, force=rls.force))
+        if switches and not (
+            current.rls_switchable is None or table in current.rls_switchable
+        ):
+            owner = current.owners.get(("tables", table), "another role")
+            warnings.append(
+                f"row_level_security.{table}: owned by {owner}, which the connected "
+                "user can't act as, so only it switches row-level security "
+                f"(enabled: {str(enabled).lower()}, force: {str(forced).lower()}); "
+                "skipped, its policies are still planned"
+            )
+            switches = []
+        ops += switches
         for name, p in sorted(rls.policies.items()):
             roles = tuple(sorted(p.to))
             using, check = normalized.get((table, name), (p.using, p.with_check))
@@ -524,6 +670,51 @@ def _plan_rls(
         for (policy_table, name), _ in sorted(current.policies.items()):
             if policy_table == table and name not in rls.policies:
                 ops.append(DropPolicy(table=table, name=name))
+    return ops
+
+
+def _plan_publications(
+    spec: Spec, current: State, problems: list[str], warnings: list[str]
+) -> list[Operation]:
+    """Plan the tables of the publications the spec lists; others are left alone.
+
+    pgsesame never creates or drops a publication. One FOR ALL TABLES has no list
+    to manage; one the connected user can't act as the owner of is warned about
+    and skipped, as only its owner changes it.
+    """
+    ops: list[Operation] = []
+    tables = current.objects.get("tables", set())
+    for name, publication in sorted(spec.publications.items()):
+        where = f"publications.{name}"
+        if name not in current.publications:
+            problems.append(f"{where}: the publication does not exist")
+            continue
+        owner, all_tables = current.publications[name]
+        if all_tables:
+            problems.append(f"{where}: FOR ALL TABLES, so it has no tables to list")
+            continue
+        want: set[str] = set()
+        for pattern in publication.tables:
+            matched = _expand(pattern, tables)
+            if not matched and not pattern.endswith(".*"):
+                warnings.append(f"{where}.tables: {pattern} does not exist; skipped")
+            want |= matched
+        have = {table for pub, table in current.publication_tables if pub == name}
+        changes: list[Operation] = [
+            AddToPublication(publication=name, table=table)
+            for table in sorted(want - have)
+        ]
+        changes += [
+            RemoveFromPublication(publication=name, table=table)
+            for table in sorted(have - want)
+        ]
+        if changes and current.acts_as is not None and owner not in current.acts_as:
+            warnings.append(
+                f"{where}: owned by {owner}, which the connected user can't act as, "
+                "so only it changes the tables; skipped"
+            )
+            continue
+        ops += changes
     return ops
 
 
@@ -568,12 +759,15 @@ def _plan_defaults(
     identity,
     problems: list[str],
     managed: set[str],
+    scope: dict[str, tuple[set[str], set[str]]],
     notes: list[str],
 ) -> list[Operation]:
     """Plan default privileges: what the spec's principals get on future objects.
 
     Managed: every entry whose grantee the spec declares, whoever the owner is.
-    An entry for another grantee is someone else's and left alone.
+    An entry for another grantee is someone else's and left alone. A built-in
+    role's entries are managed only in the schemas the spec names for it: those
+    its privileges name, and those of its own rules ("" for every schema).
     """
     want: set[DefaultGrant] = set()
     for i, rule in enumerate(spec.default_privileges):
@@ -591,10 +785,19 @@ def _plan_defaults(
                     )
                 )
     schemas = set(spec.manage.schemas)
+    builtin_schemas = {name: set(s) for name, (s, _) in scope.items()}
+    for rule in spec.default_privileges:
+        if rule.grantee in builtin_schemas:
+            builtin_schemas[rule.grantee].add(rule.in_schema or "")
+    # only an owner, or a role acting as it, changes its default privileges: those
+    # of another (Supabase's supabase_admin) are left alone
     have = {
         d
         for d in current.default_privileges
-        if d.grantee in managed and (not schemas or d.schema in schemas)
+        if d.grantee in managed
+        and (not schemas or d.schema in schemas)
+        and (d.grantee not in scope or d.schema in builtin_schemas[d.grantee])
+        and (current.acts_as is None or d.owner in current.acts_as)
     }
     have = {
         d
@@ -741,6 +944,12 @@ def unmanaged_notes(privileges: set[Privilege], outcome: str) -> list[str]:
             f"{count} {said} ({examples}{more})"
         )
     return notes
+
+
+def _superuser(current: State, name: str) -> bool:
+    """Return whether a role is a superuser on the server."""
+    role = current.roles.get(name)
+    return role is not None and role.superuser
 
 
 def _system_role(name: str) -> bool:

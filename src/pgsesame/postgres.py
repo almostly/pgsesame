@@ -9,6 +9,8 @@ grants are read to warn about, CREATE above all). System schemas
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pgsesame.db import Connection, Database
 from pgsesame.spec import Spec
 from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
@@ -100,6 +102,43 @@ where a.attnum > 0 and not a.attisdropped and {_USER_SCHEMA}
   and x.grantee <> c.relowner
 """
 
+# functions and procedures, named as GRANT names them: schema.name(argument types),
+# the types as PostgreSQL writes them; an extension's own are left out
+_FUNCTION_NAME = (
+    "n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')'"
+)
+_USER_FUNCTION = f"""p.prokind in ('f', 'p') and {_USER_SCHEMA}
+  and not exists (select from pg_depend d
+                  where d.classid = 'pg_proc'::regclass and d.objid = p.oid
+                    and d.deptype = 'e')"""
+
+FUNCTIONS = f"""
+select {_FUNCTION_NAME}
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where {_USER_FUNCTION}
+"""
+
+# a function without an ACL has PostgreSQL's default, EXECUTE for PUBLIC, which
+# acldefault spells out so a spec can take it away
+FUNCTION_PRIVILEGES = f"""
+select coalesce(g.rolname, 'public'), {_FUNCTION_NAME}, lower(a.privilege_type),
+       a.is_grantable
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace,
+     aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+left join pg_roles g on g.oid = a.grantee
+where {_USER_FUNCTION} and a.grantee <> p.proowner
+"""
+
+FUNCTION_OWNERS = f"""
+select 'functions', {_FUNCTION_NAME}, r.rolname
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+join pg_roles r on r.oid = p.proowner
+where {_USER_FUNCTION}
+"""
+
 # owners: the current database, the user schemas, and their relations and sequences
 OWNERS = f"""
 select 'databases', d.datname, r.rolname
@@ -135,11 +174,42 @@ join pg_roles g on g.oid = a.grantee
 where a.grantee <> d.defaclrole
 """
 
+# views that run with their owner's rights, past the row-level security of what
+# they read (all of them before PostgreSQL 15, and since, those without
+# security_invoker), among those the connected user may change, as their owner;
+# an extension's own are left out
+DEFINER_VIEWS = f"""
+select n.nspname || '.' || c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
+  and not exists (select from pg_depend d
+                  where d.classid = 'pg_class'::regclass and d.objid = c.oid
+                    and d.deptype = 'e')
+  and not exists (select from unnest(c.reloptions) o
+                  where lower(o) in ('security_invoker=true', 'security_invoker=on',
+                                     'security_invoker=yes', 'security_invoker=1'))
+"""
+
 RLS_TABLES = f"""
 select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA}
+"""
+
+# the tables whose row-level security the connected user may switch: only as their
+# owner, which a platform's tables (Supabase's storage.objects) aren't
+RLS_SWITCHABLE = f"""
+select n.nspname || '.' || c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p') and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
+"""
+
+# roles row-level security never applies to
+BYPASS_RLS = """
+select rolname from pg_roles where rolbypassrls
 """
 
 POLICIES = """
@@ -149,6 +219,22 @@ from pg_policies
 where schemaname !~ '^pg_' and schemaname <> 'information_schema'
 """
 
+
+# the roles the connected user acts as (itself, those it inherits, or every one
+# for a superuser): only for them can it change default privileges
+ACTS_AS = """
+select rolname from pg_roles where pg_has_role(oid, 'USAGE')
+"""
+
+# publications, and the tables each sends the changes of (Supabase Realtime's)
+PUBLICATIONS = """
+select p.pubname, r.rolname, p.puballtables
+from pg_publication p join pg_roles r on r.oid = p.pubowner
+"""
+
+PUBLICATION_TABLES = """
+select pubname, schemaname || '.' || tablename from pg_publication_tables
+"""
 
 # whether the connected user may alter a role and grant it: a superuser always;
 # from PostgreSQL 16 on, only with ADMIN OPTION on it (the role's creator has it),
@@ -181,11 +267,13 @@ def _text_array(value: object) -> list[str]:
     return next(csv.reader([inner], quotechar='"', escapechar="\\"))
 
 
-def read(db: Connection, columns: bool = True) -> State:
+def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     """Return the current state of the database ``db`` is connected to.
 
     ``columns`` reads every column (to check the ones a spec grants on); without
-    it, column grants are still read.
+    it, column grants are still read. ``full`` also reads what only PostgreSQL's
+    plans use: functions, publications, views that run with their owner's rights,
+    and whom the connected user acts as (Aurora DSQL is read without).
     """
     state = State()
     for name, login, superuser in db.rows(ROLES):
@@ -218,12 +306,29 @@ def read(db: Connection, columns: bool = True) -> State:
         state.privileges.add(Privilege(grantee, "columns", name, privilege))
     for kind, name, owner in db.rows(OWNERS):
         state.owners[(kind, name)] = owner
+    if full:
+        state.objects["functions"] = {name for (name,) in db.rows(FUNCTIONS)}
+        for grantee, name, privilege, grantable in db.rows(FUNCTION_PRIVILEGES):
+            held(Privilege(grantee, "functions", name, privilege), grantable)
+        for kind, name, owner in db.rows(FUNCTION_OWNERS):
+            state.owners[(kind, name)] = owner
     for owner, schema, kind, grantee, privilege in db.rows(DEFAULT_PRIVILEGES):
         state.default_privileges.add(
             DefaultGrant(owner, schema, kind, grantee, privilege)
         )
     for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
+    if full:
+        state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
+        state.rls_switchable = {name for (name,) in db.rows(RLS_SWITCHABLE)}
+        for (name,) in db.rows(BYPASS_RLS):
+            state.roles[name] = replace(state.roles[name], bypassrls=True)
+        state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
+        for name, owner, all_tables in db.rows(PUBLICATIONS):
+            state.publications[name] = (owner, all_tables)
+        state.publication_tables = {
+            (name, table) for name, table in db.rows(PUBLICATION_TABLES)
+        }
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
         state.policies[(table, name)] = Policy(
             table,

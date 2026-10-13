@@ -140,11 +140,17 @@ sesame login prod --host db.example.com --user admin --database app   # asks for
 sesame login analytics --engine redshift --iam --workgroup analytics --database dev
 sesame login aurora --iam --rds my-cluster            # RDS or Aurora: an IAM token
 sesame login dsql --dsql abc123xyz                    # Aurora DSQL: an IAM token
+sesame login app --supabase abcdefghijklmnopqrst  # Supabase: its session pooler
 sesame targets                     # the saved targets; * marks the default
 sesame use prod                    # the default for plan and apply
 sesame plan permissions.yaml --target analytics
 sesame logout prod                 # forget it and its password
 ```
+
+`--supabase` takes a project ref and connects as `postgres` with TLS. With a
+personal access token in `SUPABASE_ACCESS_TOKEN`, as the Supabase CLI uses, it
+asks Supabase for the project's session pooler, which takes IPv4; without one it
+uses the direct connection, `db.<ref>.supabase.co`, which is IPv6 only.
 
 A target can instead take its password from an environment variable when it
 connects, so a `.env` file or a CI secret supplies it and nothing is stored:
@@ -186,6 +192,16 @@ sesame show changes.json                       # review it, no database needed
 sesame apply changes.json                      # run exactly that, or refuse if it's stale
 ```
 
+Where migrations change the database, as with Supabase's CLI and preview branches,
+a plan can be one: `--migration` writes it to a directory as
+`<UTC time>_pgsesame.sql`, for review and `supabase db push`. What apply runs only
+with a flag (revokes, drops, owner changes) is in it commented out, with the flag,
+and a plan that sets a password is refused, as the file is committed:
+
+```bash
+sesame plan permissions.yaml -t app --migration supabase/migrations
+```
+
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 
@@ -202,6 +218,20 @@ principals:
     type: builtin
     privileges:
       tables: {select: [reference.countries]}
+```
+
+A built-in role's memberships are the platform's too, but for the spec's own
+roles it joins (`member_of`, and only those). Supabase's Data API signs in as
+`authenticator` and switches to the role a request's JWT names, so a custom role
+needs granting to it:
+
+```yaml
+principals:
+  editor:  # a JWT with "role": "editor"
+    type: role
+  authenticator:
+    type: builtin
+    member_of: [editor]
 ```
 
 Row-level security is declared per table:
@@ -225,7 +255,70 @@ row_level_security:
 
 Policy expressions are compared in the form PostgreSQL stores them, so a re-plan
 after apply is empty; dropping a policy or disabling row-level security needs
-`--allow-drop`.
+`--allow-drop`. [examples/supabase](examples/supabase) puts it together for a
+Supabase app: its built-in roles, column grants, policies on `auth.uid()` and a
+dashboard's own login.
+
+Only a table's owner switches its row-level security. On a table the connected
+user can't act as the owner of, a change to `enabled` or `force` is warned about
+and skipped, and its policies are still planned. That is how Supabase's file
+storage works: `storage.objects` belongs to `supabase_storage_admin` with
+row-level security on, and `postgres` may add policies to it:
+
+```yaml
+row_level_security:
+  storage.objects:
+    policies:
+      avatars_own_folder:  # users/<their id>/... in the avatars bucket
+        command: select
+        to: [authenticated]
+        using: "bucket_id = 'avatars' and (select auth.uid())::text = (storage.foldername(name))[1]"
+```
+
+Realtime works the same way: policies on `realtime.messages` authorize Broadcast
+and Presence. Which tables send their changes to Postgres Changes subscribers is
+the `supabase_realtime` publication's list, which a spec can manage too
+(`publications`, on PostgreSQL). pgsesame never creates or drops a publication;
+taking a table out needs `--allow-revoke`:
+
+```yaml
+publications:
+  supabase_realtime:
+    tables: [app.posts]  # or app.* for every table in app
+```
+
+Where Supabase's Data API reaches rows past row-level security, the plan warns,
+whatever the spec says. The API signs in as `authenticator` and switches to one of
+its roles (anon, authenticated, a custom JWT role), so anyone with the project's
+anon key acts as one. Once the plan has run, a table with row-level security off,
+or a view that runs with its owner's rights (no `security_invoker`), that such a
+role can read or write is said; so are PUBLIC's grants, which every role holds. A
+role that bypasses row-level security (`service_role`) and the platform's own
+tables are left out:
+
+```
+! public.todos: row-level security is off, and anon (DELETE, INSERT, SELECT, UPDATE) can reach it: every row is open to them
+```
+
+On PostgreSQL, functions and procedures take EXECUTE. `schema.name` names every
+overload, `schema.name(types)` one of them, with the types as PostgreSQL writes
+them (`integer`, not `int`), and `schema.*` every function in the schema; an
+extension's functions are left out:
+
+```yaml
+principals:
+  supabase_auth_admin:  # Supabase's Auth hook
+    type: builtin
+    privileges:
+      schemas: {usage: [public]}
+      functions: {execute: [public.custom_access_token_hook]}
+```
+
+A function the spec names is declared in full: whoever may execute it, declared
+or not, is what the spec says. PostgreSQL lets PUBLIC execute every new function,
+and Supabase grants anon and authenticated the functions made in `public`; on a
+function the spec names, both are drift, revoked with `--allow-revoke`. Functions
+it doesn't name keep their grants.
 
 On Redshift, dynamic data masking is declared per column: what everyone sees,
 which roles see the raw value, and which see their own mask:
@@ -351,7 +444,15 @@ pgsesame's model (the PUBLIC mask, roles in priority order, unmasked roles), so
 where policies were attached another way, the first plan shows the correction;
 the import's notes say what changes. Without superuser or `sys:secadmin` it says
 it couldn't see the policies, rather than writing none. A role they refer to but that wasn't selected is
-written as `type: builtin`: referred to, never managed. The flags become the
+written as `type: builtin`: referred to, never managed. So is every other role
+that may execute a function the import names, PUBLIC included, with its grants in
+the same schemas, since a plan takes every grant on a named function as declared.
+
+On Supabase, the platform stays the platform's. Its roles are `type: builtin`:
+anon, authenticated and service_role with their grants in the app's schemas, and
+authenticator with the app's roles it joins (custom JWT roles). Its schemas (auth,
+storage, realtime, extensions ...) and the default privileges of roles postgres
+can't act as are left out, unless `--schema` names one. The flags become the
 spec's `manage:` section, which also works on its own:
 
 ```yaml

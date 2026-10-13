@@ -23,6 +23,7 @@ class Role:
     login: bool
     superuser: bool = False
     identity: Identity = "pg"
+    bypassrls: bool = False  # PostgreSQL: row-level security never applies to it
 
 
 @dataclass(frozen=True, order=True)
@@ -113,6 +114,15 @@ class State:
     public_privileges: set[Privilege] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    # publications: name -> (owner, FOR ALL TABLES), and the tables each has
+    publications: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    publication_tables: set[tuple[str, str]] = field(default_factory=set)
+    # views that run with their owner's rights (no security_invoker), of those the
+    # connected user may change
+    definer_views: set[str] = field(default_factory=set)
+    # the tables whose row-level security the connected user may switch (it acts
+    # as their owner); None: every table
+    rls_switchable: set[str] | None = None
     policies: dict[tuple[str, str], Policy] = field(default_factory=dict)
     # Redshift masking: policies, attachments, and the masked columns' types
     mask_policies: dict[str, MaskPolicy] = field(default_factory=dict)
@@ -127,3 +137,5 @@ class State:
     # the roles the connected user may alter and grant (ADMIN OPTION on PostgreSQL
     # 16+, any non-superuser with CREATEROLE before); None: every role
     administers: set[str] | None = None
+    # the roles the connected user acts as (PostgreSQL); None: every role
+    acts_as: set[str] | None = None

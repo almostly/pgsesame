@@ -10,6 +10,7 @@ into SQL text.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, cast
 
 from psycopg import sql
@@ -35,6 +36,7 @@ _ON = {
     "views": sql.SQL("TABLE"),
     "sequences": sql.SQL("SEQUENCE"),
     "columns": sql.SQL("TABLE"),
+    "functions": sql.SQL("ROUTINE"),  # a function or a procedure
 }
 _PRIVILEGE = {
     "alter": sql.SQL("ALTER"),
@@ -59,8 +61,32 @@ assert set(_PRIVILEGE) >= set().union(
 ), "every privilege the spec accepts needs its keyword here"
 
 
+# argument types as the catalog writes them: names, dots, quotes, [], spaces, commas
+_ARGUMENT_TYPES = re.compile(r'^[\w .,"\[\]]*$')
+
+
+def _routine(name: str) -> sql.Composed:
+    """Return ``ROUTINE s.f(types)`` for a function named ``s.f(types)``.
+
+    The types come from the catalog and are written as SQL, checked first: a name
+    is quoted, the types can't be.
+    """
+    schema, rest = name.split(".", 1)
+    routine, types = rest.split("(", 1)
+    types = types.removesuffix(")")
+    if not _ARGUMENT_TYPES.match(types):
+        raise ValueError(f"{name}: not a function's argument types")
+    return sql.SQL("{} {}({})").format(
+        _ON["functions"],
+        sql.Identifier(schema, routine),
+        sql.SQL(cast("LiteralString", types)),
+    )
+
+
 def _object(object_type: str, name: str) -> sql.Composed:
     """Return what a GRANT is ON: ``TABLE s.t``, ``SCHEMA s``; a column's table."""
+    if object_type == "functions":
+        return _routine(name)
     if object_type == "columns":  # the table a column grant is ON
         name = name.rsplit(".", 1)[0]
     parts = (
@@ -798,6 +824,38 @@ class ReattachMaskingPolicy(_Attachment):
         return _detach(self)
 
 
+class AddToPublication(Operation):
+    """Publish a table's changes (Supabase Realtime's supabase_realtime)."""
+
+    order: ClassVar[int] = 47  # after its row-level security is on
+    op: Literal["add_to_publication"] = "add_to_publication"
+    publication: str
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER PUBLICATION ... ADD TABLE."""
+        return sql.SQL("ALTER PUBLICATION {} ADD TABLE {}").format(
+            sql.Identifier(self.publication), _table(self.table)
+        )
+
+
+class RemoveFromPublication(Operation):
+    """Stop publishing a table's changes: its subscribers hear nothing more."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 39  # before anything else changes about the table
+    op: Literal["remove_from_publication"] = "remove_from_publication"
+    publication: str
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER PUBLICATION ... DROP TABLE."""
+        return sql.SQL("ALTER PUBLICATION {} DROP TABLE {}").format(
+            sql.Identifier(self.publication), _table(self.table)
+        )
+
+
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
     CreateRole
@@ -824,6 +882,8 @@ AnyOperation = Annotated[
     | DropMaskingPolicy
     | AttachMaskingPolicy
     | DetachMaskingPolicy
-    | ReattachMaskingPolicy,
+    | ReattachMaskingPolicy
+    | AddToPublication
+    | RemoveFromPublication,
     Field(discriminator="op"),
 ]

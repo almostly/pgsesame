@@ -36,7 +36,7 @@ def _state(*roles: Role, objects=None, **extra) -> State:
     return state
 
 
-def test_parts_not_planned_yet_are_noted_not_dropped_silently():
+def test_a_function_that_does_not_exist_is_warned_about_not_dropped_silently():
     loaded = spec.parse(
         {
             "version": 1,
@@ -55,7 +55,8 @@ def test_parts_not_planned_yet_are_noted_not_dropped_silently():
     )
     plan = planner.make(loaded, _state(objects={"schemas": {"analytics"}}))
     assert (
-        "fn: privileges on functions are planned from a later milestone" in plan.notes
+        "principals.fn.privileges.functions.execute: s.f does not exist; skipped"
+        in plan.warnings
     )
     # the default privilege is planned, for an owner the same plan creates
     assert [type(op).__name__ for op in plan.operations] == [
@@ -218,6 +219,48 @@ def test_a_builtin_roles_privileges_are_managed_only_where_the_spec_speaks():
     ]  # nothing in public, and its own membership is left alone
 
 
+def test_a_builtin_role_joins_the_specs_own_roles():
+    # Supabase's authenticator switches to the role a request's JWT names
+    loaded = _spec(
+        editor={"type": "role"},
+        authenticator={"type": "builtin", "member_of": ["editor"]},
+    )
+    current = _state(
+        Role("editor", False),
+        Role("auditor", False),
+        Role("authenticator", True),
+        Role("anon", False),
+        memberships={
+            Membership("authenticator", "anon"),  # the platform's: left alone
+            Membership("authenticator", "auditor"),  # not the spec's: left alone
+        },
+    )
+    (op,) = planner.make(loaded, current).operations
+    assert op.statement().as_string(None) == 'GRANT "editor" TO "authenticator"'
+
+    # leaving one of the spec's roles is drift
+    current.memberships.add(Membership("authenticator", "editor"))
+    unjoined = _spec(editor={"type": "role"}, authenticator={"type": "builtin"})
+    (op,) = planner.make(unjoined, current).operations
+    assert isinstance(op, RemoveMember) and op.needs == "revoke"
+
+
+def test_a_builtin_role_joins_only_the_specs_own_roles():
+    with pytest.raises(spec.SpecError) as err:
+        _spec(
+            anon={"type": "builtin"},
+            authenticator={"type": "builtin", "member_of": ["anon", "ghost"]},
+            public={"type": "builtin", "member_of": ["anon"]},
+        )
+    assert sorted(err.value.problems) == [
+        "principals.authenticator.member_of: anon is not one of the spec's own "
+        "roles; a built-in role joins only those",
+        "principals.authenticator.member_of: ghost is not one of the spec's own "
+        "roles; a built-in role joins only those",
+        "principals.public.member_of: PUBLIC joins no role",
+    ]
+
+
 def test_a_builtin_role_takes_only_privileges():
     with pytest.raises(spec.SpecError) as err:
         _spec(platform={"type": "builtin", "login": True, "member_of": []})
@@ -271,6 +314,23 @@ def test_row_level_security_is_planned_per_table():
     assert [type(op).__name__ for op in replaced] == ["DropPolicy", "CreatePolicy"]
     altered = planner.make(_rls_spec(using="false"), current).operations
     assert [type(op).__name__ for op in altered] == ["AlterPolicy"]
+
+
+def test_row_level_security_on_a_table_the_user_cant_own_plans_only_policies():
+    # Supabase's storage.objects: postgres may create policies on it, not switch
+    # its row-level security
+    current = _state(
+        Role("reader", False),
+        rls={"app.notes": (False, False)},
+        rls_switchable=set(),
+        owners={("tables", "app.notes"): "supabase_storage_admin"},
+    )
+    plan = planner.make(_rls_spec(), current)
+    assert [type(op).__name__ for op in plan.operations] == ["CreatePolicy"]
+    (warning,) = plan.warnings
+    assert warning.startswith(
+        "row_level_security.app.notes: owned by supabase_storage_admin"
+    )
 
 
 def test_row_level_security_problems():
@@ -503,6 +563,69 @@ def test_policies_outside_the_spec_are_left_alone():
     assert plan.operations == [DropMaskingPolicy(name="sesame_unmasked_int")]
 
 
+FUNCTIONS = {"functions": {"app.hook(jsonb)", "app.f(integer)", "app.f(text)"}}
+
+
+def _statements(plan) -> list[str]:
+    return [op.statement().as_string(None) for op in plan.operations]
+
+
+def test_a_function_name_covers_its_overloads_and_types_name_one():
+    plan = planner.make(
+        _spec(
+            a={"type": "role", "privileges": {"functions": {"execute": ["app.f"]}}},
+            b={
+                "type": "role",
+                "privileges": {"functions": {"execute": ["app.f( text )"]}},
+            },
+        ),
+        _state(Role("a", False), Role("b", False), objects=FUNCTIONS),
+    )
+    assert _statements(plan) == [
+        'GRANT EXECUTE ON ROUTINE "app"."f"(integer) TO "a"',
+        'GRANT EXECUTE ON ROUTINE "app"."f"(text) TO "a"',
+        'GRANT EXECUTE ON ROUTINE "app"."f"(text) TO "b"',
+    ]
+
+
+def test_a_function_the_spec_names_is_declared_in_full():
+    # Supabase's Auth hook: only supabase_auth_admin may execute it; PUBLIC's
+    # default EXECUTE and anon's (Supabase's default privileges) are drift, though
+    # the spec declares neither
+    s = _spec(
+        supabase_auth_admin={
+            "type": "builtin",
+            "privileges": {"functions": {"execute": ["app.hook"]}},
+        },
+    )
+    state = _state(
+        Role("supabase_auth_admin", False),
+        Role("anon", False),
+        objects=FUNCTIONS,
+        privileges={
+            Privilege("public", "functions", "app.hook(jsonb)", "execute"),
+            Privilege("anon", "functions", "app.hook(jsonb)", "execute"),
+            Privilege("anon", "functions", "app.f(integer)", "execute"),  # not named
+            Privilege("public", "functions", "app.f(text)", "execute"),  # not named
+        },
+    )
+    plan = planner.make(s, state)
+    assert _statements(plan) == [
+        'GRANT EXECUTE ON ROUTINE "app"."hook"(jsonb) TO "supabase_auth_admin"',
+        'REVOKE EXECUTE ON ROUTINE "app"."hook"(jsonb) FROM "anon"',
+        'REVOKE EXECUTE ON ROUTINE "app"."hook"(jsonb) FROM PUBLIC',
+    ]
+    assert {op.needs for op in plan.operations[1:]} == {"revoke"}
+
+
+def test_functions_on_dsql_are_refused():
+    with pytest.raises(spec.SpecError, match="functions aren't planned on Aurora"):
+        _spec(
+            "dsql",
+            a={"type": "role", "privileges": {"functions": {"execute": ["s.f"]}}},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Default privileges
 # ---------------------------------------------------------------------------
@@ -568,6 +691,42 @@ def test_default_privileges_of_other_grantees_are_left_alone():
     other = DefaultGrant("etl", "s", "tables", "someone_else", "select")
     mine = DefaultGrant("etl", "s", "tables", "reader", "select")
     assert planner.make(_defaults_spec(), _defaults_state(other, mine)).operations == []
+
+
+def test_a_builtin_roles_default_privileges_are_managed_where_the_spec_names_it():
+    from pgsesame.state import DefaultGrant
+
+    s = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {"service_role": {"type": "builtin"}},
+            "default_privileges": [
+                {
+                    "owner": "etl",
+                    "schema": "app",
+                    "grantee": "service_role",
+                    "tables": ["select"],
+                }
+            ],
+        }
+    )
+    state = _state(
+        Role("etl", True, False, "pg"),
+        Role("service_role", False, False, "pg"),
+        default_privileges={
+            DefaultGrant("etl", "app", "tables", "service_role", "select"),
+            DefaultGrant("etl", "app", "tables", "service_role", "delete"),
+            DefaultGrant("etl", "public", "tables", "service_role", "select"),
+        },
+    )
+    # converged in app (no endless re-grant), drift there revoked; the
+    # platform's entries in public are left alone
+    assert [
+        op.statement().as_string(None) for op in planner.make(s, state).operations
+    ] == [
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "etl" IN SCHEMA "app" REVOKE DELETE ON TABLES FROM "service_role"'
+    ]
 
 
 def test_an_owner_that_does_not_exist_stops_the_plan():
@@ -1238,3 +1397,167 @@ def test_default_privileges_are_revoked_before_any_privilege_is():
     from pgsesame.ops import Revoke, RevokeDefault
 
     assert RevokeDefault.order < Revoke.order
+
+
+def _exposure_state(*privileges: Privilege, api=("anon",), **extra) -> State:
+    # Supabase's Data API signs in as authenticator and switches to its roles
+    return _state(
+        Role("anon", False),
+        Role("service_role", False, bypassrls=True),
+        Role("authenticator", True),
+        objects={"schemas": {"public"}, "tables": {"public.todos"}},
+        rls={"public.todos": (False, False)},
+        memberships={Membership("authenticator", role) for role in api},
+        privileges=set(privileges),
+        **extra,
+    )
+
+
+USAGE = Privilege("anon", "schemas", "public", "usage")
+SELECT = Privilege("anon", "tables", "public.todos", "select")
+NO_SPEC = _spec()
+
+
+def test_a_table_the_data_api_reaches_without_row_level_security_is_warned_about():
+    (warning,) = planner.make(NO_SPEC, _exposure_state(USAGE, SELECT)).warnings
+    assert warning == (
+        "public.todos: row-level security is off, and anon (SELECT) can reach it: "
+        "every row is open to them"
+    )
+    # row-level security on (by the plan, here) closes it
+    rls = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "row_level_security": {"public.todos": {}},
+        }
+    )
+    assert planner.make(rls, _exposure_state(USAGE, SELECT)).warnings == []
+
+
+def test_what_public_holds_the_data_api_holds():
+    state = _exposure_state(
+        USAGE, Privilege("public", "tables", "public.todos", "select")
+    )
+    (warning,) = planner.make(NO_SPEC, state).warnings
+    assert "PUBLIC (SELECT) can reach it" in warning
+    # without the Data API, a table for everyone is nobody's business here
+    assert planner.make(NO_SPEC, _exposure_state(USAGE, SELECT, api=())).warnings == []
+
+
+def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change():
+    assert planner.make(NO_SPEC, _exposure_state(SELECT)).warnings == []
+    bypasses = _exposure_state(
+        Privilege("service_role", "schemas", "public", "usage"),
+        Privilege("service_role", "tables", "public.todos", "select"),
+        api=("service_role",),
+    )
+    assert planner.make(NO_SPEC, bypasses).warnings == []
+    platforms = _exposure_state(USAGE, SELECT, rls_switchable=set())
+    assert planner.make(NO_SPEC, platforms).warnings == []
+
+
+def test_a_view_that_runs_with_its_owners_rights_is_warned_about():
+    state = _exposure_state(
+        USAGE,
+        Privilege("anon", "views", "public.open_todos", "select"),
+        definer_views={"public.open_todos"},
+    )
+    (warning,) = planner.make(NO_SPEC, state).warnings
+    assert warning.startswith(
+        "public.open_todos: anon (SELECT) can reach this view, which runs with its "
+        "owner's rights"
+    )
+
+
+def _publication_spec(*tables):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "publications": {"supabase_realtime": {"tables": list(tables)}},
+        }
+    )
+
+
+def _publication_state(owner="postgres", all_tables=False, **extra) -> State:
+    return _state(
+        objects={"tables": {"app.posts", "app.drafts", "app.users"}},
+        publications={"supabase_realtime": (owner, all_tables)},
+        publication_tables={("supabase_realtime", "app.users")},
+        **extra,
+    )
+
+
+def test_a_publication_sends_the_tables_the_spec_lists():
+    plan = planner.make(_publication_spec("app.posts"), _publication_state())
+    assert _statements(plan) == [
+        'ALTER PUBLICATION "supabase_realtime" DROP TABLE "app"."users"',
+        'ALTER PUBLICATION "supabase_realtime" ADD TABLE "app"."posts"',
+    ]
+    assert plan.operations[0].needs == "revoke"
+    every = planner.make(_publication_spec("app.*"), _publication_state())
+    assert len(every.operations) == 2  # drafts and posts added, users kept
+
+
+def test_a_publication_another_role_owns_or_for_all_tables_is_not_changed():
+    plan = planner.make(
+        _publication_spec("app.posts"),
+        _publication_state(owner="supabase_admin", acts_as={"postgres"}),
+    )
+    assert plan.operations == []
+    assert plan.warnings[0].startswith(
+        "publications.supabase_realtime: owned by supabase_admin"
+    )
+    with pytest.raises(planner.PlanError, match="FOR ALL TABLES"):
+        planner.make(
+            _publication_spec("app.posts"), _publication_state(all_tables=True)
+        )
+    with pytest.raises(spec.SpecError, match="publications: PostgreSQL's"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {},
+                "publications": {"p": {"tables": ["a.b"]}},
+            }
+        )
+
+
+def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
+    # the catalog Aurora DSQL may not have: only PostgreSQL's plans read it
+    from typing import cast
+
+    from pgsesame import dsql, postgres
+    from pgsesame.db import Connection
+
+    class Recorder:
+        database = "postgres"
+
+        def __init__(self):
+            self.queries = []
+
+        def rows(self, query):
+            self.queries.append(query)
+            return []
+
+    full_only = {
+        postgres.ACTS_AS,
+        postgres.BYPASS_RLS,
+        postgres.DEFINER_VIEWS,
+        postgres.FUNCTIONS,
+        postgres.FUNCTION_OWNERS,
+        postgres.FUNCTION_PRIVILEGES,
+        postgres.PUBLICATIONS,
+        postgres.PUBLICATION_TABLES,
+        postgres.RLS_SWITCHABLE,
+    }
+    on_dsql = Recorder()
+    state = dsql.read(cast(Connection, on_dsql))
+    assert full_only.isdisjoint(on_dsql.queries)
+    assert (state.acts_as, state.rls_switchable) == (None, None)  # no limit known
+    on_postgres = Recorder()
+    postgres.read(cast(Connection, on_postgres))
+    assert full_only <= set(on_postgres.queries)

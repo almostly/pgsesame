@@ -281,3 +281,56 @@ def test_an_rds_login_keeps_the_user_given_and_the_engines_port(
     )
     assert code == 0, out
     assert targets.get("rs").port == 5439
+
+
+def test_a_supabase_login_finds_the_session_pooler(keychain, tmp_path, monkeypatch):
+    import io
+    import json
+
+    from pgsesame import supabase
+
+    ref = "abcdefghijklmnopqrst"
+    pools = [
+        {
+            "database_type": "PRIMARY",
+            "db_host": "aws-0-eu-west-1.pooler.supabase.com",
+            "db_port": 6543,
+            "db_user": f"postgres.{ref}",
+        }
+    ]
+    asked = []
+
+    def urlopen(request, timeout):
+        asked.append((request.full_url, request.get_header("Authorization")))
+        return io.BytesIO(json.dumps(pools).encode())
+
+    monkeypatch.setattr(supabase.urllib.request, "urlopen", urlopen)
+    monkeypatch.chdir(tmp_path)
+    args = ["login", "sb", "--supabase", ref, "--password-env", "PW", "--no-check"]
+
+    # without a token: the direct connection, which is IPv6 only
+    code, out = _sesame(*args)
+    assert code == 0 and "IPv6 only" in out, out
+    saved = targets.get("sb")
+    assert (saved.host, saved.user, saved.sslmode) == (
+        f"db.{ref}.supabase.co",
+        "postgres",
+        "require",
+    )
+    assert asked == []
+
+    # with one: the session pooler (5432, not the API's transaction-mode 6543)
+    code, out = _sesame(*args, env={supabase.TOKEN: "sbp_test"})
+    assert code == 0, out
+    saved = targets.get("sb")
+    assert (saved.host, saved.port, saved.user) == (
+        "aws-0-eu-west-1.pooler.supabase.com",
+        5432,
+        f"postgres.{ref}",
+    )
+    assert asked == [
+        (f"{supabase.API}/projects/{ref}/config/database/pooler", "Bearer sbp_test")
+    ]
+
+    code, out = _sesame("login", "bad", "--supabase", "Not-A-Ref", "--no-check")
+    assert code == 1 and "20 lowercase letters" in out, out

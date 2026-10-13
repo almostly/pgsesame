@@ -454,6 +454,48 @@ Done in 0.2.1 (2026-10-07), adoption:
 - Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
   the platform's admin role.
 
+0.3, Supabase:
+
+- Done: EXECUTE on PostgreSQL functions and procedures (`functions:`, objects named
+  `schema.name(types)`, `schema.name` for every overload). A function the spec
+  names is declared in full, so PUBLIC's default EXECUTE and Supabase's grants to
+  anon and authenticated are drift there; this is what an Auth hook needs. Tested
+  on PostgreSQL 14 and 17 and on Supabase. Not yet on Redshift or Aurora DSQL.
+- Done: storage policies. Policies on `storage.objects`, which
+  `supabase_storage_admin` owns, worked already; switching row-level security on
+  a table the connected user can't act as the owner of is now warned about and
+  skipped, where it failed the whole apply. Tested on Supabase.
+- Done: custom JWT roles. A built-in role may join the spec's own roles
+  (`member_of`, and only those), so `authenticator` can switch to a role a JWT
+  names; its memberships in the platform's roles stay the platform's. Tested on
+  Supabase.
+- Done: warnings where the Data API reaches rows past row-level security: a
+  table with it off, or a view without `security_invoker`, that a role
+  `authenticator` switches to (and doesn't bypass RLS) can read or write, PUBLIC's
+  grants included, after the plan. Only what the connected user can change.
+  Supabase keeps its exposed schemas outside the database, so reach is what
+  decides. Tested on Supabase.
+- Done: `sesame import` on a Supabase project. Its roles are written as built-in
+  (the Data API's with their grants in the app's schemas, authenticator with the
+  app's roles it joins), its schemas and the default privileges of roles postgres
+  can't act as left out; a plan leaves those default privileges alone too. Import
+  also writes whoever may execute a function it names, PUBLIC included, which a
+  plan otherwise revoked. On the test project: 64 lines instead of 820, and the
+  first plan is empty. Tested on Supabase.
+- Done: `sesame login --supabase <ref>`: the session pooler from the Management
+  API with `SUPABASE_ACCESS_TOKEN` (port 5432, session mode, not the 6543 it
+  reports), else the direct connection, which is IPv6 only. Tested on Supabase
+  over IPv4.
+- Done: a plan written as a migration (`sesame plan --migration
+  supabase/migrations`): `<UTC time>_pgsesame.sql`, what needs an --allow flag
+  commented out, a plan that sets a password refused. Tested on PostgreSQL and on
+  Supabase, the file run as `supabase db push` would.
+- Done: Realtime. Policies on `realtime.messages` worked already, as for storage;
+  a publication's tables are managed (`publications:`, PostgreSQL), never the
+  publication itself, removal behind `--allow-revoke`, and skipped with a warning
+  where the connected user can't act as its owner. Tested on PostgreSQL and on
+  Supabase's `supabase_realtime`.
+
 0.4:
 
 - Redshift's row-level security policies (PostgreSQL's are done in 0.2).

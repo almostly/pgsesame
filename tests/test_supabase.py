@@ -7,11 +7,14 @@ uses Supabase's ``authenticated``, as an app does.
 """
 
 import os
+import re
 import textwrap
 import uuid
+from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 from typer.testing import CliRunner
 
 from pgsesame.cli import app
@@ -100,3 +103,324 @@ def test_builtin_roles_and_row_level_security_on_supabase(project):
             ).fetchone()
             == public_grants
         )
+
+
+EXAMPLE = Path(__file__).parent.parent / "examples" / "supabase"
+
+
+def _example(text: str) -> str:
+    """The example in a schema and roles of the test's own, never a real app's."""
+    text = re.sub(r"\bapp\b", "sesame_example", text)
+    text = re.sub(r"\b(reporting|dashboard)\b", r"sesame_\1", text)
+    return text.replace("REFERENCES auth.users ON DELETE CASCADE", "")  # no sign-ups
+
+
+def _drop_example(conn):
+    conn.execute("DROP SCHEMA IF EXISTS sesame_example CASCADE")
+    conn.execute("DROP ROLE IF EXISTS sesame_dashboard")
+    conn.execute("DROP ROLE IF EXISTS sesame_reporting")
+
+
+@pytest.fixture
+def example(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", uuid.uuid4().hex)
+    spec = tmp_path / "permissions.yaml"
+    spec.write_text(_example((EXAMPLE / "permissions.yaml").read_text()))
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        _drop_example(conn)
+        conn.execute(_example((EXAMPLE / "schema.sql").read_text()).encode())
+        yield str(spec)
+        _drop_example(conn)
+
+
+def _posts_as(role: str, user_id: str = "") -> list:
+    with psycopg.connect(DSN) as conn:
+        conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(role)))
+        conn.execute(
+            "SELECT set_config('request.jwt.claims', %s, true)",
+            ('{"sub": "%s", "role": "%s"}' % (user_id, role),),
+        )
+        return conn.execute(
+            "SELECT title FROM sesame_example.posts ORDER BY 1"
+        ).fetchall()
+
+
+def test_the_supabase_example_applies_and_converges(example):
+    code, out = _sesame("plan", example, "--dsn", DSN)
+    assert code == 2, out
+    assert _sesame("apply", example, "--dsn", DSN)[0] == 0
+    code, out = _sesame("plan", example, "--dsn", DSN)
+    assert code == 0, out  # policies on (select auth.uid()) compare as stored
+
+    with psycopg.connect(DSN, autocommit=True) as conn:  # as the owner, past RLS
+        conn.execute(
+            "INSERT INTO sesame_example.profiles (id, username) "
+            "VALUES (%s, 'ann'), (%s, 'bob')",
+            (ANN, BOB),
+        )
+        conn.execute(
+            "INSERT INTO sesame_example.posts (author, title, published) "
+            "VALUES (%s, 'ann public', true), (%s, 'ann draft', false)",
+            (ANN, ANN),
+        )
+    assert _posts_as("anon") == [("ann public",)]
+    assert _posts_as("authenticated", ANN) == [("ann draft",), ("ann public",)]
+    assert _posts_as("authenticated", BOB) == [("ann public",)]
+    assert len(_posts_as("service_role")) == 2
+
+
+HOOK = """
+version: 1
+engine: postgres
+principals:
+  supabase_auth_admin:
+    type: builtin
+    privileges:
+      schemas:
+        usage: [sesame_sb]
+      functions:
+        execute: [sesame_sb.custom_access_token_hook]
+"""
+
+
+@pytest.fixture
+def hook(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
+        conn.execute("CREATE SCHEMA sesame_sb")
+        conn.execute(
+            "CREATE FUNCTION sesame_sb.custom_access_token_hook(event jsonb) "
+            "RETURNS jsonb LANGUAGE sql STABLE RETURN event"
+        )
+        conn.execute(  # as Supabase's default privileges do in public
+            "GRANT EXECUTE ON FUNCTION sesame_sb.custom_access_token_hook "
+            "TO anon, authenticated"
+        )
+        spec = tmp_path / "hook.yaml"
+        spec.write_text(textwrap.dedent(HOOK))
+        yield str(spec)
+        conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
+
+
+def test_an_auth_hook_only_supabase_auth_admin_may_execute(hook):
+    code, out = _sesame("plan", hook, "--dsn", DSN)
+    assert code == 2, out
+    routine = 'ROUTINE "sesame_sb"."custom_access_token_hook"(jsonb)'
+    assert f'+ GRANT EXECUTE ON {routine} TO "supabase_auth_admin"' in out
+    for grantee in ('"anon"', '"authenticated"', "PUBLIC"):
+        assert f"- REVOKE EXECUTE ON {routine} FROM {grantee}" in out, out
+    assert _sesame("apply", hook, "--dsn", DSN, "--allow-revoke")[0] == 0
+    code, out = _sesame("plan", hook, "--dsn", DSN)
+    assert code == 0, out
+
+    with psycopg.connect(DSN) as conn:
+        conn.execute("SET LOCAL ROLE authenticated")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT sesame_sb.custom_access_token_hook('{}')")
+
+
+STORAGE = """
+version: 1
+engine: postgres
+principals:
+  authenticated:
+    type: builtin
+row_level_security:
+  storage.objects:
+    enabled: {enabled}
+    policies:
+      sesame_test_own_files:
+        command: select
+        to: [authenticated]
+        using: "bucket_id = 'sesame-test' and (select auth.uid())::text = (storage.foldername(name))[1]"
+"""
+
+
+def _drop_storage_policy():
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute('DROP POLICY IF EXISTS "sesame_test_own_files" ON storage.objects')
+
+
+@pytest.fixture
+def storage(tmp_path):
+    _drop_storage_policy()
+    yield tmp_path
+    _drop_storage_policy()
+
+
+def test_storage_policies_without_switching_the_platforms_rls(storage):
+    # storage.objects is the whole project's: the test drops nothing but its own
+    # policy (no --allow-drop), and doesn't assume the project has no others
+    spec = storage / "storage.yaml"
+    spec.write_text(textwrap.dedent(STORAGE.format(enabled="true")))
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert '+ CREATE POLICY "sesame_test_own_files" ON "storage"."objects"' in out, out
+    assert _sesame("apply", str(spec), "--dsn", DSN)[0] == 0
+    assert "sesame_test_own_files" not in _sesame("plan", str(spec), "--dsn", DSN)[1]
+
+    # switching its row-level security is the platform's: warned about, skipped
+    spec.write_text(textwrap.dedent(STORAGE.format(enabled="false")))
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert "owned by supabase_storage_admin" in out, out
+    assert "DISABLE ROW LEVEL SECURITY" not in out
+
+
+JWT_ROLE = """
+version: 1
+engine: postgres
+principals:
+  sesame_test_editor:
+    type: role
+  authenticator:
+    type: builtin
+    member_of: [sesame_test_editor]
+"""
+
+
+@pytest.fixture
+def jwt_role(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+        spec = tmp_path / "jwt.yaml"
+        spec.write_text(textwrap.dedent(JWT_ROLE))
+        yield str(spec)
+        conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+
+
+def test_a_custom_role_a_jwt_can_name(jwt_role):
+    code, out = _sesame("plan", jwt_role, "--dsn", DSN)
+    assert '+ GRANT "sesame_test_editor" TO "authenticator"' in out, out
+    assert _sesame("apply", jwt_role, "--dsn", DSN)[0] == 0
+    code, out = _sesame("plan", jwt_role, "--dsn", DSN)
+    assert code == 0, out
+    with psycopg.connect(DSN) as conn:
+        assert conn.execute(
+            "SELECT pg_has_role('authenticator', 'sesame_test_editor', 'MEMBER')"
+        ).fetchone() == (True,)
+
+
+EXPOSURE = """
+version: 1
+engine: postgres
+principals:
+  anon:
+    type: builtin
+"""
+
+
+@pytest.fixture
+def leaky(tmp_path):
+    drop = "DROP VIEW IF EXISTS public.sesame_test_view; DROP TABLE IF EXISTS public.sesame_test_leaky"
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(drop)
+        # made in public, so Supabase's default privileges grant anon on both
+        conn.execute("CREATE TABLE public.sesame_test_leaky (secret text)")
+        conn.execute(
+            "CREATE VIEW public.sesame_test_view AS SELECT * FROM public.sesame_test_leaky"
+        )
+        spec = tmp_path / "exposure.yaml"
+        spec.write_text(textwrap.dedent(EXPOSURE))
+        yield str(spec)
+        conn.execute(drop)
+
+
+def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
+    code, out = _sesame("plan", leaky, "--dsn", DSN)
+    assert "public.sesame_test_leaky: row-level security is off, and anon" in out, out
+    assert "public.sesame_test_view: anon" in out and "owner's rights" in out, out
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("ALTER TABLE public.sesame_test_leaky ENABLE ROW LEVEL SECURITY")
+        conn.execute("ALTER VIEW public.sesame_test_view SET (security_invoker = true)")
+    code, out = _sesame("plan", leaky, "--dsn", DSN)
+    assert "sesame_test" not in out, out
+
+
+def _drop_imported(conn):
+    conn.execute("DROP FUNCTION IF EXISTS public.sesame_test_fn")
+    conn.execute("DROP TABLE IF EXISTS public.sesame_test_items")
+    conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+
+
+@pytest.fixture
+def app_objects():
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        _drop_imported(conn)
+        # made in public: Supabase's default privileges grant anon, authenticated
+        # and service_role, and PUBLIC keeps its default EXECUTE on the function
+        conn.execute("CREATE TABLE public.sesame_test_items (id int)")
+        conn.execute("CREATE FUNCTION public.sesame_test_fn() RETURNS int RETURN 1")
+        conn.execute("CREATE ROLE sesame_test_editor")
+        conn.execute("GRANT SELECT ON public.sesame_test_items TO sesame_test_editor")
+        conn.execute("GRANT sesame_test_editor TO authenticator")
+        yield
+        _drop_imported(conn)
+
+
+def test_import_leaves_the_platform_to_supabase(app_objects, tmp_path):
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import", "--dsn", DSN, "--prefix", "sesame_test_", "-o", str(imported)
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    assert "auth." not in text and "storage." not in text and "extensions." not in text
+    assert "  anon:\n    type: builtin" in text
+    assert "public.sesame_test_items" in text and "public.sesame_test_fn()" in text
+    assert (
+        "  authenticator:\n    type: builtin\n    member_of:\n    - sesame_test_editor"
+        in text
+    )
+    assert "supabase_admin" not in text
+    code, out = _sesame("plan", str(imported), "--dsn", DSN)
+    assert code == 0, out  # the project as it is: nothing to do
+
+
+def test_the_example_as_a_migration(example, tmp_path, monkeypatch):
+    # no password to set, so the plan can be a committed file
+    monkeypatch.delenv("DASHBOARD_PASSWORD")
+    migrations = tmp_path / "migrations"
+    code, out = _sesame("plan", example, "--dsn", DSN, "--migration", str(migrations))
+    assert code == 2, out
+    (written,) = migrations.glob("*_pgsesame.sql")
+    with psycopg.connect(DSN, autocommit=True) as conn:  # as supabase db push would
+        conn.execute(written.read_bytes())
+    code, out = _sesame("plan", example, "--dsn", DSN)
+    assert code == 0, out
+
+
+REALTIME = """
+version: 1
+engine: postgres
+principals: {}
+publications:
+  supabase_realtime:
+    tables: [sesame_rt.feed]
+"""
+
+
+@pytest.fixture
+def feed(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS sesame_rt CASCADE")
+        conn.execute("CREATE SCHEMA sesame_rt")
+        conn.execute("CREATE TABLE sesame_rt.feed (id int PRIMARY KEY)")
+        spec = tmp_path / "realtime.yaml"
+        spec.write_text(textwrap.dedent(REALTIME))
+        yield str(spec)
+        conn.execute(
+            "DROP SCHEMA IF EXISTS sesame_rt CASCADE"
+        )  # and from the publication
+
+
+def test_realtimes_publication(feed):
+    # the project's publication: no --allow-revoke, so no other table leaves it
+    code, out = _sesame("plan", feed, "--dsn", DSN)
+    added = '+ ALTER PUBLICATION "supabase_realtime" ADD TABLE "sesame_rt"."feed"'
+    assert added in out, out
+    assert _sesame("apply", feed, "--dsn", DSN)[0] == 0
+    assert added not in _sesame("plan", feed, "--dsn", DSN)[1]
+    with psycopg.connect(DSN) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM pg_publication_tables "
+            "WHERE pubname = 'supabase_realtime' AND schemaname = 'sesame_rt'"
+        ).fetchone() == (1,)

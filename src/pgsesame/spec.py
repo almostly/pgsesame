@@ -53,11 +53,15 @@ Identifier = Annotated[
 ]
 # an environment variable name, as a shell accepts it
 EnvVar = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
-# an object: name, schema.name, schema.* (every object of the type in schema), or
-# for columns schema.table.column (which parts a type takes is checked per type)
+# an object: name, schema.name, schema.* (every object of the type in schema), for
+# columns schema.table.column, or for a function schema.name(argument types)
+# (which parts a type takes is checked per type)
 ObjectPattern = Annotated[
     str,
-    StringConstraints(pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"),
+    StringConstraints(
+        pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"
+        r"|^[^.\x00(]+\.[^.\x00*(]+\([^\x00()]*\)$"
+    ),
 ]
 # every privilege name any engine knows; which apply to which engine and object
 # type is the second pass's job
@@ -265,6 +269,14 @@ class Masking(_Model):
     columns: dict[ColumnName, MaskedColumn] = Field(default_factory=dict)
 
 
+class Publication(_Model):
+    """The tables a publication sends the changes of (Supabase Realtime's)."""
+
+    tables: list[ObjectPattern] = Field(
+        default_factory=list, description="schema.table, or schema.* for every one."
+    )
+
+
 class Manage(_Model):
     """What else the spec takes charge of, or how far it reaches, for adoption."""
 
@@ -289,6 +301,10 @@ class Spec(_Model):
         default_factory=dict, description="Tables whose row-level security is managed."
     )
     masking: Masking | None = Field(None, description="Redshift dynamic data masking.")
+    publications: dict[Identifier, Publication] = Field(
+        default_factory=dict,
+        description="PostgreSQL publications whose tables are managed.",
+    )
     manage: Manage = Field(default_factory=Manage, description="Adoption scope.")
 
 
@@ -357,7 +373,6 @@ def _check(spec: Spec) -> list[str]:
                     "password",
                     "password_env",
                     "groups",
-                    "member_of",
                     "owns",
                 )
                 if getattr(p, key)
@@ -365,8 +380,20 @@ def _check(spec: Spec) -> list[str]:
             if owned:
                 problems.append(
                     f"{where}: a built-in role is referred to, not managed; only "
-                    f"privileges can be declared for it ({', '.join(owned)})"
+                    "privileges, and member_of the spec's own roles, can be "
+                    f"declared for it ({', '.join(owned)})"
                 )
+            # joining one of the spec's roles: Supabase's authenticator, which
+            # switches to the role a request's JWT names
+            for parent in p.member_of:
+                target = principals.get(parent)
+                if name == "public":
+                    problems.append(f"{where}.member_of: PUBLIC joins no role")
+                elif target is None or target.type == "builtin":
+                    problems.append(
+                        f"{where}.member_of: {parent} is not one of the spec's own "
+                        "roles; a built-in role joins only those"
+                    )
             continue
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")
@@ -397,8 +424,14 @@ def _check(spec: Spec) -> list[str]:
             ),
         ]:
             for pattern in patterns:
-                parts = pattern.split(".")
-                if kind == "columns" and (len(parts) != 3 or "*" in parts):
+                # a function's argument types may be schema-qualified
+                parts = pattern.split("(", 1)[0].split(".")
+                if kind == "functions" and len(parts) != 2:
+                    problems.append(
+                        f"{where}: {pattern}: a function is schema.name, "
+                        "schema.name(types) or schema.*"
+                    )
+                elif kind == "columns" and (len(parts) != 3 or "*" in parts):
                     problems.append(
                         f"{where}: {pattern}: a column is schema.table.column"
                     )
@@ -425,6 +458,11 @@ def _check(spec: Spec) -> list[str]:
                 problems.append(
                     f"{where}.owns: ownership isn't planned on Aurora DSQL (ALTER ... "
                     "OWNER needs SET ROLE on the new owner)"
+                )
+            if "functions" in p.privileges:
+                problems.append(
+                    f"{where}.privileges.functions: grants on functions aren't "
+                    "planned on Aurora DSQL yet"
                 )
         elif p.iam:
             problems.append(f"{where}.iam: IAM links are Aurora DSQL's (engine: dsql)")
@@ -498,6 +536,7 @@ def _check(spec: Spec) -> list[str]:
     if redshift:
         problems += _check_case(spec)
     problems += _check_rls(spec)
+    problems += _check_publications(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
     problems += _check_owners(spec)
@@ -575,6 +614,18 @@ def _check_rls(spec: Spec) -> list[str]:
             if not (policy.using or policy.with_check):
                 problems.append(f"{where}: needs using or with_check")
     return problems
+
+
+def _check_publications(spec: Spec) -> list[str]:
+    """Check the publications section: PostgreSQL's, and tables named schema.table."""
+    if spec.publications and spec.engine != "postgres":
+        return ["publications: PostgreSQL's (logical replication, Supabase Realtime)"]
+    return [
+        f"publications.{name}.tables: {table}: a table is schema.table or schema.*"
+        for name, publication in spec.publications.items()
+        for table in publication.tables
+        if table.count(".") != 1
+    ]
 
 
 def _check_masking(spec: Spec) -> list[str]:
