@@ -53,8 +53,11 @@ about 5 minutes. The two failures:
   gives its users passwords, and a spec listing a `password: disabled` user in
   `manage.superusers` is refused. That test, and the system permission one,
   then passed.
-- `test_data_api`: the free-tier `admin` user isn't allowed
+- `test_data_api`: the free-tier `admin` user wasn't allowed
   `redshift-data:BatchExecuteStatement`, which apply needs; not a code change.
+  With `redshift-data:*` added to its inline `RedshiftFullAccess` policy (the
+  user's inline policies are at IAM's 2,048-character limit, so not a statement
+  of its own), both tests in `test_aws.py` passed on a fresh stack.
 
 System permissions beyond redshift-local's, granted, compared and revoked as a
 spec says: `CREATE USER`, `ALTER USER`, `DROP USER`, `CREATE ROLE` and `ACCESS
