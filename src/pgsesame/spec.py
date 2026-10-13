@@ -53,11 +53,15 @@ Identifier = Annotated[
 ]
 # an environment variable name, as a shell accepts it
 EnvVar = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
-# an object: name, schema.name, schema.* (every object of the type in schema), or
-# for columns schema.table.column (which parts a type takes is checked per type)
+# an object: name, schema.name, schema.* (every object of the type in schema), for
+# columns schema.table.column, or for a function schema.name(argument types)
+# (which parts a type takes is checked per type)
 ObjectPattern = Annotated[
     str,
-    StringConstraints(pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"),
+    StringConstraints(
+        pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"
+        r"|^[^.\x00(]+\.[^.\x00*(]+\([^\x00()]*\)$"
+    ),
 ]
 # every privilege name any engine knows; which apply to which engine and object
 # type is the second pass's job
@@ -397,8 +401,14 @@ def _check(spec: Spec) -> list[str]:
             ),
         ]:
             for pattern in patterns:
-                parts = pattern.split(".")
-                if kind == "columns" and (len(parts) != 3 or "*" in parts):
+                # a function's argument types may be schema-qualified
+                parts = pattern.split("(", 1)[0].split(".")
+                if kind == "functions" and len(parts) != 2:
+                    problems.append(
+                        f"{where}: {pattern}: a function is schema.name, "
+                        "schema.name(types) or schema.*"
+                    )
+                elif kind == "columns" and (len(parts) != 3 or "*" in parts):
                     problems.append(
                         f"{where}: {pattern}: a column is schema.table.column"
                     )
@@ -425,6 +435,11 @@ def _check(spec: Spec) -> list[str]:
                 problems.append(
                     f"{where}.owns: ownership isn't planned on Aurora DSQL (ALTER ... "
                     "OWNER needs SET ROLE on the new owner)"
+                )
+            if "functions" in p.privileges:
+                problems.append(
+                    f"{where}.privileges.functions: grants on functions aren't "
+                    "planned on Aurora DSQL yet"
                 )
         elif p.iam:
             problems.append(f"{where}.iam: IAM links are Aurora DSQL's (engine: dsql)")

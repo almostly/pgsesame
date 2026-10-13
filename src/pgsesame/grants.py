@@ -60,15 +60,15 @@ def rows(spec: Spec, only: str | None = None) -> list[GrantRow]:
             for privilege, patterns in grants.items():
                 spelt = "temporary" if privilege == "temp" else privilege
                 for pattern in patterns:
-                    parts = pattern.split(".")
                     if object_type == "databases":
                         schema, obj, column = "", pattern, ""
                     elif object_type == "schemas":
                         schema, obj, column = pattern, pattern, ""
                     elif object_type == "columns":
-                        schema, obj, column = parts
-                    else:
-                        schema, obj, column = parts[0], parts[1], ""
+                        schema, obj, column = pattern.split(".")
+                    else:  # a function's argument types may hold dots
+                        schema, obj = pattern.split(".", 1)
+                        column = ""
                     out.add(
                         GrantRow(object_type, schema, obj, column, spelt, name, kind)
                     )

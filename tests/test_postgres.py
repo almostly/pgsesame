@@ -500,6 +500,78 @@ def test_column_privileges(dsn, tmp_path):
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
 
 
+FUNCTIONS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}caller:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+      functions:
+        execute: [analytics.score, analytics.refresh, "analytics.convert(analytics.cents)"]
+  {P}other:
+    type: role
+    privileges:
+      schemas:
+        usage: [analytics]
+default_privileges:
+  - owner: {P}owner
+    schema: analytics
+    grantee: {P}caller
+    functions: [execute]
+"""
+
+
+def test_function_privileges(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            f"""
+            CREATE ROLE {P}owner;
+            GRANT CREATE, USAGE ON SCHEMA analytics TO {P}owner;
+            CREATE DOMAIN analytics.cents AS bigint;
+            CREATE FUNCTION analytics.score(int) RETURNS int RETURN $1 * 2;
+            CREATE FUNCTION analytics.score(text) RETURNS int RETURN length($1);
+            CREATE FUNCTION analytics.convert(analytics.cents) RETURNS numeric
+                RETURN $1 / 100.0;
+            CREATE FUNCTION analytics.unnamed() RETURNS int RETURN 1;
+            CREATE PROCEDURE analytics.refresh() LANGUAGE sql BEGIN ATOMIC SELECT 1; END;
+            """
+        )
+    spec = _spec(tmp_path, FUNCTIONS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    for routine in (
+        '"analytics"."score"(integer)',
+        '"analytics"."score"(text)',
+        '"analytics"."refresh"()',
+        '"analytics"."convert"(analytics.cents)',
+    ):
+        # granted to the caller, and PostgreSQL's default EXECUTE for PUBLIC taken
+        assert f'+ GRANT EXECUTE ON ROUTINE {routine} TO "{P}caller"' in out, out
+        assert f"- REVOKE EXECUTE ON ROUTINE {routine} FROM PUBLIC" in out, out
+    assert "unnamed" not in out  # a function the spec doesn't name is left alone
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"SET ROLE {P}caller")
+        assert conn.execute(
+            "SELECT analytics.score(2), analytics.score('abc')"
+        ).fetchone() == (4, 3)
+        conn.execute("CALL analytics.refresh()")
+        conn.execute(f"SET ROLE {P}other")
+        assert conn.execute("SELECT analytics.unnamed()").fetchone() == (1,)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT analytics.score(1)")
+        # a function made later gets EXECUTE from the default privilege: not drift
+        conn.execute("RESET ROLE")
+        conn.execute(f"SET ROLE {P}owner")
+        conn.execute("CREATE FUNCTION analytics.later() RETURNS int RETURN 2")
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+
+
 ADMIN_LIMITS = f"""
 version: 1
 engine: postgres

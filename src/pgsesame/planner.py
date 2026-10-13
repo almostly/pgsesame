@@ -4,7 +4,7 @@ The spec's principals are managed; every other role is left alone. For a managed
 principal, its login attribute, its memberships and every privilege it holds on
 the object types pgsesame reads are compared with the spec, and each difference
 becomes one operation. ``schema.*`` expands to the objects of that type the schema
-has now; future objects are for default privileges (a later milestone).
+has now; future objects are for default privileges.
 """
 
 from __future__ import annotations
@@ -39,7 +39,15 @@ from pgsesame.spec import PRIVILEGES, Spec
 from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
-PLANNED_TYPES = ("databases", "schemas", "tables", "views", "sequences", "columns")
+PLANNED_TYPES = (
+    "databases",
+    "schemas",
+    "tables",
+    "views",
+    "sequences",
+    "columns",
+    "functions",
+)
 
 
 class PlanError(Exception):
@@ -91,7 +99,7 @@ def desired(
             existing = current.objects.get(kind, set())
             for privilege, patterns in grants.items():
                 for pattern in patterns:
-                    matched = _expand(pattern, existing)
+                    matched = _expand(pattern, existing, kind)
                     if not matched and not pattern.endswith(".*"):
                         missing.append(
                             f"principals.{name}.privileges.{kind}.{privilege}: "
@@ -103,12 +111,21 @@ def desired(
     return memberships, privileges, missing
 
 
-def _expand(pattern: str, existing: set[str]) -> set[str]:
-    """Return the objects a pattern names: ``schema.*`` or one name, if it exists."""
+def _expand(pattern: str, existing: set[str], kind: str = "") -> set[str]:
+    """Return the objects a pattern names: ``schema.*`` or one name, if it exists.
+
+    A function is ``schema.name(types)``: ``schema.name`` names every overload,
+    and the types compare with spaces ignored.
+    """
     if pattern.endswith(".*"):
         schema = pattern[:-2]
         return {obj for obj in existing if obj.split(".", 1)[0] == schema}
-    return {pattern} & existing
+    if kind != "functions":
+        return {pattern} & existing
+    if "(" in pattern:
+        spaced = pattern.replace(" ", "")
+        return {obj for obj in existing if obj.replace(" ", "") == spaced}
+    return {obj for obj in existing if obj.split("(", 1)[0] == pattern}
 
 
 Normalized = dict[tuple[str, str], tuple[str | None, str | None]]
@@ -298,10 +315,24 @@ def make(
     # platform's (Supabase grants anon and authenticated a lot in public), and
     # left alone without a word
     scope = {name: _scope(spec.principals[name]) for name in builtins}
+    # a function the spec grants on is declared in full: who may execute it is
+    # what the spec says, whether the grantee is declared or not, so the EXECUTE
+    # PostgreSQL gives PUBLIC by default, and Supabase gives anon and
+    # authenticated, is drift there
+    named = {p.object_name for p in want_privileges if p.object_type == "functions"}
+    held |= {
+        p
+        for p in current.privileges
+        if p.object_type == "functions" and p.object_name in named
+    }
     have_privileges = {
         p
         for p in held - unknown
-        if (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
+        if (
+            p.grantee not in scope
+            or _in_scope(p, scope[p.grantee])
+            or p.object_name in named
+        )
         and _in_managed_schemas(p, spec)
     }
     want_privileges = {p for p in want_privileges if p.grantee in managed}
@@ -357,7 +388,7 @@ def make(
         """Return whether one of the spec's default privileges gave this grant."""
         # ON TABLES covers views too
         kind = "tables" if p.object_type == "views" else p.object_type
-        if kind not in ("tables", "sequences", "schemas"):
+        if kind not in ("tables", "sequences", "functions", "schemas"):
             return False
         schema = p.object_name.split(".", 1)[0]
         owner = owner_of.get((p.object_type, p.object_name))
@@ -434,13 +465,6 @@ def make(
     if problems:
         raise PlanError(problems)
 
-    for name, p in spec.principals.items():
-        unplanned = sorted(set(p.privileges) - set(PLANNED_TYPES))
-        if unplanned:
-            plan.notes.append(
-                f"{name}: privileges on {', '.join(unplanned)} are planned from a "
-                "later milestone"
-            )
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     return plan

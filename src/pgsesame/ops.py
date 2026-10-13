@@ -10,6 +10,7 @@ into SQL text.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, cast
 
 from psycopg import sql
@@ -35,6 +36,7 @@ _ON = {
     "views": sql.SQL("TABLE"),
     "sequences": sql.SQL("SEQUENCE"),
     "columns": sql.SQL("TABLE"),
+    "functions": sql.SQL("ROUTINE"),  # a function or a procedure
 }
 _PRIVILEGE = {
     "alter": sql.SQL("ALTER"),
@@ -59,8 +61,32 @@ assert set(_PRIVILEGE) >= set().union(
 ), "every privilege the spec accepts needs its keyword here"
 
 
+# argument types as the catalog writes them: names, dots, quotes, [], spaces, commas
+_ARGUMENT_TYPES = re.compile(r'^[\w .,"\[\]]*$')
+
+
+def _routine(name: str) -> sql.Composed:
+    """Return ``ROUTINE s.f(types)`` for a function named ``s.f(types)``.
+
+    The types come from the catalog and are written as SQL, checked first: a name
+    is quoted, the types can't be.
+    """
+    schema, rest = name.split(".", 1)
+    routine, types = rest.split("(", 1)
+    types = types.removesuffix(")")
+    if not _ARGUMENT_TYPES.match(types):
+        raise ValueError(f"{name}: not a function's argument types")
+    return sql.SQL("{} {}({})").format(
+        _ON["functions"],
+        sql.Identifier(schema, routine),
+        sql.SQL(cast("LiteralString", types)),
+    )
+
+
 def _object(object_type: str, name: str) -> sql.Composed:
     """Return what a GRANT is ON: ``TABLE s.t``, ``SCHEMA s``; a column's table."""
+    if object_type == "functions":
+        return _routine(name)
     if object_type == "columns":  # the table a column grant is ON
         name = name.rsplit(".", 1)[0]
     parts = (

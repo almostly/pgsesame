@@ -454,6 +454,26 @@ Done in 0.2.1 (2026-10-07), adoption:
 - Managed PostgreSQL in CI: Supabase (`supabase start`) and AlloyDB Omni, run as
   the platform's admin role.
 
+0.3, Supabase:
+
+- Done: EXECUTE on PostgreSQL functions and procedures (`functions:`, objects named
+  `schema.name(types)`, `schema.name` for every overload). A function the spec
+  names is declared in full, so PUBLIC's default EXECUTE and Supabase's grants to
+  anon and authenticated are drift there; this is what an Auth hook needs. Tested
+  on PostgreSQL 14 and 17 and on Supabase. Not yet on Redshift or Aurora DSQL.
+- Storage policies: row-level security policies on `storage.objects`, a table the
+  platform owns, whose RLS switch pgsesame leaves alone.
+- Custom JWT roles: a role the spec declares granted to `authenticator`, the one
+  exception to a built-in role's memberships being the platform's.
+- Warnings: a table in an exposed schema anon or authenticated can reach without
+  row-level security; a view without `security_invoker` over one with it.
+- `sesame import` on a Supabase project: its own roles (`authenticator`,
+  `dashboard_user`, `pgbouncer`) left out.
+- `sesame login --supabase <ref>`: the session pooler, as the direct connection is
+  IPv6 only.
+- A plan written as a Supabase migration (`supabase/migrations/*.sql`).
+- Realtime: `realtime.messages` policies and the `supabase_realtime` publication.
+
 0.4:
 
 - Redshift's row-level security policies (PostgreSQL's are done in 0.2).

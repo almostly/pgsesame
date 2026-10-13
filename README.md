@@ -229,6 +229,26 @@ after apply is empty; dropping a policy or disabling row-level security needs
 Supabase app: its built-in roles, column grants, policies on `auth.uid()` and a
 dashboard's own login.
 
+On PostgreSQL, functions and procedures take EXECUTE. `schema.name` names every
+overload, `schema.name(types)` one of them, with the types as PostgreSQL writes
+them (`integer`, not `int`), and `schema.*` every function in the schema; an
+extension's functions are left out:
+
+```yaml
+principals:
+  supabase_auth_admin:            # Supabase's Auth hook
+    type: builtin
+    privileges:
+      schemas: {usage: [public]}
+      functions: {execute: [public.custom_access_token_hook]}
+```
+
+A function the spec names is declared in full: whoever may execute it, declared
+or not, is what the spec says. PostgreSQL lets PUBLIC execute every new function,
+and Supabase grants anon and authenticated the functions made in `public`; on a
+function the spec names, both are drift, revoked with `--allow-revoke`. Functions
+it doesn't name keep their grants.
+
 On Redshift, dynamic data masking is declared per column: what everyone sees,
 which roles see the raw value, and which see their own mask:
 

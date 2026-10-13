@@ -167,3 +167,53 @@ def test_the_supabase_example_applies_and_converges(example):
     assert _posts_as("authenticated", ANN) == [("ann draft",), ("ann public",)]
     assert _posts_as("authenticated", BOB) == [("ann public",)]
     assert len(_posts_as("service_role")) == 2
+
+
+HOOK = """
+version: 1
+engine: postgres
+principals:
+  supabase_auth_admin:
+    type: builtin
+    privileges:
+      schemas:
+        usage: [sesame_sb]
+      functions:
+        execute: [sesame_sb.custom_access_token_hook]
+"""
+
+
+@pytest.fixture
+def hook(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
+        conn.execute("CREATE SCHEMA sesame_sb")
+        conn.execute(
+            "CREATE FUNCTION sesame_sb.custom_access_token_hook(event jsonb) "
+            "RETURNS jsonb LANGUAGE sql STABLE RETURN event"
+        )
+        conn.execute(  # as Supabase's default privileges do in public
+            "GRANT EXECUTE ON FUNCTION sesame_sb.custom_access_token_hook "
+            "TO anon, authenticated"
+        )
+        spec = tmp_path / "hook.yaml"
+        spec.write_text(textwrap.dedent(HOOK))
+        yield str(spec)
+        conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
+
+
+def test_an_auth_hook_only_supabase_auth_admin_may_execute(hook):
+    code, out = _sesame("plan", hook, "--dsn", DSN)
+    assert code == 2, out
+    routine = 'ROUTINE "sesame_sb"."custom_access_token_hook"(jsonb)'
+    assert f'+ GRANT EXECUTE ON {routine} TO "supabase_auth_admin"' in out
+    for grantee in ('"anon"', '"authenticated"', "PUBLIC"):
+        assert f"- REVOKE EXECUTE ON {routine} FROM {grantee}" in out, out
+    assert _sesame("apply", hook, "--dsn", DSN, "--allow-revoke")[0] == 0
+    code, out = _sesame("plan", hook, "--dsn", DSN)
+    assert code == 0, out
+
+    with psycopg.connect(DSN) as conn:
+        conn.execute("SET LOCAL ROLE authenticated")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT sesame_sb.custom_access_token_hook('{}')")

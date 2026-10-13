@@ -36,7 +36,7 @@ def _state(*roles: Role, objects=None, **extra) -> State:
     return state
 
 
-def test_parts_not_planned_yet_are_noted_not_dropped_silently():
+def test_a_function_that_does_not_exist_is_warned_about_not_dropped_silently():
     loaded = spec.parse(
         {
             "version": 1,
@@ -55,7 +55,8 @@ def test_parts_not_planned_yet_are_noted_not_dropped_silently():
     )
     plan = planner.make(loaded, _state(objects={"schemas": {"analytics"}}))
     assert (
-        "fn: privileges on functions are planned from a later milestone" in plan.notes
+        "principals.fn.privileges.functions.execute: s.f does not exist; skipped"
+        in plan.warnings
     )
     # the default privilege is planned, for an owner the same plan creates
     assert [type(op).__name__ for op in plan.operations] == [
@@ -501,6 +502,72 @@ def test_policies_outside_the_spec_are_left_alone():
     plan = planner.make(_masking_spec(), state, masks={})
     assert "masking: policy someone_elses isn't in the spec; left alone" in plan.notes
     assert plan.operations == [DropMaskingPolicy(name="sesame_unmasked_int")]
+
+
+# ---------------------------------------------------------------------------
+# Functions
+# ---------------------------------------------------------------------------
+FUNCTIONS = {"functions": {"app.hook(jsonb)", "app.f(integer)", "app.f(text)"}}
+
+
+def _statements(plan) -> list[str]:
+    return [op.statement().as_string(None) for op in plan.operations]
+
+
+def test_a_function_name_covers_its_overloads_and_types_name_one():
+    plan = planner.make(
+        _spec(
+            a={"type": "role", "privileges": {"functions": {"execute": ["app.f"]}}},
+            b={
+                "type": "role",
+                "privileges": {"functions": {"execute": ["app.f( text )"]}},
+            },
+        ),
+        _state(Role("a", False), Role("b", False), objects=FUNCTIONS),
+    )
+    assert _statements(plan) == [
+        'GRANT EXECUTE ON ROUTINE "app"."f"(integer) TO "a"',
+        'GRANT EXECUTE ON ROUTINE "app"."f"(text) TO "a"',
+        'GRANT EXECUTE ON ROUTINE "app"."f"(text) TO "b"',
+    ]
+
+
+def test_a_function_the_spec_names_is_declared_in_full():
+    # Supabase's Auth hook: only supabase_auth_admin may execute it; PUBLIC's
+    # default EXECUTE and anon's (Supabase's default privileges) are drift, though
+    # the spec declares neither
+    s = _spec(
+        supabase_auth_admin={
+            "type": "builtin",
+            "privileges": {"functions": {"execute": ["app.hook"]}},
+        },
+    )
+    state = _state(
+        Role("supabase_auth_admin", False),
+        Role("anon", False),
+        objects=FUNCTIONS,
+        privileges={
+            Privilege("public", "functions", "app.hook(jsonb)", "execute"),
+            Privilege("anon", "functions", "app.hook(jsonb)", "execute"),
+            Privilege("anon", "functions", "app.f(integer)", "execute"),  # not named
+            Privilege("public", "functions", "app.f(text)", "execute"),  # not named
+        },
+    )
+    plan = planner.make(s, state)
+    assert _statements(plan) == [
+        'GRANT EXECUTE ON ROUTINE "app"."hook"(jsonb) TO "supabase_auth_admin"',
+        'REVOKE EXECUTE ON ROUTINE "app"."hook"(jsonb) FROM "anon"',
+        'REVOKE EXECUTE ON ROUTINE "app"."hook"(jsonb) FROM PUBLIC',
+    ]
+    assert {op.needs for op in plan.operations[1:]} == {"revoke"}
+
+
+def test_functions_on_dsql_are_refused():
+    with pytest.raises(spec.SpecError, match="functions aren't planned on Aurora"):
+        _spec(
+            "dsql",
+            a={"type": "role", "privileges": {"functions": {"execute": ["s.f"]}}},
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -15,8 +15,8 @@ IAM_LINKS = "select pg_role_name, arn from sys.iam_pg_role_mappings"
 
 
 def read(db: Connection, columns: bool = True) -> State:
-    """Return the database's state, IAM links included."""
-    state = postgres.read(db, columns)
+    """Return the database's state, IAM links included; functions aren't planned."""
+    state = postgres.read(db, columns, functions=False)
     state.iam_links = {(role, arn) for role, arn in db.rows(IAM_LINKS)}
     return state
 
