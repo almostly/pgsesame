@@ -424,3 +424,15 @@ def test_realtimes_publication(feed):
             "SELECT count(*) FROM pg_publication_tables "
             "WHERE pubname = 'supabase_realtime' AND schemaname = 'sesame_rt'"
         ).fetchone() == (1,)
+
+
+def test_superusers_are_the_platforms_on_supabase(tmp_path):
+    # supabase_admin is the platform's, and postgres isn't a superuser: nothing
+    # to warn about, and nothing a plan could change
+    spec = tmp_path / "superusers.yaml"
+    spec.write_text(
+        "version: 1\nengine: postgres\nprincipals: {}\nmanage:\n  superusers: []\n"
+    )
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert code == 0, out
+    assert "superuser" not in out

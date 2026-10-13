@@ -37,6 +37,7 @@ from pgsesame.ops import (
     RevokeDefault,
     RevokeSystem,
     SetAttribute,
+    SetSuperuser,
     GrantSystem,
 )
 from pgsesame import masking
@@ -76,10 +77,19 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
 
     def allowed(
-        self, allow_revoke: bool, allow_drop: bool, allow_owner: bool = False
+        self,
+        allow_revoke: bool,
+        allow_drop: bool,
+        allow_owner: bool = False,
+        allow_superuser: bool = False,
     ) -> list[Operation]:
         """Return the operations apply may run with these flags."""
-        gates = {"revoke": allow_revoke, "drop": allow_drop, "owner": allow_owner}
+        gates = {
+            "revoke": allow_revoke,
+            "drop": allow_drop,
+            "owner": allow_owner,
+            "superuser": allow_superuser,
+        }
         return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 
@@ -502,6 +512,7 @@ def make(
     if problems:
         raise PlanError(problems)
 
+    plan.operations += _plan_superusers(spec, current, plan, identity)
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     if spec.engine == "postgres":
@@ -702,6 +713,47 @@ def _plan_rls(
         for (policy_table, name), _ in sorted(current.policies.items()):
             if policy_table == table and name not in rls.policies:
                 ops.append(DropPolicy(table=table, name=name))
+    return ops
+
+
+def _plan_superusers(
+    spec: Spec, current: State, plan: Plan, identity
+) -> list[Operation]:
+    """Plan who is a superuser, when manage.superusers lists who may be one.
+
+    Any other superuser is warned about on every plan, and made an ordinary role
+    behind --allow-superuser; a listed role that isn't one is made one, behind the
+    same flag. Never changed: the connected user (the apply would cut itself
+    off), the platform's own (rdsadmin, supabase_admin ...) and PostgreSQL's
+    bootstrap superuser. Only a superuser changes superusers: for anyone else, as
+    on RDS, Aurora or Supabase, the plan is an audit.
+    """
+    listed = spec.manage.superusers
+    if listed is None:
+        return []
+    me = current.current_user
+    able = me is not None and _superuser(current, me)
+    superusers = {name for name, role in current.roles.items() if role.superuser}
+    kept = {name for name in superusers if _system_role(name)} | {current.bootstrap}
+    created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
+    ops: list[Operation] = []
+    for name in sorted(superusers - set(listed) - kept):
+        warning = f"{name} is a superuser, which manage.superusers doesn't list"
+        if name == me:
+            warning += "; it's the connected user, so it stays one"
+        plan.warnings.append(warning)
+        if able and name != me:
+            ops.append(SetSuperuser(name=name, enabled=False, identity=identity(name)))
+    for name in sorted(set(listed) - superusers):
+        if name not in current.roles and name not in created:
+            plan.warnings.append(f"manage.superusers: {name} does not exist; skipped")
+        elif able:
+            ops.append(SetSuperuser(name=name, enabled=True, identity=identity(name)))
+    if ops == [] and not able and plan.warnings and me is not None:
+        plan.notes.append(
+            f"superusers: {me} isn't one, so only a superuser can change them; "
+            "this plan is an audit"
+        )
     return ops
 
 

@@ -507,9 +507,13 @@ Done in 0.2.1 (2026-10-07), adoption:
   `--allow-revoke`; any name Redshift knows, as words. Joining `sys:` roles works
   as built-ins. Tested on redshift-local, which implements ACCESS SYSTEM TABLE;
   the rest (CREATE USER ...) only on Amazon Redshift.
-- Superusers: `manage.superusers` lists who may be one; any other is warned
-  about on every plan and demoted only with `--allow-superuser`, never the
-  connected user. On RDS, Aurora and Supabase, where no one is, audit only.
+- Done: superusers. `manage.superusers` lists who may be one; any other is
+  warned about on every plan, and apply demotes it, or promotes a listed role,
+  only with `--allow-superuser`. Never the connected user, the platform's own or
+  PostgreSQL's bootstrap superuser. Where the admin isn't a superuser (RDS,
+  Aurora, Supabase), an audit. The GitHub Action has no input for the flag on
+  purpose; `args` passes it. Tested on PostgreSQL 14 and 17, redshift-local and
+  Supabase.
 
 0.4:
 

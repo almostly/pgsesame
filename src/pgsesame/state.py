@@ -143,5 +143,8 @@ class State:
     # Redshift system permissions held by roles: (role, permission, lower case);
     # None where the catalog has no svv_system_privileges (older redshift-local)
     system_privileges: set[tuple[str, str]] | None = field(default_factory=set)
+    # who is connected, and PostgreSQL's bootstrap superuser (which stays one)
+    current_user: str | None = None
+    bootstrap: str | None = None
     # the attributes the connected user may give or take; None: every one
     sets_attributes: set[str] | None = None

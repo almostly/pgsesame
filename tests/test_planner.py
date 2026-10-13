@@ -1644,3 +1644,79 @@ def test_system_permissions_are_words_for_redshift_roles():
     ]
     with pytest.raises(spec.SpecError, match="should match pattern"):
         _spec("redshift", odd={"type": "role", "system": ["create user; drop table t"]})
+
+
+def _superusers(current_user="admin") -> State:
+    return _state(
+        Role("admin", True, superuser=True),
+        Role("intern", True, superuser=True),
+        Role("rdsadmin", True, superuser=True),
+        Role("boot", True, superuser=True),
+        Role("dba", True),
+        current_user=current_user,
+        bootstrap="boot",
+    )
+
+
+def _listing(*names):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "manage": {"superusers": list(names)},
+        }
+    )
+
+
+def test_superusers_are_who_manage_superusers_lists():
+    plan = planner.make(_listing("admin", "dba"), _superusers())
+    assert _statements(plan) == [
+        'ALTER ROLE "intern" NOSUPERUSER',
+        'ALTER ROLE "dba" SUPERUSER',
+    ]
+    assert {op.needs for op in plan.operations} == {"superuser"}
+    assert plan.warnings == [
+        "intern is a superuser, which manage.superusers doesn't list"
+    ]
+    assert plan.allowed(True, True, True) == []  # --allow-revoke and the rest: no
+    # the platform's (rdsadmin) and the bootstrap one are never in question
+    assert "rdsadmin" not in " ".join(plan.warnings + plan.notes)
+    # not given: superusers aren't compared
+    assert planner.make(_spec(), _superusers()).operations == []
+
+
+def test_the_connected_user_stays_a_superuser_and_others_only_audit():
+    plan = planner.make(_listing("intern"), _superusers())
+    assert _statements(plan) == []
+    assert plan.warnings == [
+        "admin is a superuser, which manage.superusers doesn't list; it's the "
+        "connected user, so it stays one"
+    ]
+    # an admin that isn't a superuser (RDS, Supabase): warned, not attempted
+    audit = planner.make(_listing("admin"), _superusers(current_user="dba"))
+    assert audit.operations == []
+    assert audit.warnings == [
+        "intern is a superuser, which manage.superusers doesn't list"
+    ]
+    assert "this plan is an audit" in audit.notes[-1]
+
+
+def test_redshift_superusers_are_createuser():
+    state = _state(
+        Role("admin", True, True, "user"),
+        Role("etl", True, True, "user"),
+        current_user="admin",
+    )
+    plan = planner.make(
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {},
+                "manage": {"superusers": ["admin"]},
+            }
+        ),
+        state,
+    )
+    assert _statements(plan) == ['ALTER USER "etl" NOCREATEUSER']

@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
 Kind = Literal["create", "change", "remove"]
 # what apply needs a flag for: taking access away (revoke), dropping (drop), and
 # changing an owner (owner: the old owner loses what owning gave it)
-Gate = Literal["revoke", "drop", "owner"]
+Gate = Literal["revoke", "drop", "owner", "superuser"]
 
 # GRANT's keyword for each object type, and each privilege's keyword, written out
 # as constants: psycopg.sql only takes literal strings as SQL
@@ -239,6 +239,30 @@ class AlterLogin(Operation):
         """Return ALTER ROLE ... LOGIN or NOLOGIN."""
         return sql.SQL("ALTER ROLE {} {}").format(
             sql.Identifier(self.name), sql.SQL("LOGIN" if self.login else "NOLOGIN")
+        )
+
+
+class SetSuperuser(Operation):
+    """Make a role a superuser, or stop it being one: either way a flag of its own."""
+
+    kind: ClassVar[Kind] = "change"
+    gate: ClassVar[Gate | None] = "superuser"
+    order: ClassVar[int] = 21
+    op: Literal["set_superuser"] = "set_superuser"
+    name: str
+    enabled: bool
+    identity: Identity = "pg"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER ROLE ... [NO]SUPERUSER, or Redshift's ALTER USER ... [NO]CREATEUSER."""
+        if self.identity == "user":
+            keyword = "CREATEUSER" if self.enabled else "NOCREATEUSER"
+            return sql.SQL("ALTER USER {} {}").format(
+                sql.Identifier(self.name), sql.SQL(keyword)
+            )
+        keyword = "SUPERUSER" if self.enabled else "NOSUPERUSER"
+        return sql.SQL("ALTER ROLE {} {}").format(
+            sql.Identifier(self.name), sql.SQL(keyword)
         )
 
 
@@ -941,6 +965,7 @@ AnyOperation = Annotated[
     | AlterLogin
     | AlterPassword
     | SetAttribute
+    | SetSuperuser
     | GrantSystem
     | RevokeSystem
     | AddMember

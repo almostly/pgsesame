@@ -207,6 +207,11 @@ join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
 """
 
+# the role PostgreSQL made at initdb: it can't stop being a superuser
+BOOTSTRAP = """
+select rolname from pg_roles where oid = 10
+"""
+
 # each role's attributes, but LOGIN and SUPERUSER, which are read on their own
 ROLE_ATTRIBUTES = """
 select rolname, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls
@@ -305,6 +310,9 @@ def read(db: Connection, columns: bool = True, full: bool = True) -> State:
         state.roles[name] = Role(name, login, superuser)
     state.memberships = {Membership(m, r) for m, r in db.rows(MEMBERSHIPS)}
     state.administers = {name for name, can in db.rows(ADMINISTERS) if can}
+    state.current_user = next(
+        (name for (name,) in db.rows("select current_user")), None
+    )
 
     state.objects = {"databases": {db.database}, "schemas": set()}
     state.objects["schemas"] = {name for (name,) in db.rows(SCHEMAS)}
@@ -350,6 +358,7 @@ def read(db: Connection, columns: bool = True, full: bool = True) -> State:
             has = frozenset(a for a, on in zip(ATTRIBUTES, flags) if on)
             state.roles[name] = replace(state.roles[name], attributes=has)
         state.sets_attributes = _sets_attributes(db.rows(SETS_ATTRIBUTES))
+        state.bootstrap = next((name for (name,) in db.rows(BOOTSTRAP)), None)
         state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
         for name, owner, all_tables in db.rows(PUBLICATIONS):
             state.publications[name] = (owner, all_tables)

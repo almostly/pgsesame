@@ -702,6 +702,11 @@ def apply(
         "--allow-owner",
         help="Also run owner changes (the old owner loses what owning gave it).",
     ),
+    allow_superuser: bool = typer.Option(
+        False,
+        "--allow-superuser",
+        help="Also make roles superusers or ordinary ones, as manage.superusers says.",
+    ),
 ) -> None:
     """Make the database match the spec, in one transaction.
 
@@ -747,7 +752,7 @@ def apply(
         result = planner.Plan(
             saved.with_secrets(), result.notes, warnings=result.warnings
         )
-    runnable = result.allowed(allow_revoke, allow_drop, allow_owner)
+    runnable = result.allowed(allow_revoke, allow_drop, allow_owner, allow_superuser)
     skipped = [op for op in result.operations if op not in runnable]
     if not runnable:
         # the warnings and notes, as plan prints them

@@ -263,6 +263,20 @@ principals:
     member_of: [editor]
 ```
 
+Superusers bypass every grant, so pgsesame leaves them alone, unless the spec
+says who may be one. Then any other is warned about on every plan, and apply
+makes the plan's changes (`NOSUPERUSER` for the unlisted, `SUPERUSER` for the
+listed; Redshift's `NOCREATEUSER` and `CREATEUSER`) only with `--allow-superuser`,
+which no other flag implies. The connected user stays one (the apply would cut
+itself off), and so do the platform's own (`rdsadmin`, `rdsdb`, `supabase_admin`)
+and PostgreSQL's bootstrap superuser. Only a superuser changes superusers: on RDS,
+Aurora or Supabase, where the admin isn't one, the plan is an audit:
+
+```yaml
+manage:
+  superusers: [dba]
+```
+
 Row-level security is declared per table:
 
 ```yaml

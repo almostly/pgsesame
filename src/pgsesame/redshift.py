@@ -185,6 +185,7 @@ def read(db: Connection, columns: bool = True) -> State:
 
     state = State()
     me = rows["me"]
+    state.current_user = me[0][0] if me else None
     # a non-superuser sees only its own grants in the SVV views (and no masking),
     # unless it holds ACCESS SYSTEM TABLE: then it sees every row, as a superuser
     state.sees_everything = bool(me and me[0][1]) or (

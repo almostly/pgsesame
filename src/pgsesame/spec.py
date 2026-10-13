@@ -305,6 +305,11 @@ class Manage(_Model):
         default_factory=list,
         description="Also manage undeclared roles named so: their grants become drift.",
     )
+    superusers: list[Identifier] | None = Field(
+        None,
+        description="Who may be a superuser; any other is drift. Not given: "
+        "superusers aren't compared.",
+    )
 
 
 class Spec(_Model):
@@ -712,11 +717,16 @@ def _check_masking(spec: Spec) -> list[str]:
 
 
 def _check_manage(spec: Spec) -> list[str]:
-    """With manage.schemas, the spec grants nothing outside those schemas."""
+    """With manage.schemas, the spec grants nothing outside those schemas.
+
+    And Aurora DSQL has no superusers to list.
+    """
+    problems: list[str] = []
+    if spec.manage.superusers is not None and spec.engine == "dsql":
+        problems.append("manage.superusers: Aurora DSQL has no superusers")
     schemas = set(spec.manage.schemas)
     if not schemas:
-        return []
-    problems: list[str] = []
+        return problems
     for name, p in spec.principals.items():
         for kind, grants in p.privileges.items():
             if kind == "databases":

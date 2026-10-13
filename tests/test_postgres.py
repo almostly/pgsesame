@@ -846,6 +846,39 @@ def test_an_admin_sets_only_the_attributes_it_holds(dsn, tmp_path):
     assert _sesame("apply", _spec(tmp_path, ATTRIBUTES), "--dsn", admin)[0] == 0
 
 
+SUPERUSERS = f"""
+version: 1
+engine: postgres
+principals: {{}}
+manage:
+  superusers: [{P}dba]
+"""
+
+
+def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE ROLE {P}intern LOGIN SUPERUSER")
+        conn.execute(f"CREATE ROLE {P}dba LOGIN")
+    spec = _spec(tmp_path, SUPERUSERS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f"! {P}intern is a superuser, which manage.superusers doesn't list" in out
+    assert f'ALTER ROLE "{P}intern" NOSUPERUSER  needs --allow-superuser' in out, out
+    assert f'ALTER ROLE "{P}dba" SUPERUSER  needs --allow-superuser' in out, out
+    assert "postgres is a superuser" not in out  # the bootstrap superuser stays one
+    # without the flag nothing changes, whatever else is allowed
+    flags = ["--allow-revoke", "--allow-drop", "--allow-owner"]
+    assert _sesame("apply", spec, "--dsn", dsn, *flags)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 2
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-superuser")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT rolname FROM pg_roles WHERE rolsuper AND rolname LIKE %s",
+            (f"{P}%",),
+        ).fetchall() == [(f"{P}dba",)]
+
+
 OWNERSHIP = f"""
 version: 1
 engine: postgres
