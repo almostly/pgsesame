@@ -469,8 +469,12 @@ Done in 0.2.1 (2026-10-07), adoption:
   (`member_of`, and only those), so `authenticator` can switch to a role a JWT
   names; its memberships in the platform's roles stay the platform's. Tested on
   Supabase.
-- Warnings: a table in an exposed schema anon or authenticated can reach without
-  row-level security; a view without `security_invoker` over one with it.
+- Done: warnings where the Data API reaches rows past row-level security: a
+  table with it off, or a view without `security_invoker`, that a role
+  `authenticator` switches to (and doesn't bypass RLS) can read or write, PUBLIC's
+  grants included, after the plan. Only what the connected user can change.
+  Supabase keeps its exposed schemas outside the database, so reach is what
+  decides. Tested on Supabase.
 - `sesame import` on a Supabase project: its own roles (`authenticator`,
   `dashboard_user`, `pgbouncer`) left out.
 - `sesame login --supabase <ref>`: the session pooler, as the direct connection is

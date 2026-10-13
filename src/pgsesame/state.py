@@ -23,6 +23,7 @@ class Role:
     login: bool
     superuser: bool = False
     identity: Identity = "pg"
+    bypassrls: bool = False  # PostgreSQL: row-level security never applies to it
 
 
 @dataclass(frozen=True, order=True)
@@ -113,6 +114,9 @@ class State:
     public_privileges: set[Privilege] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    # views that run with their owner's rights (no security_invoker), of those the
+    # connected user may change
+    definer_views: set[str] = field(default_factory=set)
     # the tables whose row-level security the connected user may switch (it acts
     # as their owner); None: every table
     rls_switchable: set[str] | None = None

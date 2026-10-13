@@ -297,3 +297,39 @@ def test_a_custom_role_a_jwt_can_name(jwt_role):
         assert conn.execute(
             "SELECT pg_has_role('authenticator', 'sesame_test_editor', 'MEMBER')"
         ).fetchone() == (True,)
+
+
+EXPOSURE = """
+version: 1
+engine: postgres
+principals:
+  anon:
+    type: builtin
+"""
+
+
+@pytest.fixture
+def leaky(tmp_path):
+    drop = "DROP VIEW IF EXISTS public.sesame_test_view; DROP TABLE IF EXISTS public.sesame_test_leaky"
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(drop)
+        # made in public, so Supabase's default privileges grant anon on both
+        conn.execute("CREATE TABLE public.sesame_test_leaky (secret text)")
+        conn.execute(
+            "CREATE VIEW public.sesame_test_view AS SELECT * FROM public.sesame_test_leaky"
+        )
+        spec = tmp_path / "exposure.yaml"
+        spec.write_text(textwrap.dedent(EXPOSURE))
+        yield str(spec)
+        conn.execute(drop)
+
+
+def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
+    code, out = _sesame("plan", leaky, "--dsn", DSN)
+    assert "public.sesame_test_leaky: row-level security is off, and anon" in out, out
+    assert "public.sesame_test_view: anon" in out and "owner's rights" in out, out
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("ALTER TABLE public.sesame_test_leaky ENABLE ROW LEVEL SECURITY")
+        conn.execute("ALTER VIEW public.sesame_test_view SET (security_invoker = true)")
+    code, out = _sesame("plan", leaky, "--dsn", DSN)
+    assert "sesame_test" not in out, out

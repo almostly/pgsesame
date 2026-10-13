@@ -563,9 +563,6 @@ def test_policies_outside_the_spec_are_left_alone():
     assert plan.operations == [DropMaskingPolicy(name="sesame_unmasked_int")]
 
 
-# ---------------------------------------------------------------------------
-# Functions
-# ---------------------------------------------------------------------------
 FUNCTIONS = {"functions": {"app.hook(jsonb)", "app.f(integer)", "app.f(text)"}}
 
 
@@ -1400,3 +1397,75 @@ def test_default_privileges_are_revoked_before_any_privilege_is():
     from pgsesame.ops import Revoke, RevokeDefault
 
     assert RevokeDefault.order < Revoke.order
+
+
+def _exposure_state(*privileges: Privilege, api=("anon",), **extra) -> State:
+    # Supabase's Data API signs in as authenticator and switches to its roles
+    return _state(
+        Role("anon", False),
+        Role("service_role", False, bypassrls=True),
+        Role("authenticator", True),
+        objects={"schemas": {"public"}, "tables": {"public.todos"}},
+        rls={"public.todos": (False, False)},
+        memberships={Membership("authenticator", role) for role in api},
+        privileges=set(privileges),
+        **extra,
+    )
+
+
+USAGE = Privilege("anon", "schemas", "public", "usage")
+SELECT = Privilege("anon", "tables", "public.todos", "select")
+NO_SPEC = _spec()
+
+
+def test_a_table_the_data_api_reaches_without_row_level_security_is_warned_about():
+    (warning,) = planner.make(NO_SPEC, _exposure_state(USAGE, SELECT)).warnings
+    assert warning == (
+        "public.todos: row-level security is off, and anon (SELECT) can reach it: "
+        "every row is open to them"
+    )
+    # row-level security on (by the plan, here) closes it
+    rls = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "row_level_security": {"public.todos": {}},
+        }
+    )
+    assert planner.make(rls, _exposure_state(USAGE, SELECT)).warnings == []
+
+
+def test_what_public_holds_the_data_api_holds():
+    state = _exposure_state(
+        USAGE, Privilege("public", "tables", "public.todos", "select")
+    )
+    (warning,) = planner.make(NO_SPEC, state).warnings
+    assert "PUBLIC (SELECT) can reach it" in warning
+    # without the Data API, a table for everyone is nobody's business here
+    assert planner.make(NO_SPEC, _exposure_state(USAGE, SELECT, api=())).warnings == []
+
+
+def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change():
+    assert planner.make(NO_SPEC, _exposure_state(SELECT)).warnings == []
+    bypasses = _exposure_state(
+        Privilege("service_role", "schemas", "public", "usage"),
+        Privilege("service_role", "tables", "public.todos", "select"),
+        api=("service_role",),
+    )
+    assert planner.make(NO_SPEC, bypasses).warnings == []
+    platforms = _exposure_state(USAGE, SELECT, rls_switchable=set())
+    assert planner.make(NO_SPEC, platforms).warnings == []
+
+
+def test_a_view_that_runs_with_its_owners_rights_is_warned_about():
+    state = _exposure_state(
+        USAGE,
+        Privilege("anon", "views", "public.open_todos", "select"),
+        definer_views={"public.open_todos"},
+    )
+    (warning,) = planner.make(NO_SPEC, state).warnings
+    assert warning.startswith(
+        "public.open_todos: anon (SELECT) can reach this view, which runs with its "
+        "owner's rights"
+    )

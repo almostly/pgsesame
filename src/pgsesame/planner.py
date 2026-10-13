@@ -306,16 +306,6 @@ def make(
             )
         )
 
-    held = {
-        p
-        for p in current.privileges
-        if p.grantee in managed and p.object_type in PLANNED_TYPES
-    }
-    # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
-    # is reported and left in place: never planned, never revoked, never fatal
-    known = PRIVILEGES[spec.engine]
-    unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
-    plan.notes += unmanaged_notes(unknown, "left as they are")
     # a built-in role's privileges are managed only where the spec speaks for it:
     # the schemas (and databases) its privileges name. Elsewhere they are the
     # platform's (Supabase grants anon and authenticated a lot in public), and
@@ -326,21 +316,22 @@ def make(
     # PostgreSQL gives PUBLIC by default, and Supabase gives anon and
     # authenticated, is drift there
     named = {p.object_name for p in want_privileges if p.object_type == "functions"}
-    held |= {
+    held = {
         p
         for p in current.privileges
-        if p.object_type == "functions" and p.object_name in named
-    }
-    have_privileges = {
-        p
-        for p in held - unknown
         if (
-            p.grantee not in scope
-            or _in_scope(p, scope[p.grantee])
-            or p.object_name in named
+            p.grantee in managed
+            and p.object_type in PLANNED_TYPES
+            and (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
         )
-        and _in_managed_schemas(p, spec)
+        or (p.object_type == "functions" and p.object_name in named)
     }
+    # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
+    # is reported and left in place: never planned, never revoked, never fatal
+    known = PRIVILEGES[spec.engine]
+    unknown = {p for p in held if p.privilege not in known.get(p.object_type, ())}
+    plan.notes += unmanaged_notes(unknown, "left as they are")
+    have_privileges = {p for p in held - unknown if _in_managed_schemas(p, spec)}
     want_privileges = {p for p in want_privileges if p.grantee in managed}
 
     # ownership: each object a principal owns goes to it; an owner's privileges
@@ -475,7 +466,100 @@ def make(
 
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
+    if spec.engine == "postgres":
+        plan.warnings += _exposed(spec, current, plan.operations)
     return plan
+
+
+# the role Supabase's Data API signs in as, and what reads or writes a table's rows
+API_ROLE = "authenticator"
+_ROW_PRIVILEGES = ("select", "insert", "update", "delete")
+
+
+def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[str]:
+    """Warn where the Data API reaches rows past row-level security.
+
+    Supabase's Data API (PostgREST) signs in as ``authenticator`` and switches to
+    one of its roles: anon, authenticated, a custom JWT role. Anyone with the
+    project's anon key acts as one, so, once the plan has run, a table with
+    row-level security off, or a view that runs with its owner's rights, that such
+    a role can read or write in a schema it can use is said. A role that bypasses
+    row-level security (service_role) is the server's, and the platform's own
+    tables are its business: only what the connected user can change is said.
+    """
+    joins = {m for m in current.memberships if m.member == API_ROLE}
+    joins |= {
+        Membership(op.member, op.role)
+        for op in operations
+        if isinstance(op, AddMember) and op.member == API_ROLE
+    }
+    api = {
+        m.role
+        for m in joins
+        if not (
+            (role := current.roles.get(m.role)) and (role.superuser or role.bypassrls)
+        )
+    }
+    held = {p for p in current.privileges if p.grantee in api or p.grantee == "public"}
+    rls = {table: enabled for table, (enabled, _) in current.rls.items()}
+    for op in operations:
+        if isinstance(op, (Grant, Revoke)):
+            p = Privilege(op.grantee, op.object_type, op.object_name, op.privilege)
+            if isinstance(op, Grant):
+                held.add(p)
+            else:
+                held.discard(p)
+        elif isinstance(op, (EnableRowSecurity, DisableRowSecurity)):
+            rls[op.table] = isinstance(op, EnableRowSecurity)
+    usable = {
+        (p.grantee, p.object_name)
+        for p in held
+        if p.object_type == "schemas" and p.privilege == "usage"
+    }
+    reach: dict[str, dict[str, set[str]]] = {}
+    for p in held:
+        if p.object_type not in ("tables", "views", "columns"):
+            continue
+        if p.privilege not in _ROW_PRIVILEGES:
+            continue
+        relation = (
+            p.object_name.rsplit(".", 1)[0]
+            if p.object_type == "columns"
+            else p.object_name
+        )
+        schema = relation.split(".", 1)[0]
+        # what PUBLIC holds, every API role holds, as it does PUBLIC's USAGE
+        if p.grantee == "public":
+            who = "PUBLIC"
+            users = api | {"public"}
+        elif p.grantee in api:
+            who = p.grantee
+            users = {p.grantee, "public"}
+        else:
+            continue
+        if any((user, schema) in usable for user in users):
+            reach.setdefault(relation, {}).setdefault(who, set()).add(p.privilege)
+    warnings = []
+    for relation, by in sorted(reach.items()):
+        who = ", ".join(
+            f"{name} ({', '.join(sorted(privileges)).upper()})"
+            for name, privileges in sorted(by.items())
+        )
+        switchable = (
+            current.rls_switchable is None or relation in current.rls_switchable
+        )
+        if rls.get(relation) is False and switchable:
+            warnings.append(
+                f"{relation}: row-level security is off, and {who} can reach it: "
+                "every row is open to them"
+            )
+        elif relation in current.definer_views:
+            warnings.append(
+                f"{relation}: {who} can reach this view, which runs with its owner's "
+                "rights, past the row-level security of the tables it reads "
+                "(security_invoker = true makes it run with theirs)"
+            )
+    return warnings
 
 
 def _scope(principal) -> tuple[set[str], set[str]]:

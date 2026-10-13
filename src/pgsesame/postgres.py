@@ -14,7 +14,7 @@ from pgsesame.spec import Spec
 from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
 
 ROLES = """
-select rolname, rolcanlogin, rolsuper from pg_roles
+select rolname, rolcanlogin, rolsuper, rolbypassrls from pg_roles
 """
 
 MEMBERSHIPS = """
@@ -172,8 +172,22 @@ join pg_roles g on g.oid = a.grantee
 where a.grantee <> d.defaclrole
 """
 
-# and whether the connected user may switch it: only as the table's owner, which
-# a platform's tables (Supabase's storage.objects) aren't
+# views that run with their owner's rights, past the row-level security of what
+# they read (all of them before PostgreSQL 15, and since, those without
+# security_invoker), among those the connected user may change, as their owner
+DEFINER_VIEWS = f"""
+select n.nspname || '.' || c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
+  and not exists (select from unnest(c.reloptions) o
+                  where lower(o) in ('security_invoker=true', 'security_invoker=on',
+                                     'security_invoker=yes', 'security_invoker=1'))
+"""
+
+# each table's row-level security (on, forced), and whether the connected user
+# may switch it: only as the table's owner, which a platform's tables (Supabase's
+# storage.objects) aren't
 RLS_TABLES = f"""
 select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
        pg_has_role(c.relowner, 'USAGE')
@@ -229,8 +243,8 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
     grants (Aurora DSQL's aren't planned).
     """
     state = State()
-    for name, login, superuser in db.rows(ROLES):
-        state.roles[name] = Role(name, login, superuser)
+    for name, login, superuser, bypassrls in db.rows(ROLES):
+        state.roles[name] = Role(name, login, superuser, bypassrls=bypassrls)
     state.memberships = {Membership(m, r) for m, r in db.rows(MEMBERSHIPS)}
     state.administers = {name for name, can in db.rows(ADMINISTERS) if can}
 
@@ -269,6 +283,7 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
         state.default_privileges.add(
             DefaultGrant(owner, schema, kind, grantee, privilege)
         )
+    state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
     state.rls_switchable = set()
     for table, enabled, forced, switchable in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)

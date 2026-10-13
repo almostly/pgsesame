@@ -259,6 +259,19 @@ row_level_security:
         using: "bucket_id = 'avatars' and (select auth.uid())::text = (storage.foldername(name))[1]"
 ```
 
+Where Supabase's Data API reaches rows past row-level security, the plan warns,
+whatever the spec says. The API signs in as `authenticator` and switches to one of
+its roles (anon, authenticated, a custom JWT role), so anyone with the project's
+anon key acts as one. Once the plan has run, a table with row-level security off,
+or a view that runs with its owner's rights (no `security_invoker`), that such a
+role can read or write is said; so are PUBLIC's grants, which every role holds. A
+role that bypasses row-level security (`service_role`) and the platform's own
+tables are left out:
+
+```
+! public.todos: row-level security is off, and anon (DELETE, INSERT, SELECT, UPDATE) can reach it: every row is open to them
+```
+
 On PostgreSQL, functions and procedures take EXECUTE. `schema.name` names every
 overload, `schema.name(types)` one of them, with the types as PostgreSQL writes
 them (`integer`, not `int`), and `schema.*` every function in the schema; an
