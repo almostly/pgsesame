@@ -570,6 +570,42 @@ def test_default_privileges_of_other_grantees_are_left_alone():
     assert planner.make(_defaults_spec(), _defaults_state(other, mine)).operations == []
 
 
+def test_a_builtin_roles_default_privileges_are_managed_where_the_spec_names_it():
+    from pgsesame.state import DefaultGrant
+
+    s = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {"service_role": {"type": "builtin"}},
+            "default_privileges": [
+                {
+                    "owner": "etl",
+                    "schema": "app",
+                    "grantee": "service_role",
+                    "tables": ["select"],
+                }
+            ],
+        }
+    )
+    state = _state(
+        Role("etl", True, False, "pg"),
+        Role("service_role", False, False, "pg"),
+        default_privileges={
+            DefaultGrant("etl", "app", "tables", "service_role", "select"),
+            DefaultGrant("etl", "app", "tables", "service_role", "delete"),
+            DefaultGrant("etl", "public", "tables", "service_role", "select"),
+        },
+    )
+    # converged in app (no endless re-grant), drift there revoked; the
+    # platform's entries in public are left alone
+    assert [
+        op.statement().as_string(None) for op in planner.make(s, state).operations
+    ] == [
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "etl" IN SCHEMA "app" REVOKE DELETE ON TABLES FROM "service_role"'
+    ]
+
+
 def test_an_owner_that_does_not_exist_stops_the_plan():
     with pytest.raises(planner.PlanError, match="owner: ghost does not exist"):
         planner.make(

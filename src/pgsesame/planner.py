@@ -409,7 +409,7 @@ def make(
     if spec.engine == "dsql":
         plan.operations += _plan_iam(spec, current, managed - builtins)
     defaults = _plan_defaults(
-        spec, current, identity, problems, managed - builtins, plan.notes
+        spec, current, identity, problems, managed, scope, plan.notes
     )
     if redshift:
         defaults = _owners_can_create(
@@ -568,12 +568,15 @@ def _plan_defaults(
     identity,
     problems: list[str],
     managed: set[str],
+    scope: dict[str, tuple[set[str], set[str]]],
     notes: list[str],
 ) -> list[Operation]:
     """Plan default privileges: what the spec's principals get on future objects.
 
     Managed: every entry whose grantee the spec declares, whoever the owner is.
-    An entry for another grantee is someone else's and left alone.
+    An entry for another grantee is someone else's and left alone. A built-in
+    role's entries are managed only in the schemas the spec names for it: those
+    its privileges name, and those of its own rules ("" for every schema).
     """
     want: set[DefaultGrant] = set()
     for i, rule in enumerate(spec.default_privileges):
@@ -591,10 +594,16 @@ def _plan_defaults(
                     )
                 )
     schemas = set(spec.manage.schemas)
+    builtin_schemas = {name: set(s) for name, (s, _) in scope.items()}
+    for rule in spec.default_privileges:
+        if rule.grantee in builtin_schemas:
+            builtin_schemas[rule.grantee].add(rule.in_schema or "")
     have = {
         d
         for d in current.default_privileges
-        if d.grantee in managed and (not schemas or d.schema in schemas)
+        if d.grantee in managed
+        and (not schemas or d.schema in schemas)
+        and (d.grantee not in scope or d.schema in builtin_schemas[d.grantee])
     }
     have = {
         d
