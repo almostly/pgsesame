@@ -15,8 +15,12 @@ IAM_LINKS = "select pg_role_name, arn from sys.iam_pg_role_mappings"
 
 
 def read(db: Connection, columns: bool = True) -> State:
-    """Return the database's state, IAM links included; functions aren't planned."""
-    state = postgres.read(db, columns, functions=False)
+    """Return the database's state, IAM links included, read as before 0.3.
+
+    What only PostgreSQL's plans use (functions, publications ...) isn't read:
+    nothing plans it on Aurora DSQL, and its catalog may not have it.
+    """
+    state = postgres.read(db, columns, full=False)
     state.iam_links = {(role, arn) for role, arn in db.rows(IAM_LINKS)}
     return state
 

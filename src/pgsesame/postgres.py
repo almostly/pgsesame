@@ -9,12 +9,14 @@ grants are read to warn about, CREATE above all). System schemas
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pgsesame.db import Connection, Database
 from pgsesame.spec import Spec
 from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
 
 ROLES = """
-select rolname, rolcanlogin, rolsuper, rolbypassrls from pg_roles
+select rolname, rolcanlogin, rolsuper from pg_roles
 """
 
 MEMBERSHIPS = """
@@ -189,15 +191,25 @@ where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
                                      'security_invoker=yes', 'security_invoker=1'))
 """
 
-# each table's row-level security (on, forced), and whether the connected user
-# may switch it: only as the table's owner, which a platform's tables (Supabase's
-# storage.objects) aren't
 RLS_TABLES = f"""
-select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
-       pg_has_role(c.relowner, 'USAGE')
+select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA}
+"""
+
+# the tables whose row-level security the connected user may switch: only as their
+# owner, which a platform's tables (Supabase's storage.objects) aren't
+RLS_SWITCHABLE = f"""
+select n.nspname || '.' || c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p') and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
+"""
+
+# roles row-level security never applies to
+BYPASS_RLS = """
+select rolname from pg_roles where rolbypassrls
 """
 
 POLICIES = """
@@ -255,19 +267,19 @@ def _text_array(value: object) -> list[str]:
     return next(csv.reader([inner], quotechar='"', escapechar="\\"))
 
 
-def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
+def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     """Return the current state of the database ``db`` is connected to.
 
     ``columns`` reads every column (to check the ones a spec grants on); without
-    it, column grants are still read. ``functions`` reads functions and their
-    grants (Aurora DSQL's aren't planned).
+    it, column grants are still read. ``full`` also reads what only PostgreSQL's
+    plans use: functions, publications, views that run with their owner's rights,
+    and whom the connected user acts as (Aurora DSQL is read without).
     """
     state = State()
-    for name, login, superuser, bypassrls in db.rows(ROLES):
-        state.roles[name] = Role(name, login, superuser, bypassrls=bypassrls)
+    for name, login, superuser in db.rows(ROLES):
+        state.roles[name] = Role(name, login, superuser)
     state.memberships = {Membership(m, r) for m, r in db.rows(MEMBERSHIPS)}
     state.administers = {name for name, can in db.rows(ADMINISTERS) if can}
-    state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
 
     state.objects = {"databases": {db.database}, "schemas": set()}
     state.objects["schemas"] = {name for (name,) in db.rows(SCHEMAS)}
@@ -294,7 +306,7 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
         state.privileges.add(Privilege(grantee, "columns", name, privilege))
     for kind, name, owner in db.rows(OWNERS):
         state.owners[(kind, name)] = owner
-    if functions:
+    if full:
         state.objects["functions"] = {name for (name,) in db.rows(FUNCTIONS)}
         for grantee, name, privilege, grantable in db.rows(FUNCTION_PRIVILEGES):
             held(Privilege(grantee, "functions", name, privilege), grantable)
@@ -304,17 +316,19 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
         state.default_privileges.add(
             DefaultGrant(owner, schema, kind, grantee, privilege)
         )
-    state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
-    for name, owner, all_tables in db.rows(PUBLICATIONS):
-        state.publications[name] = (owner, all_tables)
-    state.publication_tables = {
-        (name, table) for name, table in db.rows(PUBLICATION_TABLES)
-    }
-    state.rls_switchable = set()
-    for table, enabled, forced, switchable in db.rows(RLS_TABLES):
+    for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
-        if switchable:
-            state.rls_switchable.add(table)
+    if full:
+        state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
+        state.rls_switchable = {name for (name,) in db.rows(RLS_SWITCHABLE)}
+        for (name,) in db.rows(BYPASS_RLS):
+            state.roles[name] = replace(state.roles[name], bypassrls=True)
+        state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
+        for name, owner, all_tables in db.rows(PUBLICATIONS):
+            state.publications[name] = (owner, all_tables)
+        state.publication_tables = {
+            (name, table) for name, table in db.rows(PUBLICATION_TABLES)
+        }
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
         state.policies[(table, name)] = Policy(
             table,

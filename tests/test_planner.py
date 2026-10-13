@@ -1524,3 +1524,40 @@ def test_a_publication_another_role_owns_or_for_all_tables_is_not_changed():
                 "publications": {"p": {"tables": ["a.b"]}},
             }
         )
+
+
+def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
+    # the catalog Aurora DSQL may not have: only PostgreSQL's plans read it
+    from typing import cast
+
+    from pgsesame import dsql, postgres
+    from pgsesame.db import Connection
+
+    class Recorder:
+        database = "postgres"
+
+        def __init__(self):
+            self.queries = []
+
+        def rows(self, query):
+            self.queries.append(query)
+            return []
+
+    full_only = {
+        postgres.ACTS_AS,
+        postgres.BYPASS_RLS,
+        postgres.DEFINER_VIEWS,
+        postgres.FUNCTIONS,
+        postgres.FUNCTION_OWNERS,
+        postgres.FUNCTION_PRIVILEGES,
+        postgres.PUBLICATIONS,
+        postgres.PUBLICATION_TABLES,
+        postgres.RLS_SWITCHABLE,
+    }
+    on_dsql = Recorder()
+    state = dsql.read(cast(Connection, on_dsql))
+    assert full_only.isdisjoint(on_dsql.queries)
+    assert (state.acts_as, state.rls_switchable) == (None, None)  # no limit known
+    on_postgres = Recorder()
+    postgres.read(cast(Connection, on_postgres))
+    assert full_only <= set(on_postgres.queries)
