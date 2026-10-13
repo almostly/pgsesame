@@ -225,7 +225,9 @@ row_level_security:
 
 Policy expressions are compared in the form PostgreSQL stores them, so a re-plan
 after apply is empty; dropping a policy or disabling row-level security needs
-`--allow-drop`.
+`--allow-drop`. [examples/supabase](examples/supabase) puts it together for a
+Supabase app: its built-in roles, column grants, policies on `auth.uid()` and a
+dashboard's own login.
 
 On Redshift, dynamic data masking is declared per column: what everyone sees,
 which roles see the raw value, and which see their own mask:

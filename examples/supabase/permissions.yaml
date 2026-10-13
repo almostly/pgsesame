@@ -1,0 +1,113 @@
+version: 1
+engine: postgres
+
+principals:
+  # Supabase's own roles: the Data API runs each request as one of them
+  anon:  # no session: the public site
+    type: builtin
+    privileges:
+      schemas:
+        usage: [app]
+      tables:
+        select: [app.profiles, app.posts]
+
+  authenticated:  # a signed-in user; auth.uid() is their id
+    type: builtin
+    privileges:
+      schemas:
+        usage: [app]
+      tables:
+        select: [app.profiles, app.posts]
+        insert: [app.profiles, app.posts]
+        delete: [app.posts]
+      columns:  # never id, author or created_at
+        update:
+          - app.profiles.username
+          - app.profiles.bio
+          - app.posts.title
+          - app.posts.body
+          - app.posts.published
+
+  service_role:  # the server's key: bypasses row-level security
+    type: builtin
+    privileges:
+      schemas:
+        usage: [app]
+      tables:
+        select: [app.*]
+        insert: [app.*]
+        update: [app.*]
+        delete: [app.*]
+
+  # a dashboard that reads everything, over its own login
+  reporting:
+    type: role
+    privileges:
+      schemas:
+        usage: [app]
+      tables:
+        select: [app.*]
+
+  metabase:
+    type: user
+    password_env: METABASE_PASSWORD
+    member_of: [reporting]
+
+default_privileges:
+  - owner: postgres  # tables made later in app, from the SQL editor
+    schema: app  # or a migration, reach the server and the dashboard
+    grantee: service_role
+    tables: [select, insert, update, delete]
+  - owner: postgres
+    schema: app
+    grantee: reporting
+    tables: [select]
+
+row_level_security:
+  app.profiles:
+    policies:
+      profiles_readable:
+        command: select
+        to: [anon, authenticated]
+        using: "true"
+      profiles_create_own:
+        command: insert
+        to: [authenticated]
+        with_check: "(select auth.uid()) = id"
+      profiles_edit_own:
+        command: update
+        to: [authenticated]
+        using: "(select auth.uid()) = id"
+        with_check: "(select auth.uid()) = id"
+      profiles_reporting:
+        command: select
+        to: [reporting]
+        using: "true"
+
+  app.posts:
+    policies:
+      posts_published:
+        command: select
+        to: [anon, authenticated]
+        using: "published"
+      posts_own_drafts:
+        command: select
+        to: [authenticated]
+        using: "(select auth.uid()) = author"
+      posts_create_own:
+        command: insert
+        to: [authenticated]
+        with_check: "(select auth.uid()) = author"
+      posts_edit_own:
+        command: update
+        to: [authenticated]
+        using: "(select auth.uid()) = author"
+        with_check: "(select auth.uid()) = author"
+      posts_delete_own:
+        command: delete
+        to: [authenticated]
+        using: "(select auth.uid()) = author"
+      posts_reporting:
+        command: select
+        to: [reporting]
+        using: "true"
