@@ -676,6 +676,11 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
         conn.execute(f"GRANT SELECT (amount) ON marts.sales TO {P}reader")
         conn.execute(f"CREATE ROLE {P}outside")
         conn.execute(f"GRANT {P}outside TO {P}reader")
+        # a function the spec will name: PUBLIC keeps its default EXECUTE, and a
+        # role outside the import holds it too
+        conn.execute("CREATE FUNCTION analytics.score(int) RETURNS int RETURN $1")
+        conn.execute(f"GRANT EXECUTE ON FUNCTION analytics.score TO {P}reader")
+        conn.execute(f"GRANT EXECUTE ON FUNCTION analytics.score TO {P}outside")
     imported = tmp_path / "imported.yaml"
     code, out = _sesame(
         "import",

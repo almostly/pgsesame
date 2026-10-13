@@ -475,8 +475,13 @@ Done in 0.2.1 (2026-10-07), adoption:
   grants included, after the plan. Only what the connected user can change.
   Supabase keeps its exposed schemas outside the database, so reach is what
   decides. Tested on Supabase.
-- `sesame import` on a Supabase project: its own roles (`authenticator`,
-  `dashboard_user`, `pgbouncer`) left out.
+- Done: `sesame import` on a Supabase project. Its roles are written as built-in
+  (the Data API's with their grants in the app's schemas, authenticator with the
+  app's roles it joins), its schemas and the default privileges of roles postgres
+  can't act as left out; a plan leaves those default privileges alone too. Import
+  also writes whoever may execute a function it names, PUBLIC included, which a
+  plan otherwise revoked. On the test project: 64 lines instead of 820, and the
+  first plan is empty. Tested on Supabase.
 - `sesame login --supabase <ref>`: the session pooler, as the direct connection is
   IPv6 only.
 - A plan written as a Supabase migration (`supabase/migrations/*.sql`).

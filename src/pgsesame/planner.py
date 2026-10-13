@@ -324,7 +324,11 @@ def make(
             and p.object_type in PLANNED_TYPES
             and (p.grantee not in scope or _in_scope(p, scope[p.grantee]))
         )
-        or (p.object_type == "functions" and p.object_name in named)
+        or (
+            p.object_type == "functions"
+            and p.object_name in named
+            and not _superuser(current, p.grantee)  # it executes anything anyway
+        )
     }
     # a privilege pgsesame doesn't model (a newer PostgreSQL's, a Redshift extra)
     # is reported and left in place: never planned, never revoked, never fatal
@@ -737,12 +741,15 @@ def _plan_defaults(
     for rule in spec.default_privileges:
         if rule.grantee in builtin_schemas:
             builtin_schemas[rule.grantee].add(rule.in_schema or "")
+    # only an owner, or a role acting as it, changes its default privileges: those
+    # of another (Supabase's supabase_admin) are left alone
     have = {
         d
         for d in current.default_privileges
         if d.grantee in managed
         and (not schemas or d.schema in schemas)
         and (d.grantee not in scope or d.schema in builtin_schemas[d.grantee])
+        and (current.acts_as is None or d.owner in current.acts_as)
     }
     have = {
         d
@@ -889,6 +896,12 @@ def unmanaged_notes(privileges: set[Privilege], outcome: str) -> list[str]:
             f"{count} {said} ({examples}{more})"
         )
     return notes
+
+
+def _superuser(current: State, name: str) -> bool:
+    """Return whether a role is a superuser on the server."""
+    role = current.roles.get(name)
+    return role is not None and role.superuser
 
 
 def _system_role(name: str) -> bool:

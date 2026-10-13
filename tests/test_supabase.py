@@ -333,3 +333,43 @@ def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
         conn.execute("ALTER VIEW public.sesame_test_view SET (security_invoker = true)")
     code, out = _sesame("plan", leaky, "--dsn", DSN)
     assert "sesame_test" not in out, out
+
+
+def _drop_imported(conn):
+    conn.execute("DROP FUNCTION IF EXISTS public.sesame_test_fn")
+    conn.execute("DROP TABLE IF EXISTS public.sesame_test_items")
+    conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+
+
+@pytest.fixture
+def app_objects():
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        _drop_imported(conn)
+        # made in public: Supabase's default privileges grant anon, authenticated
+        # and service_role, and PUBLIC keeps its default EXECUTE on the function
+        conn.execute("CREATE TABLE public.sesame_test_items (id int)")
+        conn.execute("CREATE FUNCTION public.sesame_test_fn() RETURNS int RETURN 1")
+        conn.execute("CREATE ROLE sesame_test_editor")
+        conn.execute("GRANT SELECT ON public.sesame_test_items TO sesame_test_editor")
+        conn.execute("GRANT sesame_test_editor TO authenticator")
+        yield
+        _drop_imported(conn)
+
+
+def test_import_leaves_the_platform_to_supabase(app_objects, tmp_path):
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import", "--dsn", DSN, "--prefix", "sesame_test_", "-o", str(imported)
+    )
+    assert code == 0, out
+    text = imported.read_text()
+    assert "auth." not in text and "storage." not in text and "extensions." not in text
+    assert "  anon:\n    type: builtin" in text
+    assert "public.sesame_test_items" in text and "public.sesame_test_fn()" in text
+    assert (
+        "  authenticator:\n    type: builtin\n    member_of:\n    - sesame_test_editor"
+        in text
+    )
+    assert "supabase_admin" not in text
+    code, out = _sesame("plan", str(imported), "--dsn", DSN)
+    assert code == 0, out  # the project as it is: nothing to do

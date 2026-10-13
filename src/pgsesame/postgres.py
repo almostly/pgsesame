@@ -174,12 +174,16 @@ where a.grantee <> d.defaclrole
 
 # views that run with their owner's rights, past the row-level security of what
 # they read (all of them before PostgreSQL 15, and since, those without
-# security_invoker), among those the connected user may change, as their owner
+# security_invoker), among those the connected user may change, as their owner;
+# an extension's own are left out
 DEFINER_VIEWS = f"""
 select n.nspname || '.' || c.relname
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
+  and not exists (select from pg_depend d
+                  where d.classid = 'pg_class'::regclass and d.objid = c.oid
+                    and d.deptype = 'e')
   and not exists (select from unnest(c.reloptions) o
                   where lower(o) in ('security_invoker=true', 'security_invoker=on',
                                      'security_invoker=yes', 'security_invoker=1'))
@@ -203,6 +207,12 @@ from pg_policies
 where schemaname !~ '^pg_' and schemaname <> 'information_schema'
 """
 
+
+# the roles the connected user acts as (itself, those it inherits, or every one
+# for a superuser): only for them can it change default privileges
+ACTS_AS = """
+select rolname from pg_roles where pg_has_role(oid, 'USAGE')
+"""
 
 # whether the connected user may alter a role and grant it: a superuser always;
 # from PostgreSQL 16 on, only with ADMIN OPTION on it (the role's creator has it),
@@ -247,6 +257,7 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
         state.roles[name] = Role(name, login, superuser, bypassrls=bypassrls)
     state.memberships = {Membership(m, r) for m, r in db.rows(MEMBERSHIPS)}
     state.administers = {name for name, can in db.rows(ADMINISTERS) if can}
+    state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
 
     state.objects = {"databases": {db.database}, "schemas": set()}
     state.objects["schemas"] = {name for (name,) in db.rows(SCHEMAS)}

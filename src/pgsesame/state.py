@@ -134,3 +134,5 @@ class State:
     # the roles the connected user may alter and grant (ADMIN OPTION on PostgreSQL
     # 16+, any non-superuser with CREATEROLE before); None: every role
     administers: set[str] | None = None
+    # the roles the connected user acts as (PostgreSQL); None: every role
+    acts_as: set[str] | None = None

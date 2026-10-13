@@ -416,7 +416,15 @@ pgsesame's model (the PUBLIC mask, roles in priority order, unmasked roles), so
 where policies were attached another way, the first plan shows the correction;
 the import's notes say what changes. Without superuser or `sys:secadmin` it says
 it couldn't see the policies, rather than writing none. A role they refer to but that wasn't selected is
-written as `type: builtin`: referred to, never managed. The flags become the
+written as `type: builtin`: referred to, never managed. So is every other role
+that may execute a function the import names, PUBLIC included, with its grants in
+the same schemas, since a plan takes every grant on a named function as declared.
+
+On Supabase, the platform stays the platform's. Its roles are `type: builtin`:
+anon, authenticated and service_role with their grants in the app's schemas, and
+authenticator with the app's roles it joins (custom JWT roles). Its schemas (auth,
+storage, realtime, extensions ...) and the default privileges of roles postgres
+can't act as are left out, unless `--schema` names one. The flags become the
 spec's `manage:` section, which also works on its own:
 
 ```yaml
