@@ -614,8 +614,9 @@ manage:
 
 def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD DISABLE")
-        conn.execute(f"CREATE USER {P}dba PASSWORD DISABLE")
+        # Redshift refuses a superuser without a password (redshift-local doesn't)
+        conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD 'Sesame-pw-1'")
+        conn.execute(f"CREATE USER {P}dba PASSWORD 'Sesame-pw-2'")
     spec = _spec(tmp_path, SUPERUSERS)
     code, out = _sesame("plan", spec, "--dsn", dsn)
     assert code == 2, out

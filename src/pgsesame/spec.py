@@ -724,6 +724,13 @@ def _check_manage(spec: Spec) -> list[str]:
     problems: list[str] = []
     if spec.manage.superusers is not None and spec.engine == "dsql":
         problems.append("manage.superusers: Aurora DSQL has no superusers")
+    for name in spec.manage.superusers or ():
+        p = spec.principals.get(name)
+        if spec.engine == "redshift" and p is not None and p.password == "disabled":
+            problems.append(
+                f"manage.superusers: {name} has password: disabled, and Redshift "
+                "refuses a superuser without a password"
+            )
     schemas = set(spec.manage.schemas)
     if not schemas:
         return problems

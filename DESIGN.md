@@ -505,15 +505,17 @@ Done in 0.2.1 (2026-10-07), adoption:
 - Done: Redshift system permissions (`system: [...]` on a role, read from
   `svv_system_privileges`), managed once a role lists them, revoking behind
   `--allow-revoke`; any name Redshift knows, as words. Joining `sys:` roles works
-  as built-ins. Tested on redshift-local, which implements ACCESS SYSTEM TABLE;
-  the rest (CREATE USER ...) only on Amazon Redshift.
+  as built-ins. Tested on redshift-local, which implements ACCESS SYSTEM TABLE,
+  and on Redshift Serverless with CREATE USER, ALTER USER, DROP USER and CREATE
+  ROLE too.
 - Done: superusers. `manage.superusers` lists who may be one; any other is
   warned about on every plan, and apply demotes it, or promotes a listed role,
   only with `--allow-superuser`. Never the connected user, the platform's own or
   PostgreSQL's bootstrap superuser. Where the admin isn't a superuser (RDS,
   Aurora, Supabase), an audit. The GitHub Action has no input for the flag on
-  purpose; `args` passes it. Tested on PostgreSQL 14 and 17, redshift-local and
-  Supabase.
+  purpose; `args` passes it. A Redshift user listed with `password: disabled` is
+  refused, as Redshift refuses a superuser without a password. Tested on
+  PostgreSQL 14 and 17, redshift-local, Redshift Serverless and Supabase.
 
 0.4:
 

@@ -1702,6 +1702,18 @@ def test_the_connected_user_stays_a_superuser_and_others_only_audit():
     assert "this plan is an audit" in audit.notes[-1]
 
 
+def test_a_redshift_superuser_needs_a_password():
+    with pytest.raises(spec.SpecError, match="refuses a superuser without a password"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {"etl": {"type": "user", "password": "disabled"}},
+                "manage": {"superusers": ["etl"]},
+            }
+        )
+
+
 def test_redshift_superusers_are_createuser():
     state = _state(
         Role("admin", True, True, "user"),
