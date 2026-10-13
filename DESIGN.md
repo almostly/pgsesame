@@ -465,8 +465,10 @@ Done in 0.2.1 (2026-10-07), adoption:
   `supabase_storage_admin` owns, worked already; switching row-level security on
   a table the connected user can't act as the owner of is now warned about and
   skipped, where it failed the whole apply. Tested on Supabase.
-- Custom JWT roles: a role the spec declares granted to `authenticator`, the one
-  exception to a built-in role's memberships being the platform's.
+- Done: custom JWT roles. A built-in role may join the spec's own roles
+  (`member_of`, and only those), so `authenticator` can switch to a role a JWT
+  names; its memberships in the platform's roles stay the platform's. Tested on
+  Supabase.
 - Warnings: a table in an exposed schema anon or authenticated can reach without
   row-level security; a view without `security_invoker` over one with it.
 - `sesame import` on a Supabase project: its own roles (`authenticator`,

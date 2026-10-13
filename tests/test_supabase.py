@@ -263,3 +263,37 @@ def test_storage_policies_without_switching_the_platforms_rls(storage):
     code, out = _sesame("plan", str(spec), "--dsn", DSN)
     assert "owned by supabase_storage_admin" in out, out
     assert "DISABLE ROW LEVEL SECURITY" not in out
+
+
+JWT_ROLE = """
+version: 1
+engine: postgres
+principals:
+  sesame_test_editor:
+    type: role
+  authenticator:
+    type: builtin
+    member_of: [sesame_test_editor]
+"""
+
+
+@pytest.fixture
+def jwt_role(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+        spec = tmp_path / "jwt.yaml"
+        spec.write_text(textwrap.dedent(JWT_ROLE))
+        yield str(spec)
+        conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
+
+
+def test_a_custom_role_a_jwt_can_name(jwt_role):
+    code, out = _sesame("plan", jwt_role, "--dsn", DSN)
+    assert '+ GRANT "sesame_test_editor" TO "authenticator"' in out, out
+    assert _sesame("apply", jwt_role, "--dsn", DSN)[0] == 0
+    code, out = _sesame("plan", jwt_role, "--dsn", DSN)
+    assert code == 0, out
+    with psycopg.connect(DSN) as conn:
+        assert conn.execute(
+            "SELECT pg_has_role('authenticator', 'sesame_test_editor', 'MEMBER')"
+        ).fetchone() == (True,)

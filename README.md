@@ -204,6 +204,20 @@ principals:
       tables: {select: [reference.countries]}
 ```
 
+A built-in role's memberships are the platform's too, but for the spec's own
+roles it joins (`member_of`, and only those). Supabase's Data API signs in as
+`authenticator` and switches to the role a request's JWT names, so a custom role
+needs granting to it:
+
+```yaml
+principals:
+  editor:  # a JWT with "role": "editor"
+    type: role
+  authenticator:
+    type: builtin
+    member_of: [editor]
+```
+
 Row-level security is declared per table:
 
 ```yaml

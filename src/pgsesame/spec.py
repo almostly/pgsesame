@@ -361,7 +361,6 @@ def _check(spec: Spec) -> list[str]:
                     "password",
                     "password_env",
                     "groups",
-                    "member_of",
                     "owns",
                 )
                 if getattr(p, key)
@@ -369,8 +368,20 @@ def _check(spec: Spec) -> list[str]:
             if owned:
                 problems.append(
                     f"{where}: a built-in role is referred to, not managed; only "
-                    f"privileges can be declared for it ({', '.join(owned)})"
+                    "privileges, and member_of the spec's own roles, can be "
+                    f"declared for it ({', '.join(owned)})"
                 )
+            # joining one of the spec's roles: Supabase's authenticator, which
+            # switches to the role a request's JWT names
+            for parent in p.member_of:
+                target = principals.get(parent)
+                if name == "public":
+                    problems.append(f"{where}.member_of: PUBLIC joins no role")
+                elif target is None or target.type == "builtin":
+                    problems.append(
+                        f"{where}.member_of: {parent} is not one of the spec's own "
+                        "roles; a built-in role joins only those"
+                    )
             continue
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")

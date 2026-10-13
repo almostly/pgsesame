@@ -277,10 +277,16 @@ def make(
                 "is revoked with --allow-revoke"
             )
 
-    # a built-in role's own memberships are the platform's: never managed
+    # a built-in role's memberships are the platform's, but for those in the
+    # spec's own roles (Supabase's authenticator joins the roles JWTs name)
     members = managed - builtins
-    want_members = {m for m in want_members if m.member in members}
-    have_members = {m for m in current.memberships if m.member in members}
+    own = set(spec.principals) - builtins
+    want_members = {m for m in want_members if m.member in managed}
+    have_members = {
+        m
+        for m in current.memberships
+        if m.member in members or (m.member in managed and m.role in own)
+    }
     for m in sorted(want_members - have_members):
         plan.operations.append(
             AddMember(

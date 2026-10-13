@@ -219,6 +219,48 @@ def test_a_builtin_roles_privileges_are_managed_only_where_the_spec_speaks():
     ]  # nothing in public, and its own membership is left alone
 
 
+def test_a_builtin_role_joins_the_specs_own_roles():
+    # Supabase's authenticator switches to the role a request's JWT names
+    loaded = _spec(
+        editor={"type": "role"},
+        authenticator={"type": "builtin", "member_of": ["editor"]},
+    )
+    current = _state(
+        Role("editor", False),
+        Role("auditor", False),
+        Role("authenticator", True),
+        Role("anon", False),
+        memberships={
+            Membership("authenticator", "anon"),  # the platform's: left alone
+            Membership("authenticator", "auditor"),  # not the spec's: left alone
+        },
+    )
+    (op,) = planner.make(loaded, current).operations
+    assert op.statement().as_string(None) == 'GRANT "editor" TO "authenticator"'
+
+    # leaving one of the spec's roles is drift
+    current.memberships.add(Membership("authenticator", "editor"))
+    unjoined = _spec(editor={"type": "role"}, authenticator={"type": "builtin"})
+    (op,) = planner.make(unjoined, current).operations
+    assert isinstance(op, RemoveMember) and op.needs == "revoke"
+
+
+def test_a_builtin_role_joins_only_the_specs_own_roles():
+    with pytest.raises(spec.SpecError) as err:
+        _spec(
+            anon={"type": "builtin"},
+            authenticator={"type": "builtin", "member_of": ["anon", "ghost"]},
+            public={"type": "builtin", "member_of": ["anon"]},
+        )
+    assert sorted(err.value.problems) == [
+        "principals.authenticator.member_of: anon is not one of the spec's own "
+        "roles; a built-in role joins only those",
+        "principals.authenticator.member_of: ghost is not one of the spec's own "
+        "roles; a built-in role joins only those",
+        "principals.public.member_of: PUBLIC joins no role",
+    ]
+
+
 def test_a_builtin_role_takes_only_privileges():
     with pytest.raises(spec.SpecError) as err:
         _spec(platform={"type": "builtin", "login": True, "member_of": []})
