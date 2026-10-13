@@ -48,9 +48,9 @@ principals:
       tables:
         select: [app.*]
 
-  metabase:
+  dashboard:
     type: user
-    password_env: METABASE_PASSWORD
+    password_env: DASHBOARD_PASSWORD
     member_of: [reporting]
 
 default_privileges:

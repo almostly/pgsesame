@@ -9,7 +9,7 @@ tables; [`permissions.yaml`](permissions.yaml) has everything else.
 | A visitor | `anon` | read profiles and published posts |
 | A signed-in user | `authenticated` | also read their own drafts; create their profile and posts; edit and delete only their own, and never change a post's author |
 | The server | `service_role` | everything, past row-level security |
-| A dashboard | `metabase` (in `reporting`) | read everything, over its own login |
+| A dashboard | `dashboard` (in `reporting`) | read everything, over its own login |
 
 ## Why it's written this way
 
@@ -29,7 +29,7 @@ tables; [`permissions.yaml`](permissions.yaml) has everything else.
   later in `app` (from the SQL editor or a migration, as `postgres`). The app's
   users get no default: a new table is unreachable until the spec grants it and
   gives it policies.
-- **The dashboard's password** comes from `METABASE_PASSWORD` when pgsesame
+- **The dashboard's password** comes from `DASHBOARD_PASSWORD` when pgsesame
   creates the user, never from the file.
 
 ## Run it
@@ -44,12 +44,12 @@ tables; [`permissions.yaml`](permissions.yaml) has everything else.
 
    ```bash
    sesame login supabase --host db.<project>.supabase.co --user postgres --database postgres
-   export METABASE_PASSWORD=...
+   export DASHBOARD_PASSWORD=...
    sesame plan permissions.yaml -t supabase
    sesame apply permissions.yaml -t supabase
    sesame plan permissions.yaml -t supabase  # nothing to do
    ```
 
 From then on a change to who can do what is a change to `permissions.yaml`,
-reviewed in a pull request, and a policy someone edits in the dashboard shows up
+reviewed in a pull request, and a policy someone edits in Supabase's dashboard shows up
 as drift in the next plan.

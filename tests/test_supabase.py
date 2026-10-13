@@ -111,19 +111,19 @@ EXAMPLE = Path(__file__).parent.parent / "examples" / "supabase"
 def _example(text: str) -> str:
     """The example in a schema and roles of the test's own, never a real app's."""
     text = re.sub(r"\bapp\b", "sesame_example", text)
-    text = re.sub(r"\b(reporting|metabase)\b", r"sesame_\1", text)
+    text = re.sub(r"\b(reporting|dashboard)\b", r"sesame_\1", text)
     return text.replace("REFERENCES auth.users ON DELETE CASCADE", "")  # no sign-ups
 
 
 def _drop_example(conn):
     conn.execute("DROP SCHEMA IF EXISTS sesame_example CASCADE")
-    conn.execute("DROP ROLE IF EXISTS sesame_metabase")
+    conn.execute("DROP ROLE IF EXISTS sesame_dashboard")
     conn.execute("DROP ROLE IF EXISTS sesame_reporting")
 
 
 @pytest.fixture
 def example(tmp_path, monkeypatch):
-    monkeypatch.setenv("METABASE_PASSWORD", uuid.uuid4().hex)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", uuid.uuid4().hex)
     spec = tmp_path / "permissions.yaml"
     spec.write_text(_example((EXAMPLE / "permissions.yaml").read_text()))
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -377,7 +377,7 @@ def test_import_leaves_the_platform_to_supabase(app_objects, tmp_path):
 
 def test_the_example_as_a_migration(example, tmp_path, monkeypatch):
     # no password to set, so the plan can be a committed file
-    monkeypatch.delenv("METABASE_PASSWORD")
+    monkeypatch.delenv("DASHBOARD_PASSWORD")
     migrations = tmp_path / "migrations"
     code, out = _sesame("plan", example, "--dsn", DSN, "--migration", str(migrations))
     assert code == 2, out
