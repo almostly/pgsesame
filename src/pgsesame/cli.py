@@ -528,6 +528,13 @@ def plan(
         dir_okay=False,
         help="Save the plan as a change set, for sesame apply to run exactly.",
     ),
+    migration: Path | None = typer.Option(
+        None,
+        "--migration",
+        file_okay=False,
+        help="Write the plan as a SQL migration in this directory "
+        "(supabase/migrations); what needs an --allow flag is commented out.",
+    ),
 ) -> None:
     """Show the SQL that would make the database match the spec.
 
@@ -566,7 +573,52 @@ def plan(
         console.print(
             f"[accent]Saved[/accent] to {escape(str(out))}; run it with: sesame apply {escape(str(out))}"
         )
+    if migration is not None:
+        written = _write_migration(result, db, path, migration)
+        console.print(f"[accent]Wrote[/accent] {escape(str(written))}")
     raise typer.Exit(2)
+
+
+def _write_migration(
+    result: planner.Plan, db: Connection, spec_path: Path, directory: Path
+) -> Path:
+    """Write the plan as ``<UTC time>_pgsesame.sql`` in ``directory``; return its path.
+
+    A migration is committed, so a plan that sets a password is refused rather
+    than written. What apply runs only with a flag (revokes, drops, owner changes)
+    is written commented out, with the flag, for a reviewer to take in by hand.
+    """
+    from datetime import datetime, timezone
+
+    from pgsesame.ops import AlterPassword, CreateRole
+
+    secret = [
+        op.name
+        for op in result.operations
+        if isinstance(op, (CreateRole, AlterPassword)) and op.password is not None
+    ]
+    if secret:
+        err.print(
+            f"[error]✗[/error] the plan sets a password for {escape(', '.join(secret))}, "
+            "which a migration file would hold: apply it with sesame apply, or "
+            "declare password: disabled"
+        )
+        raise typer.Exit(1)
+    lines = [
+        f"-- Written by sesame plan from {spec_path.name} against {db.target}.",
+        "-- What needs an --allow flag in sesame apply is commented out.",
+        "",
+    ]
+    for op in result.operations:
+        statement = db.render(op.statement()) + ";"
+        if op.needs:
+            lines.append(f"-- needs --allow-{op.needs}: {statement}")
+        else:
+            lines.append(statement)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{datetime.now(timezone.utc):%Y%m%d%H%M%S}_pgsesame.sql"
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 @app.command()

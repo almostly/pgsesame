@@ -373,3 +373,16 @@ def test_import_leaves_the_platform_to_supabase(app_objects, tmp_path):
     assert "supabase_admin" not in text
     code, out = _sesame("plan", str(imported), "--dsn", DSN)
     assert code == 0, out  # the project as it is: nothing to do
+
+
+def test_the_example_as_a_migration(example, tmp_path, monkeypatch):
+    # no password to set, so the plan can be a committed file
+    monkeypatch.delenv("METABASE_PASSWORD")
+    migrations = tmp_path / "migrations"
+    code, out = _sesame("plan", example, "--dsn", DSN, "--migration", str(migrations))
+    assert code == 2, out
+    (written,) = migrations.glob("*_pgsesame.sql")
+    with psycopg.connect(DSN, autocommit=True) as conn:  # as supabase db push would
+        conn.execute(written.read_bytes())
+    code, out = _sesame("plan", example, "--dsn", DSN)
+    assert code == 0, out

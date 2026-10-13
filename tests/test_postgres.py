@@ -725,6 +725,37 @@ def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     assert code == 0, out  # marts' grants are outside: not drift
 
 
+def test_a_plan_written_as_a_migration(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE ROLE {P}reader")
+        conn.execute(f"GRANT INSERT ON analytics.daily TO {P}reader")  # drift
+    migrations = tmp_path / "supabase" / "migrations"
+    # a password the plan would set stays out of a file someone commits
+    env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-5"}
+    code, out = _sesame(
+        "plan", _spec(tmp_path), "--dsn", dsn, "--migration", str(migrations), env=env
+    )
+    assert code == 1 and "sets a password for" in out, out
+    assert not migrations.exists()
+
+    code, out = _sesame(
+        "plan", _spec(tmp_path), "--dsn", dsn, "--migration", str(migrations)
+    )
+    assert code == 2, out
+    (written,) = migrations.glob("*_pgsesame.sql")
+    assert len(written.name) == len("20261013120000_pgsesame.sql")
+    text = written.read_text()
+    assert f'GRANT SELECT ON TABLE "analytics"."daily" TO "{P}reader";\n' in text
+    revoke = f'REVOKE INSERT ON TABLE "analytics"."daily" FROM "{P}reader";'
+    assert f"-- needs --allow-revoke: {revoke}" in text
+    assert "alice-pw" not in text
+
+    with psycopg.connect(dsn, autocommit=True) as conn:  # as supabase db push would
+        conn.execute(text.encode())
+    code, out = _sesame("plan", _spec(tmp_path), "--dsn", dsn)
+    assert code == 2 and "Plan: 0 to add, 0 to change, 1 to remove" in out, out
+
+
 OWNERSHIP = f"""
 version: 1
 engine: postgres

@@ -192,6 +192,16 @@ sesame show changes.json                       # review it, no database needed
 sesame apply changes.json                      # run exactly that, or refuse if it's stale
 ```
 
+Where migrations change the database, as with Supabase's CLI and preview branches,
+a plan can be one: `--migration` writes it to a directory as
+`<UTC time>_pgsesame.sql`, for review and `supabase db push`. What apply runs only
+with a flag (revokes, drops, owner changes) is in it commented out, with the flag,
+and a plan that sets a password is refused, as the file is committed:
+
+```bash
+sesame plan permissions.yaml -t app --migration supabase/migrations
+```
+
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 

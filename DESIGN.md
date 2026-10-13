@@ -486,7 +486,10 @@ Done in 0.2.1 (2026-10-07), adoption:
   API with `SUPABASE_ACCESS_TOKEN` (port 5432, session mode, not the 6543 it
   reports), else the direct connection, which is IPv6 only. Tested on Supabase
   over IPv4.
-- A plan written as a Supabase migration (`supabase/migrations/*.sql`).
+- Done: a plan written as a migration (`sesame plan --migration
+  supabase/migrations`): `<UTC time>_pgsesame.sql`, what needs an --allow flag
+  commented out, a plan that sets a password refused. Tested on PostgreSQL and on
+  Supabase, the file run as `supabase db push` would.
 - Realtime: `realtime.messages` policies and the `supabase_realtime` publication.
 
 0.4:
