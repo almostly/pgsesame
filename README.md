@@ -229,6 +229,22 @@ after apply is empty; dropping a policy or disabling row-level security needs
 Supabase app: its built-in roles, column grants, policies on `auth.uid()` and a
 dashboard's own login.
 
+Only a table's owner switches its row-level security. On a table the connected
+user can't act as the owner of, a change to `enabled` or `force` is warned about
+and skipped, and its policies are still planned. That is how Supabase's file
+storage works: `storage.objects` belongs to `supabase_storage_admin` with
+row-level security on, and `postgres` may add policies to it:
+
+```yaml
+row_level_security:
+  storage.objects:
+    policies:
+      avatars_own_folder:          # users/<their id>/... in the avatars bucket
+        command: select
+        to: [authenticated]
+        using: "bucket_id = 'avatars' and (select auth.uid())::text = (storage.foldername(name))[1]"
+```
+
 On PostgreSQL, functions and procedures take EXECUTE. `schema.name` names every
 overload, `schema.name(types)` one of them, with the types as PostgreSQL writes
 them (`integer`, not `int`), and `schema.*` every function in the schema; an

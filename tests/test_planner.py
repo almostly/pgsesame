@@ -274,6 +274,23 @@ def test_row_level_security_is_planned_per_table():
     assert [type(op).__name__ for op in altered] == ["AlterPolicy"]
 
 
+def test_row_level_security_on_a_table_the_user_cant_own_plans_only_policies():
+    # Supabase's storage.objects: postgres may create policies on it, not switch
+    # its row-level security
+    current = _state(
+        Role("reader", False),
+        rls={"app.notes": (False, False)},
+        rls_switchable=set(),
+        owners={("tables", "app.notes"): "supabase_storage_admin"},
+    )
+    plan = planner.make(_rls_spec(), current)
+    assert [type(op).__name__ for op in plan.operations] == ["CreatePolicy"]
+    (warning,) = plan.warnings
+    assert warning.startswith(
+        "row_level_security.app.notes: owned by supabase_storage_admin"
+    )
+
+
 def test_row_level_security_problems():
     with pytest.raises(planner.PlanError) as err:
         planner.make(_rls_spec(), _state(Role("reader", False)))

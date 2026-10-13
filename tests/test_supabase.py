@@ -217,3 +217,49 @@ def test_an_auth_hook_only_supabase_auth_admin_may_execute(hook):
         conn.execute("SET LOCAL ROLE authenticated")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             conn.execute("SELECT sesame_sb.custom_access_token_hook('{}')")
+
+
+STORAGE = """
+version: 1
+engine: postgres
+principals:
+  authenticated:
+    type: builtin
+row_level_security:
+  storage.objects:
+    enabled: {enabled}
+    policies:
+      sesame_test_own_files:
+        command: select
+        to: [authenticated]
+        using: "bucket_id = 'sesame-test' and (select auth.uid())::text = (storage.foldername(name))[1]"
+"""
+
+
+def _drop_storage_policy():
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute('DROP POLICY IF EXISTS "sesame_test_own_files" ON storage.objects')
+
+
+@pytest.fixture
+def storage(tmp_path):
+    _drop_storage_policy()
+    yield tmp_path
+    _drop_storage_policy()
+
+
+def test_storage_policies_without_switching_the_platforms_rls(storage):
+    # storage.objects is the whole project's: the test drops nothing but its own
+    # policy (no --allow-drop), and doesn't assume the project has no others
+    spec = storage / "storage.yaml"
+    spec.write_text(textwrap.dedent(STORAGE.format(enabled="true")))
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert '+ CREATE POLICY "sesame_test_own_files" ON "storage"."objects"' in out, out
+    assert _sesame("apply", str(spec), "--dsn", DSN)[0] == 0
+    assert "sesame_test_own_files" not in _sesame("plan", str(spec), "--dsn", DSN)[1]
+
+    # switching its row-level security is the platform's: warned about, skipped
+    spec.write_text(textwrap.dedent(STORAGE.format(enabled="false")))
+    code, out = _sesame("plan", str(spec), "--dsn", DSN)
+    assert "owned by supabase_storage_admin" in out, out
+    assert "DISABLE ROW LEVEL SECURITY" not in out

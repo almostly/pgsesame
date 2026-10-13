@@ -172,8 +172,11 @@ join pg_roles g on g.oid = a.grantee
 where a.grantee <> d.defaclrole
 """
 
+# and whether the connected user may switch it: only as the table's owner, which
+# a platform's tables (Supabase's storage.objects) aren't
 RLS_TABLES = f"""
-select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
+select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
+       pg_has_role(c.relowner, 'USAGE')
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA}
@@ -266,8 +269,11 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
         state.default_privileges.add(
             DefaultGrant(owner, schema, kind, grantee, privilege)
         )
-    for table, enabled, forced in db.rows(RLS_TABLES):
+    state.rls_switchable = set()
+    for table, enabled, forced, switchable in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
+        if switchable:
+            state.rls_switchable.add(table)
     for table, name, command, permissive, roles, using, check in db.rows(POLICIES):
         state.policies[(table, name)] = Policy(
             table,

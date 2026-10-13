@@ -113,6 +113,9 @@ class State:
     public_privileges: set[Privilege] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    # the tables whose row-level security the connected user may switch (it acts
+    # as their owner); None: every table
+    rls_switchable: set[str] | None = None
     policies: dict[tuple[str, str], Policy] = field(default_factory=dict)
     # Redshift masking: policies, attachments, and the masked columns' types
     mask_policies: dict[str, MaskPolicy] = field(default_factory=dict)

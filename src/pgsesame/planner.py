@@ -452,7 +452,9 @@ def make(
             plan.warnings,
         )
     plan.operations += defaults
-    plan.operations += _plan_rls(spec, current, normalized or {}, problems)
+    plan.operations += _plan_rls(
+        spec, current, normalized or {}, problems, plan.warnings
+    )
     if spec.masking is not None:
         plan.operations += masking.plan(
             spec,
@@ -497,21 +499,44 @@ def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
 
 
 def _plan_rls(
-    spec: Spec, current: State, normalized: Normalized, problems: list[str]
+    spec: Spec,
+    current: State,
+    normalized: Normalized,
+    problems: list[str],
+    warnings: list[str],
 ) -> list[Operation]:
-    """Plan row-level security for the tables the spec lists; others are left alone."""
+    """Plan row-level security for the tables the spec lists; others are left alone.
+
+    Only a table's owner switches its row-level security; on a table the connected
+    user can't act as the owner of (a platform's, such as Supabase's
+    storage.objects) a switch is warned about and skipped, and its policies are
+    still planned.
+    """
     ops: list[Operation] = []
     for table, rls in sorted(spec.row_level_security.items()):
         if table not in current.rls:
             problems.append(f"row_level_security.{table}: the table does not exist")
             continue
         enabled, forced = current.rls[table]
+        switches: list[Operation] = []
         if rls.enabled and not enabled:
-            ops.append(EnableRowSecurity(table=table))
+            switches.append(EnableRowSecurity(table=table))
         elif enabled and not rls.enabled:
-            ops.append(DisableRowSecurity(table=table))
+            switches.append(DisableRowSecurity(table=table))
         if rls.force != forced:
-            ops.append(ForceRowSecurity(table=table, force=rls.force))
+            switches.append(ForceRowSecurity(table=table, force=rls.force))
+        if switches and not (
+            current.rls_switchable is None or table in current.rls_switchable
+        ):
+            owner = current.owners.get(("tables", table), "another role")
+            warnings.append(
+                f"row_level_security.{table}: owned by {owner}, which the connected "
+                "user can't act as, so only it switches row-level security "
+                f"(enabled: {str(enabled).lower()}, force: {str(forced).lower()}); "
+                "skipped, its policies are still planned"
+            )
+            switches = []
+        ops += switches
         for name, p in sorted(rls.policies.items()):
             roles = tuple(sorted(p.to))
             using, check = normalized.get((table, name), (p.using, p.with_check))

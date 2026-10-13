@@ -461,8 +461,10 @@ Done in 0.2.1 (2026-10-07), adoption:
   names is declared in full, so PUBLIC's default EXECUTE and Supabase's grants to
   anon and authenticated are drift there; this is what an Auth hook needs. Tested
   on PostgreSQL 14 and 17 and on Supabase. Not yet on Redshift or Aurora DSQL.
-- Storage policies: row-level security policies on `storage.objects`, a table the
-  platform owns, whose RLS switch pgsesame leaves alone.
+- Done: storage policies. Policies on `storage.objects`, which
+  `supabase_storage_admin` owns, worked already; switching row-level security on
+  a table the connected user can't act as the owner of is now warned about and
+  skipped, where it failed the whole apply. Tested on Supabase.
 - Custom JWT roles: a role the spec declares granted to `authenticator`, the one
   exception to a built-in role's memberships being the platform's.
 - Warnings: a table in an exposed schema anon or authenticated can reach without
