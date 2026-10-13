@@ -908,6 +908,12 @@ def login(
     profile: str | None = typer.Option(
         None, "--profile", help="AWS profile (IAM, Data API)."
     ),
+    supabase_ref: str | None = typer.Option(
+        None,
+        "--supabase",
+        help="Supabase project ref: its session pooler with SUPABASE_ACCESS_TOKEN "
+        "set, else its direct connection (IPv6).",
+    ),
     dsql: str | None = typer.Option(
         None,
         "--dsql",
@@ -974,6 +980,23 @@ def login(
         host, port = endpoint.host, port or endpoint.port
         user = user or endpoint.master_user
         rds = None
+    if supabase_ref and not host:
+        from pgsesame import supabase
+
+        try:
+            found = supabase.endpoint(supabase_ref)
+        except Exception as e:  # a bad ref, a refused token ...: say it, save nothing
+            err.print(
+                f"[error]✗ can't look up {escape(supabase_ref)}:[/error] {escape(str(e))}"
+            )
+            raise typer.Exit(1) from None
+        host, port, user = found.host, port or found.port, user or found.user
+        sslmode = "require" if sslmode == "prefer" else sslmode
+        if not found.pooled:
+            console.print(
+                f"[muted]{escape(host)} is IPv6 only; with {supabase.TOKEN} set, "
+                "login finds the session pooler, which takes IPv4 too[/muted]"
+            )
     if method == "password":
         host = host or _ask("Host", interactive)
         user = user or _ask("User", interactive)

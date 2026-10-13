@@ -482,8 +482,10 @@ Done in 0.2.1 (2026-10-07), adoption:
   also writes whoever may execute a function it names, PUBLIC included, which a
   plan otherwise revoked. On the test project: 64 lines instead of 820, and the
   first plan is empty. Tested on Supabase.
-- `sesame login --supabase <ref>`: the session pooler, as the direct connection is
-  IPv6 only.
+- Done: `sesame login --supabase <ref>`: the session pooler from the Management
+  API with `SUPABASE_ACCESS_TOKEN` (port 5432, session mode, not the 6543 it
+  reports), else the direct connection, which is IPv6 only. Tested on Supabase
+  over IPv4.
 - A plan written as a Supabase migration (`supabase/migrations/*.sql`).
 - Realtime: `realtime.messages` policies and the `supabase_realtime` publication.
 

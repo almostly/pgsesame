@@ -140,11 +140,17 @@ sesame login prod --host db.example.com --user admin --database app   # asks for
 sesame login analytics --engine redshift --iam --workgroup analytics --database dev
 sesame login aurora --iam --rds my-cluster            # RDS or Aurora: an IAM token
 sesame login dsql --dsql abc123xyz                    # Aurora DSQL: an IAM token
+sesame login app --supabase abcdefghijklmnopqrst  # Supabase: its session pooler
 sesame targets                     # the saved targets; * marks the default
 sesame use prod                    # the default for plan and apply
 sesame plan permissions.yaml --target analytics
 sesame logout prod                 # forget it and its password
 ```
+
+`--supabase` takes a project ref and connects as `postgres` with TLS. With a
+personal access token in `SUPABASE_ACCESS_TOKEN`, as the Supabase CLI uses, it
+asks Supabase for the project's session pooler, which takes IPv4; without one it
+uses the direct connection, `db.<ref>.supabase.co`, which is IPv6 only.
 
 A target can instead take its password from an environment variable when it
 connects, so a `.env` file or a CI secret supplies it and nothing is stored:
