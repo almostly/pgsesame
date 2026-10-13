@@ -275,6 +275,18 @@ row_level_security:
         using: "bucket_id = 'avatars' and (select auth.uid())::text = (storage.foldername(name))[1]"
 ```
 
+Realtime works the same way: policies on `realtime.messages` authorize Broadcast
+and Presence. Which tables send their changes to Postgres Changes subscribers is
+the `supabase_realtime` publication's list, which a spec can manage too
+(`publications`, on PostgreSQL). pgsesame never creates or drops a publication;
+taking a table out needs `--allow-revoke`:
+
+```yaml
+publications:
+  supabase_realtime:
+    tables: [app.posts]  # or app.* for every table in app
+```
+
 Where Supabase's Data API reaches rows past row-level security, the plan warns,
 whatever the spec says. The API signs in as `authenticator` and switches to one of
 its roles (anon, authenticated, a custom JWT role), so anyone with the project's

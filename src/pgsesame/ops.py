@@ -824,6 +824,38 @@ class ReattachMaskingPolicy(_Attachment):
         return _detach(self)
 
 
+class AddToPublication(Operation):
+    """Publish a table's changes (Supabase Realtime's supabase_realtime)."""
+
+    order: ClassVar[int] = 47  # after its row-level security is on
+    op: Literal["add_to_publication"] = "add_to_publication"
+    publication: str
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER PUBLICATION ... ADD TABLE."""
+        return sql.SQL("ALTER PUBLICATION {} ADD TABLE {}").format(
+            sql.Identifier(self.publication), _table(self.table)
+        )
+
+
+class RemoveFromPublication(Operation):
+    """Stop publishing a table's changes: its subscribers hear nothing more."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 39  # before anything else changes about the table
+    op: Literal["remove_from_publication"] = "remove_from_publication"
+    publication: str
+    table: str
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER PUBLICATION ... DROP TABLE."""
+        return sql.SQL("ALTER PUBLICATION {} DROP TABLE {}").format(
+            sql.Identifier(self.publication), _table(self.table)
+        )
+
+
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
     CreateRole
@@ -850,6 +882,8 @@ AnyOperation = Annotated[
     | DropMaskingPolicy
     | AttachMaskingPolicy
     | DetachMaskingPolicy
-    | ReattachMaskingPolicy,
+    | ReattachMaskingPolicy
+    | AddToPublication
+    | RemoveFromPublication,
     Field(discriminator="op"),
 ]

@@ -214,6 +214,16 @@ ACTS_AS = """
 select rolname from pg_roles where pg_has_role(oid, 'USAGE')
 """
 
+# publications, and the tables each sends the changes of (Supabase Realtime's)
+PUBLICATIONS = """
+select p.pubname, r.rolname, p.puballtables
+from pg_publication p join pg_roles r on r.oid = p.pubowner
+"""
+
+PUBLICATION_TABLES = """
+select pubname, schemaname || '.' || tablename from pg_publication_tables
+"""
+
 # whether the connected user may alter a role and grant it: a superuser always;
 # from PostgreSQL 16 on, only with ADMIN OPTION on it (the role's creator has it),
 # which is what an RDS or Aurora admin user, a member of rds_superuser, works with;
@@ -295,6 +305,11 @@ def read(db: Connection, columns: bool = True, functions: bool = True) -> State:
             DefaultGrant(owner, schema, kind, grantee, privilege)
         )
     state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
+    for name, owner, all_tables in db.rows(PUBLICATIONS):
+        state.publications[name] = (owner, all_tables)
+    state.publication_tables = {
+        (name, table) for name, table in db.rows(PUBLICATION_TABLES)
+    }
     state.rls_switchable = set()
     for table, enabled, forced, switchable in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)

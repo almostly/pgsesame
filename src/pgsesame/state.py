@@ -114,6 +114,9 @@ class State:
     public_privileges: set[Privilege] = field(default_factory=set)
     # row-level security per table: (enabled, forced), and the tables' policies
     rls: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    # publications: name -> (owner, FOR ALL TABLES), and the tables each has
+    publications: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    publication_tables: set[tuple[str, str]] = field(default_factory=set)
     # views that run with their owner's rights (no security_invoker), of those the
     # connected user may change
     definer_views: set[str] = field(default_factory=set)

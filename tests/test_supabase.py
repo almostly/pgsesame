@@ -386,3 +386,41 @@ def test_the_example_as_a_migration(example, tmp_path, monkeypatch):
         conn.execute(written.read_bytes())
     code, out = _sesame("plan", example, "--dsn", DSN)
     assert code == 0, out
+
+
+REALTIME = """
+version: 1
+engine: postgres
+principals: {}
+publications:
+  supabase_realtime:
+    tables: [sesame_rt.feed]
+"""
+
+
+@pytest.fixture
+def feed(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS sesame_rt CASCADE")
+        conn.execute("CREATE SCHEMA sesame_rt")
+        conn.execute("CREATE TABLE sesame_rt.feed (id int PRIMARY KEY)")
+        spec = tmp_path / "realtime.yaml"
+        spec.write_text(textwrap.dedent(REALTIME))
+        yield str(spec)
+        conn.execute(
+            "DROP SCHEMA IF EXISTS sesame_rt CASCADE"
+        )  # and from the publication
+
+
+def test_realtimes_publication(feed):
+    # the project's publication: no --allow-revoke, so no other table leaves it
+    code, out = _sesame("plan", feed, "--dsn", DSN)
+    added = '+ ALTER PUBLICATION "supabase_realtime" ADD TABLE "sesame_rt"."feed"'
+    assert added in out, out
+    assert _sesame("apply", feed, "--dsn", DSN)[0] == 0
+    assert added not in _sesame("plan", feed, "--dsn", DSN)[1]
+    with psycopg.connect(DSN) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM pg_publication_tables "
+            "WHERE pubname = 'supabase_realtime' AND schemaname = 'sesame_rt'"
+        ).fetchone() == (1,)

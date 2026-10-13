@@ -490,7 +490,11 @@ Done in 0.2.1 (2026-10-07), adoption:
   supabase/migrations`): `<UTC time>_pgsesame.sql`, what needs an --allow flag
   commented out, a plan that sets a password refused. Tested on PostgreSQL and on
   Supabase, the file run as `supabase db push` would.
-- Realtime: `realtime.messages` policies and the `supabase_realtime` publication.
+- Done: Realtime. Policies on `realtime.messages` worked already, as for storage;
+  a publication's tables are managed (`publications:`, PostgreSQL), never the
+  publication itself, removal behind `--allow-revoke`, and skipped with a warning
+  where the connected user can't act as its owner. Tested on PostgreSQL and on
+  Supabase's `supabase_realtime`.
 
 0.4:
 

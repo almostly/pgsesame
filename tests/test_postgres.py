@@ -756,6 +756,41 @@ def test_a_plan_written_as_a_migration(dsn, tmp_path):
     assert code == 2 and "Plan: 0 to add, 0 to change, 1 to remove" in out, out
 
 
+PUBLICATION = """
+version: 1
+engine: postgres
+principals: {}
+publications:
+  sesame_test_changes:
+    tables: [analytics.events]
+"""
+
+
+def test_a_publications_tables(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE PUBLICATION sesame_test_changes FOR TABLE analytics.daily")
+    spec = _spec(tmp_path, PUBLICATION)
+    changes = tmp_path / "changes.json"
+    code, out = _sesame("plan", spec, "--dsn", dsn, "-o", str(changes))
+    assert code == 2, out
+    assert (
+        '+ ALTER PUBLICATION "sesame_test_changes" ADD TABLE "analytics"."events"'
+        in out
+    )
+    assert (
+        '- ALTER PUBLICATION "sesame_test_changes" DROP TABLE "analytics"."daily"'
+        in out
+    )
+    # a change set keeps both; apply runs the removal only when allowed
+    assert _sesame("apply", str(changes), "--dsn", dsn, "--allow-revoke")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT schemaname || '.' || tablename FROM pg_publication_tables "
+            "WHERE pubname = 'sesame_test_changes'"
+        ).fetchall() == [("analytics.events",)]
+
+
 OWNERSHIP = f"""
 version: 1
 engine: postgres

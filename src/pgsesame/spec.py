@@ -269,6 +269,14 @@ class Masking(_Model):
     columns: dict[ColumnName, MaskedColumn] = Field(default_factory=dict)
 
 
+class Publication(_Model):
+    """The tables a publication sends the changes of (Supabase Realtime's)."""
+
+    tables: list[ObjectPattern] = Field(
+        default_factory=list, description="schema.table, or schema.* for every one."
+    )
+
+
 class Manage(_Model):
     """What else the spec takes charge of, or how far it reaches, for adoption."""
 
@@ -293,6 +301,10 @@ class Spec(_Model):
         default_factory=dict, description="Tables whose row-level security is managed."
     )
     masking: Masking | None = Field(None, description="Redshift dynamic data masking.")
+    publications: dict[Identifier, Publication] = Field(
+        default_factory=dict,
+        description="PostgreSQL publications whose tables are managed.",
+    )
     manage: Manage = Field(default_factory=Manage, description="Adoption scope.")
 
 
@@ -524,6 +536,7 @@ def _check(spec: Spec) -> list[str]:
     if redshift:
         problems += _check_case(spec)
     problems += _check_rls(spec)
+    problems += _check_publications(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
     problems += _check_owners(spec)
@@ -601,6 +614,18 @@ def _check_rls(spec: Spec) -> list[str]:
             if not (policy.using or policy.with_check):
                 problems.append(f"{where}: needs using or with_check")
     return problems
+
+
+def _check_publications(spec: Spec) -> list[str]:
+    """Check the publications section: PostgreSQL's, and tables named schema.table."""
+    if spec.publications and spec.engine != "postgres":
+        return ["publications: PostgreSQL's (logical replication, Supabase Realtime)"]
+    return [
+        f"publications.{name}.tables: {table}: a table is schema.table or schema.*"
+        for name, publication in spec.publications.items()
+        for table in publication.tables
+        if table.count(".") != 1
+    ]
 
 
 def _check_masking(spec: Spec) -> list[str]:

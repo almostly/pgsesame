@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 
 from pgsesame.ops import (
     AddMember,
+    AddToPublication,
+    RemoveFromPublication,
     AlterOwner,
     AlterPolicy,
     CreatePolicy,
@@ -456,6 +458,7 @@ def make(
     plan.operations += _plan_rls(
         spec, current, normalized or {}, problems, plan.warnings
     )
+    plan.operations += _plan_publications(spec, current, problems, plan.warnings)
     if spec.masking is not None:
         plan.operations += masking.plan(
             spec,
@@ -667,6 +670,51 @@ def _plan_rls(
         for (policy_table, name), _ in sorted(current.policies.items()):
             if policy_table == table and name not in rls.policies:
                 ops.append(DropPolicy(table=table, name=name))
+    return ops
+
+
+def _plan_publications(
+    spec: Spec, current: State, problems: list[str], warnings: list[str]
+) -> list[Operation]:
+    """Plan the tables of the publications the spec lists; others are left alone.
+
+    pgsesame never creates or drops a publication. One FOR ALL TABLES has no list
+    to manage; one the connected user can't act as the owner of is warned about
+    and skipped, as only its owner changes it.
+    """
+    ops: list[Operation] = []
+    tables = current.objects.get("tables", set())
+    for name, publication in sorted(spec.publications.items()):
+        where = f"publications.{name}"
+        if name not in current.publications:
+            problems.append(f"{where}: the publication does not exist")
+            continue
+        owner, all_tables = current.publications[name]
+        if all_tables:
+            problems.append(f"{where}: FOR ALL TABLES, so it has no tables to list")
+            continue
+        want: set[str] = set()
+        for pattern in publication.tables:
+            matched = _expand(pattern, tables)
+            if not matched and not pattern.endswith(".*"):
+                warnings.append(f"{where}.tables: {pattern} does not exist; skipped")
+            want |= matched
+        have = {table for pub, table in current.publication_tables if pub == name}
+        changes: list[Operation] = [
+            AddToPublication(publication=name, table=table)
+            for table in sorted(want - have)
+        ]
+        changes += [
+            RemoveFromPublication(publication=name, table=table)
+            for table in sorted(have - want)
+        ]
+        if changes and current.acts_as is not None and owner not in current.acts_as:
+            warnings.append(
+                f"{where}: owned by {owner}, which the connected user can't act as, "
+                "so only it changes the tables; skipped"
+            )
+            continue
+        ops += changes
     return ops
 
 

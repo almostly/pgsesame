@@ -1469,3 +1469,58 @@ def test_a_view_that_runs_with_its_owners_rights_is_warned_about():
         "public.open_todos: anon (SELECT) can reach this view, which runs with its "
         "owner's rights"
     )
+
+
+def _publication_spec(*tables):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "publications": {"supabase_realtime": {"tables": list(tables)}},
+        }
+    )
+
+
+def _publication_state(owner="postgres", all_tables=False, **extra) -> State:
+    return _state(
+        objects={"tables": {"app.posts", "app.drafts", "app.users"}},
+        publications={"supabase_realtime": (owner, all_tables)},
+        publication_tables={("supabase_realtime", "app.users")},
+        **extra,
+    )
+
+
+def test_a_publication_sends_the_tables_the_spec_lists():
+    plan = planner.make(_publication_spec("app.posts"), _publication_state())
+    assert _statements(plan) == [
+        'ALTER PUBLICATION "supabase_realtime" DROP TABLE "app"."users"',
+        'ALTER PUBLICATION "supabase_realtime" ADD TABLE "app"."posts"',
+    ]
+    assert plan.operations[0].needs == "revoke"
+    every = planner.make(_publication_spec("app.*"), _publication_state())
+    assert len(every.operations) == 2  # drafts and posts added, users kept
+
+
+def test_a_publication_another_role_owns_or_for_all_tables_is_not_changed():
+    plan = planner.make(
+        _publication_spec("app.posts"),
+        _publication_state(owner="supabase_admin", acts_as={"postgres"}),
+    )
+    assert plan.operations == []
+    assert plan.warnings[0].startswith(
+        "publications.supabase_realtime: owned by supabase_admin"
+    )
+    with pytest.raises(planner.PlanError, match="FOR ALL TABLES"):
+        planner.make(
+            _publication_spec("app.posts"), _publication_state(all_tables=True)
+        )
+    with pytest.raises(spec.SpecError, match="publications: PostgreSQL's"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {},
+                "publications": {"p": {"tables": ["a.b"]}},
+            }
+        )
