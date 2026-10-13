@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, cast
 from psycopg import sql
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from pgsesame.spec import PRIVILEGES
+from pgsesame.spec import ATTRIBUTES, PRIVILEGES
 from pgsesame.state import Identity
 
 if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
@@ -239,6 +239,39 @@ class AlterLogin(Operation):
         """Return ALTER ROLE ... LOGIN or NOLOGIN."""
         return sql.SQL("ALTER ROLE {} {}").format(
             sql.Identifier(self.name), sql.SQL("LOGIN" if self.login else "NOLOGIN")
+        )
+
+
+# each attribute's keywords, given and taken, as constants for psycopg.sql
+_ATTRIBUTE = {
+    "createdb": (sql.SQL("CREATEDB"), sql.SQL("NOCREATEDB")),
+    "createrole": (sql.SQL("CREATEROLE"), sql.SQL("NOCREATEROLE")),
+    "replication": (sql.SQL("REPLICATION"), sql.SQL("NOREPLICATION")),
+    "bypassrls": (sql.SQL("BYPASSRLS"), sql.SQL("NOBYPASSRLS")),
+}
+assert set(_ATTRIBUTE) == set(ATTRIBUTES), "every attribute needs its keywords"
+
+
+class SetAttribute(Operation):
+    """Give a PostgreSQL role an attribute (CREATEDB ...), or take it away."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 20
+    op: Literal["set_attribute"] = "set_attribute"
+    name: str
+    attribute: str
+    enabled: bool
+
+    @property
+    def needs(self) -> Gate | None:
+        """Return revoke for taking an attribute away: that's access lost."""
+        return None if self.enabled else "revoke"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER ROLE ... CREATEDB, NOCREATEDB and so on."""
+        given, taken = _ATTRIBUTE[self.attribute]
+        return sql.SQL("ALTER ROLE {} {}").format(
+            sql.Identifier(self.name), given if self.enabled else taken
         )
 
 
@@ -862,6 +895,7 @@ AnyOperation = Annotated[
     | AlterOwner
     | AlterLogin
     | AlterPassword
+    | SetAttribute
     | AddMember
     | Grant
     | Revoke

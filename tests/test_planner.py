@@ -1403,7 +1403,7 @@ def _exposure_state(*privileges: Privilege, api=("anon",), **extra) -> State:
     # Supabase's Data API signs in as authenticator and switches to its roles
     return _state(
         Role("anon", False),
-        Role("service_role", False, bypassrls=True),
+        Role("service_role", False, attributes=frozenset({"bypassrls"})),
         Role("authenticator", True),
         objects={"schemas": {"public"}, "tables": {"public.todos"}},
         rls={"public.todos": (False, False)},
@@ -1545,7 +1545,8 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
 
     full_only = {
         postgres.ACTS_AS,
-        postgres.BYPASS_RLS,
+        postgres.ROLE_ATTRIBUTES,
+        postgres.SETS_ATTRIBUTES,
         postgres.DEFINER_VIEWS,
         postgres.FUNCTIONS,
         postgres.FUNCTION_OWNERS,
@@ -1557,7 +1558,54 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
     on_dsql = Recorder()
     state = dsql.read(cast(Connection, on_dsql))
     assert full_only.isdisjoint(on_dsql.queries)
-    assert (state.acts_as, state.rls_switchable) == (None, None)  # no limit known
+    assert (state.acts_as, state.rls_switchable, state.sets_attributes) == (
+        None,
+        None,
+        None,
+    )  # no limit known
     on_postgres = Recorder()
     postgres.read(cast(Connection, on_postgres))
     assert full_only <= set(on_postgres.queries)
+
+
+def test_role_attributes_are_what_the_spec_says_once_it_says_them():
+    created = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createrole", "createdb"]}),
+        _state(),
+    )
+    assert _statements(created)[1:] == [
+        'ALTER ROLE "migrator" CREATEDB',
+        'ALTER ROLE "migrator" CREATEROLE',
+    ]
+    holder = Role("migrator", True, attributes=frozenset({"createdb", "replication"}))
+    changed = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createdb", "createrole"]}),
+        _state(holder),
+    )
+    assert _statements(changed) == [
+        'ALTER ROLE "migrator" CREATEROLE',
+        'ALTER ROLE "migrator" NOREPLICATION',
+    ]
+    assert [op.needs for op in changed.operations] == [None, "revoke"]
+    # no attributes key: whatever the role has is left alone
+    assert (
+        planner.make(_spec(migrator={"type": "user"}), _state(holder)).operations == []
+    )
+
+
+def test_an_attribute_the_connected_user_cant_set_is_noted_not_attempted():
+    holder = Role("migrator", True)
+    plan = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createdb", "replication"]}),
+        _state(holder, sets_attributes={"createdb", "createrole"}),
+    )
+    assert _statements(plan) == ['ALTER ROLE "migrator" CREATEDB']
+    assert any("can't change its REPLICATION" in note for note in plan.notes)
+
+
+def test_role_attributes_are_postgresqls_and_not_a_builtins():
+    with pytest.raises(spec.SpecError) as err:
+        _spec("redshift", etl={"type": "user", "attributes": ["createdb"]})
+    assert "planned on PostgreSQL only" in err.value.problems[0]
+    with pytest.raises(spec.SpecError, match="referred to, not managed"):
+        _spec(anon={"type": "builtin", "attributes": ["createdb"]})

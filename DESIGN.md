@@ -496,6 +496,18 @@ Done in 0.2.1 (2026-10-07), adoption:
   where the connected user can't act as its owner. Tested on PostgreSQL and on
   Supabase's `supabase_realtime`.
 
+0.3, privileges:
+
+- Done: PostgreSQL role attributes (`attributes: [createdb, createrole,
+  replication, bypassrls]`), managed once a principal lists them, taking one
+  away behind `--allow-revoke`; what a non-superuser admin can't give is noted.
+  Import writes them. Tested on PostgreSQL 14 and 17.
+- Redshift system permissions (`system: [...]` on a role, from
+  `svv_system_privileges`), and a test that joining `sys:` roles works.
+- Superusers: `manage.superusers` lists who may be one; any other is warned
+  about on every plan and demoted only with `--allow-superuser`, never the
+  connected user. On RDS, Aurora and Supabase, where no one is, audit only.
+
 0.4:
 
 - Redshift's row-level security policies (PostgreSQL's are done in 0.2).

@@ -23,7 +23,8 @@ class Role:
     login: bool
     superuser: bool = False
     identity: Identity = "pg"
-    bypassrls: bool = False  # PostgreSQL: row-level security never applies to it
+    # PostgreSQL: CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS, as the spec spells them
+    attributes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, order=True)
@@ -139,3 +140,5 @@ class State:
     administers: set[str] | None = None
     # the roles the connected user acts as (PostgreSQL); None: every role
     acts_as: set[str] | None = None
+    # the attributes the connected user may give or take; None: every one
+    sets_attributes: set[str] | None = None

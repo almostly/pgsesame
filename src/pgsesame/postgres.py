@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from pgsesame.db import Connection, Database
-from pgsesame.spec import Spec
+from pgsesame.spec import ATTRIBUTES, Spec
 from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
 
 ROLES = """
@@ -207,9 +207,19 @@ join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
 """
 
-# roles row-level security never applies to
-BYPASS_RLS = """
-select rolname from pg_roles where rolbypassrls
+# each role's attributes, but LOGIN and SUPERUSER, which are read on their own
+ROLE_ATTRIBUTES = """
+select rolname, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls
+from pg_roles
+"""
+
+# what the connected user may set those to: a superuser, any; from PostgreSQL 16
+# on, a CREATEROLE user those it holds itself; before, CREATEDB and CREATEROLE
+# (REPLICATION and BYPASSRLS were a superuser's)
+SETS_ATTRIBUTES = """
+select rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls,
+       current_setting('server_version_num')::int >= 160000
+from pg_roles where rolname = current_user
 """
 
 POLICIES = """
@@ -267,6 +277,21 @@ def _text_array(value: object) -> list[str]:
     return next(csv.reader([inner], quotechar='"', escapechar="\\"))
 
 
+def _sets_attributes(rows: list) -> set[str]:
+    """Return the attributes the connected user may set, from SETS_ATTRIBUTES."""
+    if not rows:
+        return set()
+    superuser, createrole, createdb, replication, bypassrls, sixteen = rows[0]
+    if superuser:
+        return set(ATTRIBUTES)
+    if not createrole:
+        return set()
+    if not sixteen:
+        return {"createdb", "createrole"}
+    held = {"createdb": createdb, "replication": replication, "bypassrls": bypassrls}
+    return {"createrole"} | {name for name, on in held.items() if on}
+
+
 def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     """Return the current state of the database ``db`` is connected to.
 
@@ -321,8 +346,10 @@ def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     if full:
         state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
         state.rls_switchable = {name for (name,) in db.rows(RLS_SWITCHABLE)}
-        for (name,) in db.rows(BYPASS_RLS):
-            state.roles[name] = replace(state.roles[name], bypassrls=True)
+        for name, *flags in db.rows(ROLE_ATTRIBUTES):
+            has = frozenset(a for a, on in zip(ATTRIBUTES, flags) if on)
+            state.roles[name] = replace(state.roles[name], attributes=has)
+        state.sets_attributes = _sets_attributes(db.rows(SETS_ATTRIBUTES))
         state.definer_views = {name for (name,) in db.rows(DEFINER_VIEWS)}
         for name, owner, all_tables in db.rows(PUBLICATIONS):
             state.publications[name] = (owner, all_tables)

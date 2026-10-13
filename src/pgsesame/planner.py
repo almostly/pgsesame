@@ -35,9 +35,10 @@ from pgsesame.ops import (
     UnlinkIam,
     Revoke,
     RevokeDefault,
+    SetAttribute,
 )
 from pgsesame import masking
-from pgsesame.spec import PRIVILEGES, Spec
+from pgsesame.spec import ATTRIBUTES, PRIVILEGES, Spec
 from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
@@ -220,6 +221,10 @@ def make(
                     password_disabled=p.password == "disabled",
                 )
             )
+            plan.operations += [
+                SetAttribute(name=name, attribute=a, enabled=True)
+                for a in sorted(set(p.attributes or ()))
+            ]
             continue
         if role.superuser:
             plan.notes.append(
@@ -237,6 +242,12 @@ def make(
             )
         elif not redshift and role.login != p.can_login:
             plan.operations.append(AlterLogin(name=name, login=p.can_login))
+        if p.attributes is not None:  # not given: left as they are
+            want = set(p.attributes)
+            plan.operations += [
+                SetAttribute(name=name, attribute=a, enabled=a in want)
+                for a in sorted(want ^ role.attributes)
+            ]
         if p.password_env and name in (current.passwords_refused or ()):
             # the password in the environment doesn't sign it in: disabled or
             # changed by hand since; set it again
@@ -504,7 +515,8 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
         m.role
         for m in joins
         if not (
-            (role := current.roles.get(m.role)) and (role.superuser or role.bypassrls)
+            (role := current.roles.get(m.role))
+            and (role.superuser or "bypassrls" in role.attributes)
         )
     }
     held = {p for p in current.privileges if p.grantee in api or p.grantee == "public"}
@@ -727,13 +739,14 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
     A role the plan creates is the user's own.
     """
     administers = current.administers
-    if administers is None:
-        return plan.operations
+    settable = (
+        set(ATTRIBUTES) if current.sets_attributes is None else current.sets_attributes
+    )
     created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
 
     def reachable(role: str) -> bool:
         """Return whether the plan may alter this role: it creates or administers it."""
-        return role in created or role in administers
+        return administers is None or role in created or role in administers
 
     kept: list[Operation] = []
     for op in plan.operations:
@@ -741,6 +754,16 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
             plan.notes.append(
                 f"{op.name}: can't change its login as this user: needs ADMIN "
                 "OPTION on it (or a superuser)"
+            )
+        elif isinstance(op, SetAttribute) and not reachable(op.name):
+            plan.notes.append(
+                f"{op.name}: can't change its {op.attribute.upper()} as this user: "
+                "needs ADMIN OPTION on it (or a superuser)"
+            )
+        elif isinstance(op, SetAttribute) and op.attribute not in settable:
+            plan.notes.append(
+                f"{op.name}: can't change its {op.attribute.upper()} as this user: "
+                "needs it itself, with CREATEROLE (PostgreSQL 16+), or a superuser"
             )
         elif isinstance(op, (AddMember, RemoveMember)) and not reachable(op.role):
             verb = "grant" if isinstance(op, AddMember) else "revoke"

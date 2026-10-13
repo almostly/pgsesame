@@ -205,6 +205,20 @@ sesame plan permissions.yaml -t app --migration supabase/migrations
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 
+On PostgreSQL a role's attributes are declared too: `createdb`, `createrole`,
+`replication` and `bypassrls`. Once a principal lists them, it has those and no
+others; taking one away needs `--allow-revoke`. A principal that doesn't list
+them keeps whatever it has. An admin that isn't a superuser gives only the
+attributes it holds itself (PostgreSQL 16+; before, CREATEDB and CREATEROLE), and
+the plan notes the rest rather than failing:
+
+```yaml
+principals:
+  migrator:
+    type: user
+    attributes: [createdb, createrole]
+```
+
 A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
 builtin`: granted to and joined, never created or altered, and their privileges are
 managed only in the schemas the spec names for them. PUBLIC, every user, is one too,

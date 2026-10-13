@@ -83,6 +83,10 @@ Privilege = Literal[
     "update",
     "usage",
 ]
+# PostgreSQL role attributes a spec declares (LOGIN has its own key, and
+# SUPERUSER is the superusers' business), in the order the reader reads them
+Attribute = Literal["createdb", "createrole", "replication", "bypassrls"]
+ATTRIBUTES: tuple[str, ...] = get_args(Attribute)
 # PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
 MAX_NAME_BYTES = {"postgres": 63, "redshift": 127, "dsql": 63}
 
@@ -136,6 +140,11 @@ class Principal(_Model):
     # Redshift's sys:secadmin): referred to and granted to, never created or altered
     type: Literal["role", "user", "group", "builtin"]
     login: bool | None = Field(None, description="Defaults to true for users.")
+    attributes: list[Attribute] | None = Field(
+        None,
+        description="PostgreSQL role attributes it has, and no others; left "
+        "unmanaged when not given.",
+    )
     member_of: list[Identifier] = Field(
         default_factory=list, description="Roles it belongs to."
     )
@@ -370,6 +379,7 @@ def _check(spec: Spec) -> list[str]:
                 key
                 for key in (
                     "login",
+                    "attributes",
                     "password",
                     "password_env",
                     "groups",
@@ -397,6 +407,10 @@ def _check(spec: Spec) -> list[str]:
             continue
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")
+        if p.attributes is not None and spec.engine != "postgres":
+            problems.append(
+                f"{where}.attributes: role attributes are planned on PostgreSQL only"
+            )
         if p.groups and not redshift:
             problems.append(f"{where}.groups: groups exist on Redshift only")
         if p.type == "group" and (p.login or p.member_of):
