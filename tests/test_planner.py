@@ -1403,7 +1403,7 @@ def _exposure_state(*privileges: Privilege, api=("anon",), **extra) -> State:
     # Supabase's Data API signs in as authenticator and switches to its roles
     return _state(
         Role("anon", False),
-        Role("service_role", False, bypassrls=True),
+        Role("service_role", False, attributes=frozenset({"bypassrls"})),
         Role("authenticator", True),
         objects={"schemas": {"public"}, "tables": {"public.todos"}},
         rls={"public.todos": (False, False)},
@@ -1545,7 +1545,8 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
 
     full_only = {
         postgres.ACTS_AS,
-        postgres.BYPASS_RLS,
+        postgres.ROLE_ATTRIBUTES,
+        postgres.SETS_ATTRIBUTES,
         postgres.DEFINER_VIEWS,
         postgres.FUNCTIONS,
         postgres.FUNCTION_OWNERS,
@@ -1557,7 +1558,177 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
     on_dsql = Recorder()
     state = dsql.read(cast(Connection, on_dsql))
     assert full_only.isdisjoint(on_dsql.queries)
-    assert (state.acts_as, state.rls_switchable) == (None, None)  # no limit known
+    assert (state.acts_as, state.rls_switchable, state.sets_attributes) == (
+        None,
+        None,
+        None,
+    )  # no limit known
     on_postgres = Recorder()
     postgres.read(cast(Connection, on_postgres))
     assert full_only <= set(on_postgres.queries)
+
+
+def test_role_attributes_are_what_the_spec_says_once_it_says_them():
+    created = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createrole", "createdb"]}),
+        _state(),
+    )
+    assert _statements(created)[1:] == [
+        'ALTER ROLE "migrator" CREATEDB',
+        'ALTER ROLE "migrator" CREATEROLE',
+    ]
+    holder = Role("migrator", True, attributes=frozenset({"createdb", "replication"}))
+    changed = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createdb", "createrole"]}),
+        _state(holder),
+    )
+    assert _statements(changed) == [
+        'ALTER ROLE "migrator" CREATEROLE',
+        'ALTER ROLE "migrator" NOREPLICATION',
+    ]
+    assert [op.needs for op in changed.operations] == [None, "revoke"]
+    # no attributes key: whatever the role has is left alone
+    assert (
+        planner.make(_spec(migrator={"type": "user"}), _state(holder)).operations == []
+    )
+
+
+def test_an_attribute_the_connected_user_cant_set_is_noted_not_attempted():
+    holder = Role("migrator", True)
+    plan = planner.make(
+        _spec(migrator={"type": "user", "attributes": ["createdb", "replication"]}),
+        _state(holder, sets_attributes={"createdb", "createrole"}),
+    )
+    assert _statements(plan) == ['ALTER ROLE "migrator" CREATEDB']
+    assert any("can't change its REPLICATION" in note for note in plan.notes)
+
+
+def test_role_attributes_are_postgresqls_and_not_a_builtins():
+    with pytest.raises(spec.SpecError) as err:
+        _spec("redshift", etl={"type": "user", "attributes": ["createdb"]})
+    assert "planned on PostgreSQL only" in err.value.problems[0]
+    with pytest.raises(spec.SpecError, match="referred to, not managed"):
+        _spec(anon={"type": "builtin", "attributes": ["createdb"]})
+
+
+def test_redshift_system_permissions_once_a_role_lists_them():
+    auditor = Role("auditor", False, identity="role")
+    s = _spec(
+        "redshift",
+        auditor={"type": "role", "system": ["access system table", "create user"]},
+    )
+    state = _state(
+        auditor,
+        system_privileges={("auditor", "create user"), ("auditor", "drop user")},
+    )
+    plan = planner.make(s, state)
+    assert _statements(plan) == [
+        'GRANT ACCESS SYSTEM TABLE TO ROLE "auditor"',
+        'REVOKE DROP USER FROM ROLE "auditor"',
+    ]
+    assert [op.needs for op in plan.operations] == [None, "revoke"]
+    # not listed: left as they are; an older catalog can't say
+    assert (
+        planner.make(_spec("redshift", auditor={"type": "role"}), state).operations
+        == []
+    )
+    with pytest.raises(planner.PlanError, match="no svv_system_privileges"):
+        planner.make(s, _state(auditor, system_privileges=None))
+
+
+def test_system_permissions_are_words_for_redshift_roles():
+    with pytest.raises(spec.SpecError) as err:
+        _spec("redshift", etl={"type": "user", "system": ["create user"]})
+    assert err.value.problems == [
+        "principals.etl.system: Redshift grants system permissions to roles only"
+    ]
+    with pytest.raises(spec.SpecError, match="should match pattern"):
+        _spec("redshift", odd={"type": "role", "system": ["create user; drop table t"]})
+
+
+def _superusers(current_user="admin") -> State:
+    return _state(
+        Role("admin", True, superuser=True),
+        Role("intern", True, superuser=True),
+        Role("rdsadmin", True, superuser=True),
+        Role("boot", True, superuser=True),
+        Role("dba", True),
+        current_user=current_user,
+        bootstrap="boot",
+    )
+
+
+def _listing(*names):
+    return spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {},
+            "manage": {"superusers": list(names)},
+        }
+    )
+
+
+def test_superusers_are_who_manage_superusers_lists():
+    plan = planner.make(_listing("admin", "dba"), _superusers())
+    assert _statements(plan) == [
+        'ALTER ROLE "intern" NOSUPERUSER',
+        'ALTER ROLE "dba" SUPERUSER',
+    ]
+    assert {op.needs for op in plan.operations} == {"superuser"}
+    assert plan.warnings == [
+        "intern is a superuser, which manage.superusers doesn't list"
+    ]
+    assert plan.allowed(True, True, True) == []  # --allow-revoke and the rest: no
+    # the platform's (rdsadmin) and the bootstrap one are never in question
+    assert "rdsadmin" not in " ".join(plan.warnings + plan.notes)
+    # not given: superusers aren't compared
+    assert planner.make(_spec(), _superusers()).operations == []
+
+
+def test_the_connected_user_stays_a_superuser_and_others_only_audit():
+    plan = planner.make(_listing("intern"), _superusers())
+    assert _statements(plan) == []
+    assert plan.warnings == [
+        "admin is a superuser, which manage.superusers doesn't list; it's the "
+        "connected user, so it stays one"
+    ]
+    # an admin that isn't a superuser (RDS, Supabase): warned, not attempted
+    audit = planner.make(_listing("admin"), _superusers(current_user="dba"))
+    assert audit.operations == []
+    assert audit.warnings == [
+        "intern is a superuser, which manage.superusers doesn't list"
+    ]
+    assert "this plan is an audit" in audit.notes[-1]
+
+
+def test_a_redshift_superuser_needs_a_password():
+    with pytest.raises(spec.SpecError, match="refuses a superuser without a password"):
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {"etl": {"type": "user", "password": "disabled"}},
+                "manage": {"superusers": ["etl"]},
+            }
+        )
+
+
+def test_redshift_superusers_are_createuser():
+    state = _state(
+        Role("admin", True, True, "user"),
+        Role("etl", True, True, "user"),
+        current_user="admin",
+    )
+    plan = planner.make(
+        spec.parse(
+            {
+                "version": 1,
+                "engine": "redshift",
+                "principals": {},
+                "manage": {"superusers": ["admin"]},
+            }
+        ),
+        state,
+    )
+    assert _statements(plan) == ['ALTER USER "etl" NOCREATEUSER']

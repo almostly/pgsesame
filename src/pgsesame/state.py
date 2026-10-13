@@ -23,7 +23,8 @@ class Role:
     login: bool
     superuser: bool = False
     identity: Identity = "pg"
-    bypassrls: bool = False  # PostgreSQL: row-level security never applies to it
+    # PostgreSQL: CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS, as the spec spells them
+    attributes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, order=True)
@@ -139,3 +140,11 @@ class State:
     administers: set[str] | None = None
     # the roles the connected user acts as (PostgreSQL); None: every role
     acts_as: set[str] | None = None
+    # Redshift system permissions held by roles: (role, permission, lower case);
+    # None where the catalog has no svv_system_privileges (older redshift-local)
+    system_privileges: set[tuple[str, str]] | None = field(default_factory=set)
+    # who is connected, and PostgreSQL's bootstrap superuser (which stays one)
+    current_user: str | None = None
+    bootstrap: str | None = None
+    # the attributes the connected user may give or take; None: every one
+    sets_attributes: set[str] | None = None

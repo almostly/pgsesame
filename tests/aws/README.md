@@ -44,6 +44,27 @@ schema and for every schema), ownership (schemas and tables to a user) and
 deploy rolled back on a `ThrottlingException` reading the workgroup's endpoint;
 deleting the stack and deploying again worked.
 
+2026-10-13 (us-east-1), for 0.3's privileges: 26 of 28 in `test_redshift.py`,
+`test_aws.py` and `test_masking.py` passed on the first run; the endpoint took
+about 5 minutes. The two failures:
+
+- Redshift refuses a superuser without a password (`CREATEUSER and PASSWORD
+  DISABLE are incompatible`), which redshift-local allows: the superuser test now
+  gives its users passwords, and a spec listing a `password: disabled` user in
+  `manage.superusers` is refused. That test, and the system permission one,
+  then passed.
+- `test_data_api`: the free-tier `admin` user wasn't allowed
+  `redshift-data:BatchExecuteStatement`, which apply needs; not a code change.
+  With `redshift-data:*` added to its inline `RedshiftFullAccess` policy (the
+  user's inline policies are at IAM's 2,048-character limit, so not a statement
+  of its own), both tests in `test_aws.py` passed on a fresh stack.
+
+System permissions beyond redshift-local's, granted, compared and revoked as a
+spec says: `CREATE USER`, `ALTER USER`, `DROP USER`, `CREATE ROLE` and `ACCESS
+SYSTEM TABLE`, with `sys:monitor` joined. The superusers were `rdsdb`, the
+platform's, and the admin: listing the admin in `manage.superusers` warned about
+nothing. Then `sam delete`; the managed admin secret went with the namespace.
+
 ## Aurora PostgreSQL, express configuration
 
 A cluster made with express configuration needs no VPC or template: it is

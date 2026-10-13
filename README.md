@@ -205,6 +205,35 @@ sesame plan permissions.yaml -t app --migration supabase/migrations
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 
+On PostgreSQL a role's attributes are declared too: `createdb`, `createrole`,
+`replication` and `bypassrls`. Once a principal lists them, it has those and no
+others; taking one away needs `--allow-revoke`. A principal that doesn't list
+them keeps whatever it has. An admin that isn't a superuser gives only the
+attributes it holds itself (PostgreSQL 16+; before, CREATEDB and CREATEROLE), and
+the plan notes the rest rather than failing:
+
+```yaml
+principals:
+  migrator:
+    type: user
+    attributes: [createdb, createrole]
+```
+
+On Redshift a role's system permissions are declared the same way, with `system`:
+Redshift grants them to roles only, and checks the names, so any of its permissions
+can be listed as GRANT writes it. Its `sys:` roles are built-in, joined with
+`member_of`:
+
+```yaml
+principals:
+  "sys:monitor":
+    type: builtin
+  auditor:
+    type: role
+    system: [access system table, create user]
+    member_of: ["sys:monitor"]
+```
+
 A platform's own roles (Supabase's `authenticated`, RDS's `rds_iam`) are `type:
 builtin`: granted to and joined, never created or altered, and their privileges are
 managed only in the schemas the spec names for them. PUBLIC, every user, is one too,
@@ -232,6 +261,20 @@ principals:
   authenticator:
     type: builtin
     member_of: [editor]
+```
+
+Superusers bypass every grant, so pgsesame leaves them alone, unless the spec
+says who may be one. Then any other is warned about on every plan, and apply
+makes the plan's changes (`NOSUPERUSER` for the unlisted, `SUPERUSER` for the
+listed; Redshift's `NOCREATEUSER` and `CREATEUSER`) only with `--allow-superuser`,
+which no other flag implies. The connected user stays one (the apply would cut
+itself off), and so do the platform's own (`rdsadmin`, `rdsdb`, `supabase_admin`)
+and PostgreSQL's bootstrap superuser. Only a superuser changes superusers: on RDS,
+Aurora or Supabase, where the admin isn't one, the plan is an audit:
+
+```yaml
+manage:
+  superusers: [dba]
 ```
 
 Row-level security is declared per table:

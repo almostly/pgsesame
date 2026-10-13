@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, cast
 from psycopg import sql
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from pgsesame.spec import PRIVILEGES
+from pgsesame.spec import ATTRIBUTES, PRIVILEGES
 from pgsesame.state import Identity
 
 if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
 Kind = Literal["create", "change", "remove"]
 # what apply needs a flag for: taking access away (revoke), dropping (drop), and
 # changing an owner (owner: the old owner loses what owning gave it)
-Gate = Literal["revoke", "drop", "owner"]
+Gate = Literal["revoke", "drop", "owner", "superuser"]
 
 # GRANT's keyword for each object type, and each privilege's keyword, written out
 # as constants: psycopg.sql only takes literal strings as SQL
@@ -239,6 +239,108 @@ class AlterLogin(Operation):
         """Return ALTER ROLE ... LOGIN or NOLOGIN."""
         return sql.SQL("ALTER ROLE {} {}").format(
             sql.Identifier(self.name), sql.SQL("LOGIN" if self.login else "NOLOGIN")
+        )
+
+
+class SetSuperuser(Operation):
+    """Make a role a superuser, or stop it being one: either way a flag of its own."""
+
+    kind: ClassVar[Kind] = "change"
+    gate: ClassVar[Gate | None] = "superuser"
+    order: ClassVar[int] = 21
+    op: Literal["set_superuser"] = "set_superuser"
+    name: str
+    enabled: bool
+    identity: Identity = "pg"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER ROLE ... [NO]SUPERUSER, or Redshift's ALTER USER ... [NO]CREATEUSER."""
+        if self.identity == "user":
+            keyword = "CREATEUSER" if self.enabled else "NOCREATEUSER"
+            return sql.SQL("ALTER USER {} {}").format(
+                sql.Identifier(self.name), sql.SQL(keyword)
+            )
+        keyword = "SUPERUSER" if self.enabled else "NOSUPERUSER"
+        return sql.SQL("ALTER ROLE {} {}").format(
+            sql.Identifier(self.name), sql.SQL(keyword)
+        )
+
+
+# each attribute's keywords, given and taken, as constants for psycopg.sql
+_ATTRIBUTE = {
+    "createdb": (sql.SQL("CREATEDB"), sql.SQL("NOCREATEDB")),
+    "createrole": (sql.SQL("CREATEROLE"), sql.SQL("NOCREATEROLE")),
+    "replication": (sql.SQL("REPLICATION"), sql.SQL("NOREPLICATION")),
+    "bypassrls": (sql.SQL("BYPASSRLS"), sql.SQL("NOBYPASSRLS")),
+}
+assert set(_ATTRIBUTE) == set(ATTRIBUTES), "every attribute needs its keywords"
+
+
+class SetAttribute(Operation):
+    """Give a PostgreSQL role an attribute (CREATEDB ...), or take it away."""
+
+    kind: ClassVar[Kind] = "change"
+    order: ClassVar[int] = 20
+    op: Literal["set_attribute"] = "set_attribute"
+    name: str
+    attribute: str
+    enabled: bool
+
+    @property
+    def needs(self) -> Gate | None:
+        """Return revoke for taking an attribute away: that's access lost."""
+        return None if self.enabled else "revoke"
+
+    def statement(self) -> sql.Composed:
+        """Return ALTER ROLE ... CREATEDB, NOCREATEDB and so on."""
+        given, taken = _ATTRIBUTE[self.attribute]
+        return sql.SQL("ALTER ROLE {} {}").format(
+            sql.Identifier(self.name), given if self.enabled else taken
+        )
+
+
+# a system permission's words, checked again where they become SQL
+_SYSTEM_PERMISSION = re.compile(r"^[a-z]+( [a-z]+)*$")
+
+
+class _System(Operation):
+    """A Redshift system permission of a role (GRANT ... TO ROLE)."""
+
+    role: str
+    permission: str
+
+    def _permission(self) -> sql.SQL:
+        """Return the permission as SQL keywords, if it is only words."""
+        if not _SYSTEM_PERMISSION.match(self.permission):
+            raise ValueError(f"{self.permission}: not a system permission")
+        return sql.SQL(cast("LiteralString", self.permission.upper()))
+
+
+class GrantSystem(_System):
+    """Give a Redshift role a system permission."""
+
+    order: ClassVar[int] = 35  # after the role exists
+    op: Literal["grant_system"] = "grant_system"
+
+    def statement(self) -> sql.Composed:
+        """Return GRANT <permission> TO ROLE ..."""
+        return sql.SQL("GRANT {} TO ROLE {}").format(
+            self._permission(), sql.Identifier(self.role)
+        )
+
+
+class RevokeSystem(_System):
+    """Take a system permission from a Redshift role."""
+
+    kind: ClassVar[Kind] = "remove"
+    gate: ClassVar[Gate | None] = "revoke"
+    order: ClassVar[int] = 55
+    op: Literal["revoke_system"] = "revoke_system"
+
+    def statement(self) -> sql.Composed:
+        """Return REVOKE <permission> FROM ROLE ..."""
+        return sql.SQL("REVOKE {} FROM ROLE {}").format(
+            self._permission(), sql.Identifier(self.role)
         )
 
 
@@ -862,6 +964,10 @@ AnyOperation = Annotated[
     | AlterOwner
     | AlterLogin
     | AlterPassword
+    | SetAttribute
+    | SetSuperuser
+    | GrantSystem
+    | RevokeSystem
     | AddMember
     | Grant
     | Revoke

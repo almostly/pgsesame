@@ -35,9 +35,13 @@ from pgsesame.ops import (
     UnlinkIam,
     Revoke,
     RevokeDefault,
+    RevokeSystem,
+    SetAttribute,
+    SetSuperuser,
+    GrantSystem,
 )
 from pgsesame import masking
-from pgsesame.spec import PRIVILEGES, Spec
+from pgsesame.spec import ATTRIBUTES, PRIVILEGES, Spec
 from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
 
 # object types this milestone reads and plans
@@ -73,10 +77,19 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
 
     def allowed(
-        self, allow_revoke: bool, allow_drop: bool, allow_owner: bool = False
+        self,
+        allow_revoke: bool,
+        allow_drop: bool,
+        allow_owner: bool = False,
+        allow_superuser: bool = False,
     ) -> list[Operation]:
         """Return the operations apply may run with these flags."""
-        gates = {"revoke": allow_revoke, "drop": allow_drop, "owner": allow_owner}
+        gates = {
+            "revoke": allow_revoke,
+            "drop": allow_drop,
+            "owner": allow_owner,
+            "superuser": allow_superuser,
+        }
         return [op for op in self.operations if op.needs is None or gates[op.needs]]
 
 
@@ -220,6 +233,14 @@ def make(
                     password_disabled=p.password == "disabled",
                 )
             )
+            plan.operations += [
+                SetAttribute(name=name, attribute=a, enabled=True)
+                for a in sorted(set(p.attributes or ()))
+            ]
+            plan.operations += [
+                GrantSystem(role=name, permission=permission)
+                for permission in sorted(set(p.system or ()))
+            ]
             continue
         if role.superuser:
             plan.notes.append(
@@ -237,6 +258,26 @@ def make(
             )
         elif not redshift and role.login != p.can_login:
             plan.operations.append(AlterLogin(name=name, login=p.can_login))
+        if p.attributes is not None:  # not given: left as they are
+            want = set(p.attributes)
+            plan.operations += [
+                SetAttribute(name=name, attribute=a, enabled=a in want)
+                for a in sorted(want ^ role.attributes)
+            ]
+        if p.system is not None and current.system_privileges is None:
+            problems.append(
+                f"principals.{name}.system: this Redshift has no "
+                "svv_system_privileges, so its system permissions can't be read"
+            )
+        elif p.system is not None:  # not given: left as they are
+            want = set(p.system)
+            have = {s for r, s in current.system_privileges or () if r == name}
+            plan.operations += [
+                GrantSystem(role=name, permission=s) for s in sorted(want - have)
+            ]
+            plan.operations += [
+                RevokeSystem(role=name, permission=s) for s in sorted(have - want)
+            ]
         if p.password_env and name in (current.passwords_refused or ()):
             # the password in the environment doesn't sign it in: disabled or
             # changed by hand since; set it again
@@ -471,6 +512,7 @@ def make(
     if problems:
         raise PlanError(problems)
 
+    plan.operations += _plan_superusers(spec, current, plan, identity)
     plan.operations = _within_reach(plan, current)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     if spec.engine == "postgres":
@@ -504,7 +546,8 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
         m.role
         for m in joins
         if not (
-            (role := current.roles.get(m.role)) and (role.superuser or role.bypassrls)
+            (role := current.roles.get(m.role))
+            and (role.superuser or "bypassrls" in role.attributes)
         )
     }
     held = {p for p in current.privileges if p.grantee in api or p.grantee == "public"}
@@ -673,6 +716,47 @@ def _plan_rls(
     return ops
 
 
+def _plan_superusers(
+    spec: Spec, current: State, plan: Plan, identity
+) -> list[Operation]:
+    """Plan who is a superuser, when manage.superusers lists who may be one.
+
+    Any other superuser is warned about on every plan, and made an ordinary role
+    behind --allow-superuser; a listed role that isn't one is made one, behind the
+    same flag. Never changed: the connected user (the apply would cut itself
+    off), the platform's own (rdsadmin, supabase_admin ...) and PostgreSQL's
+    bootstrap superuser. Only a superuser changes superusers: for anyone else, as
+    on RDS, Aurora or Supabase, the plan is an audit.
+    """
+    listed = spec.manage.superusers
+    if listed is None:
+        return []
+    me = current.current_user
+    able = me is not None and _superuser(current, me)
+    superusers = {name for name, role in current.roles.items() if role.superuser}
+    kept = {name for name in superusers if _system_role(name)} | {current.bootstrap}
+    created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
+    ops: list[Operation] = []
+    for name in sorted(superusers - set(listed) - kept):
+        warning = f"{name} is a superuser, which manage.superusers doesn't list"
+        if name == me:
+            warning += "; it's the connected user, so it stays one"
+        plan.warnings.append(warning)
+        if able and name != me:
+            ops.append(SetSuperuser(name=name, enabled=False, identity=identity(name)))
+    for name in sorted(set(listed) - superusers):
+        if name not in current.roles and name not in created:
+            plan.warnings.append(f"manage.superusers: {name} does not exist; skipped")
+        elif able:
+            ops.append(SetSuperuser(name=name, enabled=True, identity=identity(name)))
+    if ops == [] and not able and plan.warnings and me is not None:
+        plan.notes.append(
+            f"superusers: {me} isn't one, so only a superuser can change them; "
+            "this plan is an audit"
+        )
+    return ops
+
+
 def _plan_publications(
     spec: Spec, current: State, problems: list[str], warnings: list[str]
 ) -> list[Operation]:
@@ -727,13 +811,14 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
     A role the plan creates is the user's own.
     """
     administers = current.administers
-    if administers is None:
-        return plan.operations
+    settable = (
+        set(ATTRIBUTES) if current.sets_attributes is None else current.sets_attributes
+    )
     created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
 
     def reachable(role: str) -> bool:
         """Return whether the plan may alter this role: it creates or administers it."""
-        return role in created or role in administers
+        return administers is None or role in created or role in administers
 
     kept: list[Operation] = []
     for op in plan.operations:
@@ -741,6 +826,16 @@ def _within_reach(plan: Plan, current: State) -> list[Operation]:
             plan.notes.append(
                 f"{op.name}: can't change its login as this user: needs ADMIN "
                 "OPTION on it (or a superuser)"
+            )
+        elif isinstance(op, SetAttribute) and not reachable(op.name):
+            plan.notes.append(
+                f"{op.name}: can't change its {op.attribute.upper()} as this user: "
+                "needs ADMIN OPTION on it (or a superuser)"
+            )
+        elif isinstance(op, SetAttribute) and op.attribute not in settable:
+            plan.notes.append(
+                f"{op.name}: can't change its {op.attribute.upper()} as this user: "
+                "needs it itself, with CREATEROLE (PostgreSQL 16+), or a superuser"
             )
         elif isinstance(op, (AddMember, RemoveMember)) and not reachable(op.role):
             verb = "grant" if isinstance(op, AddMember) else "revoke"

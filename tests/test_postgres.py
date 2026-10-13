@@ -791,6 +791,94 @@ def test_a_publications_tables(dsn, tmp_path):
         ).fetchall() == [("analytics.events",)]
 
 
+ATTRIBUTES = f"""
+version: 1
+engine: postgres
+principals:
+  {P}migrator:
+    type: role
+    attributes: [createdb, createrole]
+  {P}replicator:
+    type: role
+    attributes: [replication]
+"""
+
+
+def test_role_attributes(dsn, tmp_path):
+    spec = _spec(tmp_path, ATTRIBUTES)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f'~ ALTER ROLE "{P}migrator" CREATEDB' in out, out
+    assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"ALTER ROLE {P}migrator BYPASSRLS")  # by hand: drift
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert f'~ ALTER ROLE "{P}migrator" NOBYPASSRLS' in out, out
+    assert "needs --allow-revoke" in out
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT rolcreatedb, rolcreaterole, rolbypassrls, rolreplication "
+            "FROM pg_roles WHERE rolname = %s",
+            (f"{P}migrator",),
+        ).fetchone() == (True, True, False, False)
+
+    # import writes them, so its spec plans nothing
+    imported = tmp_path / "imported.yaml"
+    assert _sesame("import", "--dsn", dsn, "--prefix", P, "-o", str(imported))[0] == 0
+    assert "attributes:\n    - createdb\n    - createrole" in imported.read_text()
+    assert _sesame("plan", str(imported), "--dsn", dsn)[0] == 0
+
+
+def test_an_admin_sets_only_the_attributes_it_holds(dsn, tmp_path):
+    with psycopg.connect(dsn) as conn:
+        if conn.info.server_version < 160000:
+            pytest.skip("from PostgreSQL 16 an admin gives only what it holds")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE ROLE {P}admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'")
+    admin = make_conninfo(dsn, user=f"{P}admin", password="pw")
+    code, out = _sesame("plan", _spec(tmp_path, ATTRIBUTES), "--dsn", admin)
+    assert code == 2, out
+    assert f'~ ALTER ROLE "{P}migrator" CREATEDB' in out, out
+    assert f"{P}replicator: can't change its REPLICATION as this user" in out, out
+    assert f'ALTER ROLE "{P}replicator" REPLICATION' not in out
+    assert _sesame("apply", _spec(tmp_path, ATTRIBUTES), "--dsn", admin)[0] == 0
+
+
+SUPERUSERS = f"""
+version: 1
+engine: postgres
+principals: {{}}
+manage:
+  superusers: [{P}dba]
+"""
+
+
+def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(f"CREATE ROLE {P}intern LOGIN SUPERUSER")
+        conn.execute(f"CREATE ROLE {P}dba LOGIN")
+    spec = _spec(tmp_path, SUPERUSERS)
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 2, out
+    assert f"! {P}intern is a superuser, which manage.superusers doesn't list" in out
+    assert f'ALTER ROLE "{P}intern" NOSUPERUSER  needs --allow-superuser' in out, out
+    assert f'ALTER ROLE "{P}dba" SUPERUSER  needs --allow-superuser' in out, out
+    assert "postgres is a superuser" not in out  # the bootstrap superuser stays one
+    # without the flag nothing changes, whatever else is allowed
+    flags = ["--allow-revoke", "--allow-drop", "--allow-owner"]
+    assert _sesame("apply", spec, "--dsn", dsn, *flags)[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 2
+    assert _sesame("apply", spec, "--dsn", dsn, "--allow-superuser")[0] == 0
+    assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT rolname FROM pg_roles WHERE rolsuper AND rolname LIKE %s",
+            (f"{P}%",),
+        ).fetchall() == [(f"{P}dba",)]
+
+
 OWNERSHIP = f"""
 version: 1
 engine: postgres

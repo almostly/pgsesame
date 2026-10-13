@@ -83,6 +83,13 @@ Privilege = Literal[
     "update",
     "usage",
 ]
+# PostgreSQL role attributes a spec declares (LOGIN has its own key, and
+# SUPERUSER is the superusers' business), in the order the reader reads them
+Attribute = Literal["createdb", "createrole", "replication", "bypassrls"]
+ATTRIBUTES: tuple[str, ...] = get_args(Attribute)
+# a Redshift system permission, as GRANT writes it: access system table, create
+# user ... Redshift has dozens and adds more, so it checks the name, not pgsesame
+SystemPermission = Annotated[str, StringConstraints(pattern=r"^[a-z]+( [a-z]+)*$")]
 # PostgreSQL truncates names to NAMEDATALEN - 1 bytes; Redshift allows 127
 MAX_NAME_BYTES = {"postgres": 63, "redshift": 127, "dsql": 63}
 
@@ -136,6 +143,11 @@ class Principal(_Model):
     # Redshift's sys:secadmin): referred to and granted to, never created or altered
     type: Literal["role", "user", "group", "builtin"]
     login: bool | None = Field(None, description="Defaults to true for users.")
+    attributes: list[Attribute] | None = Field(
+        None,
+        description="PostgreSQL role attributes it has, and no others; left "
+        "unmanaged when not given.",
+    )
     member_of: list[Identifier] = Field(
         default_factory=list, description="Roles it belongs to."
     )
@@ -146,6 +158,11 @@ class Principal(_Model):
     privileges: dict[ObjectType, dict[Privilege, list[ObjectPattern]]] = Field(
         default_factory=dict,
         description="Object type -> privilege -> objects (schema.* for all).",
+    )
+    system: list[SystemPermission] | None = Field(
+        None,
+        description="Redshift system permissions a role has, and no others; left "
+        "unmanaged when not given.",
     )
     password_env: EnvVar | None = Field(
         None, description="Environment variable holding the password."
@@ -288,6 +305,11 @@ class Manage(_Model):
         default_factory=list,
         description="Also manage undeclared roles named so: their grants become drift.",
     )
+    superusers: list[Identifier] | None = Field(
+        None,
+        description="Who may be a superuser; any other is drift. Not given: "
+        "superusers aren't compared.",
+    )
 
 
 class Spec(_Model):
@@ -370,6 +392,8 @@ def _check(spec: Spec) -> list[str]:
                 key
                 for key in (
                     "login",
+                    "attributes",
+                    "system",
                     "password",
                     "password_env",
                     "groups",
@@ -397,6 +421,14 @@ def _check(spec: Spec) -> list[str]:
             continue
         if p.type == "group" and not redshift:
             problems.append(f"{where}.type: groups exist on Redshift only")
+        if p.attributes is not None and spec.engine != "postgres":
+            problems.append(
+                f"{where}.attributes: role attributes are planned on PostgreSQL only"
+            )
+        if p.system is not None and not (redshift and p.type == "role"):
+            problems.append(
+                f"{where}.system: Redshift grants system permissions to roles only"
+            )
         if p.groups and not redshift:
             problems.append(f"{where}.groups: groups exist on Redshift only")
         if p.type == "group" and (p.login or p.member_of):
@@ -685,11 +717,23 @@ def _check_masking(spec: Spec) -> list[str]:
 
 
 def _check_manage(spec: Spec) -> list[str]:
-    """With manage.schemas, the spec grants nothing outside those schemas."""
+    """With manage.schemas, the spec grants nothing outside those schemas.
+
+    And Aurora DSQL has no superusers to list.
+    """
+    problems: list[str] = []
+    if spec.manage.superusers is not None and spec.engine == "dsql":
+        problems.append("manage.superusers: Aurora DSQL has no superusers")
+    for name in spec.manage.superusers or ():
+        p = spec.principals.get(name)
+        if spec.engine == "redshift" and p is not None and p.password == "disabled":
+            problems.append(
+                f"manage.superusers: {name} has password: disabled, and Redshift "
+                "refuses a superuser without a password"
+            )
     schemas = set(spec.manage.schemas)
     if not schemas:
-        return []
-    problems: list[str] = []
+        return problems
     for name, p in spec.principals.items():
         for kind, grants in p.privileges.items():
             if kind == "databases":
