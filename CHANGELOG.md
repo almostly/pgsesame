@@ -11,6 +11,41 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.3.0 (2026-10-13)
+
+Supabase support, and privileges beyond grants: function grants, storage and
+Realtime, custom JWT roles, warnings where the Data API reaches rows past
+row-level security, Supabase-aware import, login and migrations; and role
+attributes, Redshift system permissions and superusers. The new keys are opt-in;
+one thing a 0.2 spec may plan differently: grants on functions, which 0.2 noted and
+skipped, are now planned.
+
+### Added
+
+- **Planner**: EXECUTE on PostgreSQL functions and procedures, by schema.name (every overload), schema.name(types) or schema.*; a function the spec names is declared in full, so PUBLIC's default EXECUTE and Supabase's grants to anon and authenticated are drift there, as an Auth hook needs
+- **Spec**: a built-in role joins the spec's own roles (member_of, only those), so Supabase's authenticator can switch to a custom role a JWT names; its memberships in the platform's roles stay the platform's
+- **Spec**: a publication's tables (publications:, PostgreSQL), as Supabase Realtime's supabase_realtime sends their changes; removal needs --allow-revoke, and publications are never created or dropped
+- **Planner**: a plan warns where Supabase's Data API reaches rows past row-level security, a table with it off or a view without security_invoker that a role authenticator switches to can read or write
+- **Plan**: sesame plan --migration writes the plan as <UTC time>_pgsesame.sql for supabase db push, what needs an --allow flag commented out; a plan that sets a password is refused, as the file is committed
+- **Login**: sesame login --supabase <ref> finds a project's session pooler with SUPABASE_ACCESS_TOKEN set, else uses its direct connection, which is IPv6 only
+- **Spec**: PostgreSQL role attributes (createdb, createrole, replication, bypassrls), managed once a principal lists them; taking one away needs --allow-revoke, and what a non-superuser admin can't give is noted; import writes them
+- **Spec**: Redshift system permissions on a role (system: [access system table, ...]), managed once it lists them, revoked with --allow-revoke; import writes them, and joining sys: roles is tested
+- **Spec**: manage.superusers lists who may be a superuser; any other is warned about on every plan, and apply demotes or promotes only with --allow-superuser, never the connected user, the platform's own or PostgreSQL's bootstrap superuser; an audit where the admin isn't one. A Redshift user with password: disabled can't be listed, as Redshift refuses a superuser without a password
+- **Examples**: pgsesame for a Supabase app: built-in roles, column grants, auth.uid() policies and a dashboard's login; tested on Supabase
+
+### Changed
+
+- **Planner**: a spec's grants on functions, which 0.2 noted as planned from a later milestone and skipped, are planned; a function they name gets exactly the EXECUTE grants the spec gives, so PUBLIC's default is revoked with --allow-revoke
+- **Import**: on Supabase the platform stays the platform's: its roles written as built-in, its schemas and other owners' default privileges left out; default privileges of an owner the connected user can't act as are left alone by plans too
+- **Planner**: a built-in role's unmodeled privileges are noted only where the spec speaks for it (declaring anon noted every view in public)
+- **CI**: redshift-local pinned to oblako 0.4.1, which refuses default privileges to an owner that can't create in the schema as Redshift does; a test applies such a spec end to end
+
+### Fixed
+
+- **Planner**: a built-in role's default privileges are managed in the schemas the spec names for it, so a rule for service_role converges instead of being planned again on every run
+- **Planner**: row-level security is switched only on tables the connected user can act as the owner of; elsewhere (Supabase's storage.objects) the switch is warned about and skipped and the policies still planned, where it failed the whole apply
+- **Import**: whoever may execute a function the import names is written too, PUBLIC included, so the first plan is empty (it revoked PUBLIC's default EXECUTE)
+
 ## v0.2.8 (2026-10-11)
 
 A clean plan no longer turns into a failed apply on Redshift's default privileges,
