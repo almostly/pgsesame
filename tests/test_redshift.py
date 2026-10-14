@@ -574,17 +574,24 @@ principals:
     type: builtin
   {P}auditor:
     type: role
-    system: [access system table]
+    system: [access system table, create user, alter user, drop user, create role]
     member_of: ["sys:monitor"]
 """
+PERMISSIONS = [
+    "ACCESS SYSTEM TABLE",
+    "CREATE USER",
+    "ALTER USER",
+    "DROP USER",
+    "CREATE ROLE",
+]
 
 
 def test_system_permissions_and_sys_roles(dsn, tmp_path):
-    # redshift-local implements ACCESS SYSTEM TABLE of Redshift's system permissions
     spec = _spec(tmp_path, SYSTEM)
     code, out = _sesame("plan", spec, "--dsn", dsn)
     assert code == 2, out
-    assert f'+ GRANT ACCESS SYSTEM TABLE TO ROLE "{P}auditor"' in out, out
+    for permission in PERMISSIONS:
+        assert f'+ GRANT {permission} TO ROLE "{P}auditor"' in out, out
     assert f'+ GRANT ROLE "sys:monitor" TO ROLE "{P}auditor"' in out, out
     assert _sesame("apply", spec, "--dsn", dsn)[0] == 0
     code, out = _sesame("plan", spec, "--dsn", dsn)
@@ -592,12 +599,15 @@ def test_system_permissions_and_sys_roles(dsn, tmp_path):
 
     imported = tmp_path / "imported.yaml"
     assert _sesame("import", "--dsn", dsn, "--prefix", P, "-o", str(imported))[0] == 0
-    assert "system:\n    - access system table" in imported.read_text()
+    text = imported.read_text()
+    for permission in PERMISSIONS:
+        assert f"    - {permission.lower()}\n" in text, text
 
     # no longer listed: drift, revoked only when allowed
-    _spec(tmp_path, SYSTEM.replace("system: [access system table]", "system: []"))
+    _spec(tmp_path, SYSTEM.replace("create user, ", ""))
     code, out = _sesame("plan", spec, "--dsn", dsn)
-    assert f'- REVOKE ACCESS SYSTEM TABLE FROM ROLE "{P}auditor"' in out, out
+    assert f'- REVOKE CREATE USER FROM ROLE "{P}auditor"' in out, out
+    assert "REVOKE ACCESS SYSTEM TABLE" not in out, out
     assert "needs --allow-revoke" in out
     assert _sesame("apply", spec, "--dsn", dsn, "--allow-revoke")[0] == 0
     assert _sesame("plan", spec, "--dsn", dsn)[0] == 0
@@ -614,7 +624,9 @@ manage:
 
 def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
     with psycopg.connect(dsn, autocommit=True) as conn:
-        # Redshift refuses a superuser without a password (redshift-local doesn't)
+        # why manage.superusers refuses a password: disabled user on Redshift
+        with pytest.raises(psycopg.errors.SyntaxError, match="incompatible"):
+            conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD DISABLE")
         conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD 'Sesame-pw-1'")
         conn.execute(f"CREATE USER {P}dba PASSWORD 'Sesame-pw-2'")
     spec = _spec(tmp_path, SUPERUSERS)
