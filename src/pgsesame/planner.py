@@ -552,6 +552,7 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
     }
     held = {p for p in current.privileges if p.grantee in api or p.grantee == "public"}
     rls = {table: enabled for table, (enabled, _) in current.rls.items()}
+    defaults = set(current.default_privileges)
     for op in operations:
         if isinstance(op, (Grant, Revoke)):
             p = Privilege(op.grantee, op.object_type, op.object_name, op.privilege)
@@ -559,6 +560,14 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
                 held.add(p)
             else:
                 held.discard(p)
+        elif isinstance(op, (GrantDefault, RevokeDefault)):
+            d = DefaultGrant(
+                op.owner, op.in_schema, op.object_type, op.grantee, op.privilege
+            )
+            if isinstance(op, GrantDefault):
+                defaults.add(d)
+            else:
+                defaults.discard(d)
         elif isinstance(op, (EnableRowSecurity, DisableRowSecurity)):
             rls[op.table] = isinstance(op, EnableRowSecurity)
     usable = {
@@ -609,6 +618,52 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
                 "rights, past the row-level security of the tables it reads "
                 "(security_invoker = true makes it run with theirs)"
             )
+    return warnings + _exposed_by_default(defaults, api, usable, current.acts_as)
+
+
+def _exposed_by_default(
+    defaults: set[DefaultGrant],
+    api: set[str],
+    usable: set[tuple[str, str]],
+    acts_as: set[str] | None,
+) -> list[str]:
+    """Warn where default privileges give the Data API's roles each new table.
+
+    PostgreSQL makes a table with row-level security off, so its rows are open to
+    them until it is turned on. Supabase's own defaults in public did this until
+    it stopped them; a spec imported before then still lists them. Only defaults
+    of an owner the connected user can act as are said: the others aren't its to
+    change.
+    """
+    given: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for d in defaults:
+        if d.object_type != "tables" or d.privilege not in _ROW_PRIVILEGES:
+            continue
+        if acts_as is not None and d.owner not in acts_as:
+            continue
+        if d.grantee == "public":
+            who, users = "PUBLIC", api | {"public"}
+        elif d.grantee in api:
+            who, users = d.grantee, {d.grantee, "public"}
+        else:
+            continue
+        if d.schema and not any((user, d.schema) in usable for user in users):
+            continue
+        given.setdefault((d.owner, d.schema), {}).setdefault(who, set()).add(
+            d.privilege
+        )
+    warnings = []
+    for (owner, schema), by in sorted(given.items()):
+        who = ", ".join(
+            f"{name} ({', '.join(sorted(privileges)).upper()})"
+            for name, privileges in sorted(by.items())
+        )
+        where = f"in {schema}" if schema else "in every schema"
+        warnings.append(
+            f"each table {owner} creates {where} is given to {who} by default "
+            "privileges: its rows are open to them until its row-level security is "
+            "turned on"
+        )
     return warnings
 
 
