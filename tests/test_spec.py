@@ -375,3 +375,17 @@ def test_iam_links_are_aurora_dsqls():
     ]
     with pytest.raises(spec.SpecError):  # not an ARN
         _parse(engine="dsql", principals={"app": {"type": "user", "iam": ["app"]}})
+
+
+def test_a_redshift_superuser_has_a_password():
+    principals = {"dba": {"type": "user", "password": "disabled"}}
+    problems = _problems(
+        engine="redshift", principals=principals, manage={"superusers": ["dba"]}
+    )
+    assert problems == [
+        "manage.superusers: dba has password: disabled, and Redshift refuses a "
+        "superuser without a password"
+    ]
+    _parse(
+        principals=principals, manage={"superusers": ["dba"]}
+    )  # PostgreSQL allows it
