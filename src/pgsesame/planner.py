@@ -618,28 +618,32 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
                 "rights, past the row-level security of the tables it reads "
                 "(security_invoker = true makes it run with theirs)"
             )
-    return warnings + _exposed_by_default(defaults, api, usable, current.acts_as)
+    return warnings + _exposed_by_default(defaults, api, usable, current)
 
 
 def _exposed_by_default(
     defaults: set[DefaultGrant],
     api: set[str],
     usable: set[tuple[str, str]],
-    acts_as: set[str] | None,
+    current: State,
 ) -> list[str]:
     """Warn where default privileges give the Data API's roles each new table.
 
     PostgreSQL makes a table with row-level security off, so its rows are open to
     them until it is turned on. Supabase's own defaults in public did this until
     it stopped them; a spec imported before then still lists them. Only defaults
-    of an owner the connected user can act as are said: the others aren't its to
-    change.
+    of an owner the connected user can act as, in a schema whose owner it can act
+    as, are said: the others (Supabase's storage, say) are the platform's.
     """
+    acts_as = current.acts_as
     given: dict[tuple[str, str], dict[str, set[str]]] = {}
     for d in defaults:
         if d.object_type != "tables" or d.privilege not in _ROW_PRIVILEGES:
             continue
-        if acts_as is not None and d.owner not in acts_as:
+        if acts_as is not None and (
+            d.owner not in acts_as
+            or (d.schema and current.owners.get(("schemas", d.schema)) not in acts_as)
+        ):
             continue
         if d.grantee == "public":
             who, users = "PUBLIC", api | {"public"}
