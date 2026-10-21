@@ -313,10 +313,13 @@ def leaky(tmp_path):
     drop = "DROP VIEW IF EXISTS public.sesame_test_view; DROP TABLE IF EXISTS public.sesame_test_leaky"
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute(drop)
-        # made in public, so Supabase's default privileges grant anon on both
         conn.execute("CREATE TABLE public.sesame_test_leaky (secret text)")
         conn.execute(
             "CREATE VIEW public.sesame_test_view AS SELECT * FROM public.sesame_test_leaky"
+        )
+        # Supabase's default privileges in public no longer do it for a new table
+        conn.execute(
+            "GRANT SELECT ON public.sesame_test_leaky, public.sesame_test_view TO anon"
         )
         spec = tmp_path / "exposure.yaml"
         spec.write_text(textwrap.dedent(EXPOSURE))
@@ -335,6 +338,32 @@ def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
     assert "sesame_test" not in out, out
 
 
+@pytest.fixture
+def giving(tmp_path):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS sesame_given CASCADE")
+        conn.execute("CREATE SCHEMA sesame_given")
+        conn.execute("GRANT USAGE ON SCHEMA sesame_given TO anon")
+        # what Supabase's defaults in public did before it stopped them
+        conn.execute(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA sesame_given "
+            "GRANT SELECT ON TABLES TO anon"
+        )
+        spec = tmp_path / "exposure.yaml"
+        spec.write_text(textwrap.dedent(EXPOSURE))
+        yield str(spec)
+        conn.execute(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA sesame_given "
+            "REVOKE SELECT ON TABLES FROM anon"
+        )
+        conn.execute("DROP SCHEMA sesame_given CASCADE")
+
+
+def test_default_privileges_that_give_anon_new_tables_are_warned_about(giving):
+    code, out = _sesame("plan", giving, "--dsn", DSN)
+    assert "creates in sesame_given is given to anon (SELECT)" in out, out
+
+
 def _drop_imported(conn):
     conn.execute("DROP FUNCTION IF EXISTS public.sesame_test_fn")
     conn.execute("DROP TABLE IF EXISTS public.sesame_test_items")
@@ -345,9 +374,12 @@ def _drop_imported(conn):
 def app_objects():
     with psycopg.connect(DSN, autocommit=True) as conn:
         _drop_imported(conn)
-        # made in public: Supabase's default privileges grant anon, authenticated
-        # and service_role, and PUBLIC keeps its default EXECUTE on the function
+        # granted as a migration now must, as Supabase's default privileges in
+        # public no longer do; PUBLIC keeps its default EXECUTE on the function
         conn.execute("CREATE TABLE public.sesame_test_items (id int)")
+        conn.execute(
+            "GRANT SELECT ON public.sesame_test_items TO anon, authenticated, service_role"
+        )
         conn.execute("CREATE FUNCTION public.sesame_test_fn() RETURNS int RETURN 1")
         conn.execute("CREATE ROLE sesame_test_editor")
         conn.execute("GRANT SELECT ON public.sesame_test_items TO sesame_test_editor")

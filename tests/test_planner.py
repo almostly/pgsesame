@@ -1458,6 +1458,71 @@ def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change
     assert planner.make(NO_SPEC, platforms).warnings == []
 
 
+def _given(*privileges: str, owner="postgres") -> set[DefaultGrant]:
+    return {DefaultGrant(owner, "public", "tables", "anon", p) for p in privileges}
+
+
+def test_default_privileges_that_give_the_data_api_new_tables_are_warned_about():
+    state = _exposure_state(USAGE, default_privileges=_given("select", "insert"))
+    (warning,) = planner.make(NO_SPEC, state).warnings
+    assert warning == (
+        "each table postgres creates in public is given to anon (INSERT, SELECT) by "
+        "default privileges: its rows are open to them until its row-level security "
+        "is turned on"
+    )
+    # another's defaults (Supabase's supabase_admin) aren't the user's to change
+    theirs = _exposure_state(
+        USAGE,
+        default_privileges=_given("select", owner="supabase_admin"),
+        acts_as={"postgres"},
+    )
+    assert planner.make(NO_SPEC, theirs).warnings == []
+    # nor are the defaults in a schema the platform owns (Supabase's storage)
+    platforms = _exposure_state(
+        USAGE,
+        default_privileges=_given("select"),
+        acts_as={"postgres"},
+        owners={("schemas", "public"): "supabase_admin"},
+    )
+    assert planner.make(NO_SPEC, platforms).warnings == []
+    ours = _exposure_state(
+        USAGE,
+        default_privileges=_given("select"),
+        acts_as={"postgres", "pg_database_owner"},
+        owners={("schemas", "public"): "pg_database_owner"},
+    )
+    assert len(planner.make(NO_SPEC, ours).warnings) == 1
+    # nor is a schema anon can't use any of its business
+    assert (
+        planner.make(
+            NO_SPEC, _exposure_state(default_privileges=_given("select"))
+        ).warnings
+        == []
+    )
+
+
+def test_revoking_the_default_privileges_closes_it():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {
+                "anon": {
+                    "type": "builtin",
+                    "privileges": {"schemas": {"usage": ["public"]}},
+                }
+            },
+            "default_privileges": [],
+        }
+    )
+    state = _exposure_state(USAGE, default_privileges=_given("select"))
+    plan = planner.make(loaded, state)
+    assert any("REVOKE SELECT ON TABLES FROM" in s for s in _statements(plan)), (
+        _statements(plan)
+    )
+    assert plan.warnings == []
+
+
 def test_a_view_that_runs_with_its_owners_rights_is_warned_about():
     state = _exposure_state(
         USAGE,

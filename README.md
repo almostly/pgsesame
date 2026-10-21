@@ -343,6 +343,14 @@ tables are left out:
 ! public.todos: row-level security is off, and anon (DELETE, INSERT, SELECT, UPDATE) can reach it: every row is open to them
 ```
 
+Default privileges that give such a role the tables an owner creates are said as
+well, since PostgreSQL makes a table with row-level security off. Supabase's own
+defaults in `public` did this until October 30, 2026: a new table there now needs
+a grant, in the migration that creates it. That is what a spec does, and
+`sesame plan --migration` writes the grants into a migration. A spec imported
+before then still lists those defaults, and applying it would put them back:
+drop them from its `default_privileges`, or import it again.
+
 On PostgreSQL, functions and procedures take EXECUTE. `schema.name` names every
 overload, `schema.name(types)` one of them, with the types as PostgreSQL writes
 them (`integer`, not `int`), and `schema.*` every function in the schema; an
