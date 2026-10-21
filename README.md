@@ -545,7 +545,7 @@ jobs:
     env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
       - uses: actions/checkout@v4
-      - uses: almostly/pgsesame@v0.3.0
+      - uses: almostly/pgsesame@v0.3.1
         with: {command: plan, spec: permissions.yaml}
 
   apply:
@@ -555,7 +555,7 @@ jobs:
     environment: production
     env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
-      - uses: almostly/pgsesame@v0.3.0
+      - uses: almostly/pgsesame@v0.3.1
         with: {command: apply}
 ```
 
