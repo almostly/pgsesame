@@ -11,6 +11,18 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.3.1 (2026-10-21)
+
+For Supabase's change on October 30, 2026: new tables in public are no longer
+granted to anon, authenticated and service_role through its default privileges,
+so a migration that creates a table has to grant it, which a spec does. A spec
+imported before then still lists those defaults, and a plan now warns about them.
+
+### Changed
+
+- **Planner**: default privileges that give the Data API's roles (or PUBLIC) each new table are warned about, as its rows are open to them until its row-level security is turned on; defaults of an owner, or in a schema, the connected user can't act as (Supabase's supabase_admin and storage) are left out
+- **CI**: redshift-local pinned to oblako 0.5.0, which refuses CREATEUSER with PASSWORD DISABLE and takes the CREATE USER, ALTER USER, DROP USER and CREATE ROLE system permissions as Redshift does; the tests cover all five and manage.superusers' password rule
+
 ## v0.3.0 (2026-10-13)
 
 Supabase support, and privileges beyond grants: function grants, storage and
