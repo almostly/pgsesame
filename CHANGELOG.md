@@ -11,6 +11,15 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.4.1 (2026-10-24)
+
+A fix for Supabase projects with Database Webhooks on.
+
+### Changed
+
+- **Planner**: a table or view in a schema whose owner the connected user can't act as (Supabase's supabase_functions, owned by supabase_admin) isn't warned about as open to the Data API, as defaults there already weren't; checked on a local Supabase and the real project
+- **Docs**: the README's status says 0.4
+
 ## v0.4.0 (2026-10-24)
 
 A theme for the terminal, and Redshift's rule that a superuser has a password.
