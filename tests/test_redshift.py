@@ -632,6 +632,12 @@ def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
         with pytest.raises(psycopg.errors.SyntaxError, match="incompatible"):
             conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD DISABLE")
         conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD 'Sesame-pw-1'")
+        # nor makes one of a user whose password is disabled, or disables its own
+        conn.execute(f"CREATE USER {P}keyless PASSWORD DISABLE")
+        with pytest.raises(psycopg.errors.SyntaxError, match="disabled passwords"):
+            conn.execute(f"ALTER USER {P}keyless CREATEUSER")
+        with pytest.raises(psycopg.errors.SyntaxError, match="disabled passwords"):
+            conn.execute(f"ALTER USER {P}intern PASSWORD DISABLE")
         conn.execute(f"CREATE USER {P}dba PASSWORD 'Sesame-pw-2'")
     spec = _spec(tmp_path, SUPERUSERS)
     code, out = _sesame("plan", spec, "--dsn", dsn)

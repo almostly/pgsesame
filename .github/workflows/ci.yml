@@ -71,7 +71,8 @@ jobs:
     env:
       # pinned by digest: :16 moves with every oblako image change. To update,
       # docker buildx imagetools inspect public.ecr.aws/oblako/redshift-local:16
-      # (oblako 0.5.0: CREATEUSER with PASSWORD DISABLE refused, CREATE USER,
+      # (oblako 6de2347: ALTER USER can't leave a superuser without a password;
+      # 0.5.0: CREATEUSER with PASSWORD DISABLE refused, CREATE USER,
       # ALTER USER, DROP USER and CREATE ROLE system permissions; 0.4.1: ALTER
       # DEFAULT PRIVILEGES ... IN SCHEMA refused to an owner that can't create
       # there, Data API batch errors as on AWS; 0.4.0:
@@ -80,7 +81,7 @@ jobs:
       # PUBLIC, Data API sessions and its 40-statement batches, names to 127
       # bytes, CONNECT refused, names folded to lower case, ALTER/DROP
       # privileges, sys:* roles)
-      IMAGE: public.ecr.aws/oblako/redshift-local:16@sha256:14dbc95d851db3f296572ecb31f2d2c03b3f5ee260161701b31a84a220ce9092
+      IMAGE: public.ecr.aws/oblako/redshift-local:16@sha256:93c61dbdb57ff7045d283ad4b2c537fb498d1ed5e2fac377b5dd7d6081caac2a
       PGSESAME_TEST_REDSHIFT_DSN: host=localhost port=5439 user=oblako password=oblako dbname=oblako sslmode=require
       # anonymous pulls share 500 GB a month and have run out ("Data limit
       # exceeded"); signed in, the account's 5 TB. A fork's pull request gets no
