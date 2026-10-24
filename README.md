@@ -202,6 +202,12 @@ and a plan that sets a password is refused, as the file is committed:
 sesame plan permissions.yaml -t app --migration supabase/migrations
 ```
 
+A plan's statements are green, yellow or red for what they add, change or remove.
+On a dark terminal, `SESAME_THEME=workbench` highlights their SQL in SQL
+Workbench/J's colors instead (keywords, types, functions, names and strings), and
+only the `+`, `~` or `-` marker keeps the plan's color. Output that isn't a
+terminal, or with `NO_COLOR` set, has no color either way.
+
 Passwords never go in the spec: name an environment variable with `password_env`,
 use IAM, or set `password: disabled`.
 

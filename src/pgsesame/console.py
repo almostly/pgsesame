@@ -1,26 +1,45 @@
-"""Terminal output in pgcli's style: green accents, Terraform-coloured plans.
+"""Terminal output in pgcli's style: green accents, Terraform-colored plans.
 
-Colour is off when output isn't a terminal or ``NO_COLOR`` is set (Rich honours
-both), so CI logs stay plain.
+Color is off when output isn't a terminal or ``NO_COLOR`` is set (Rich honors
+both), so CI logs stay plain. ``SESAME_THEME=workbench`` highlights each planned
+statement's SQL in SQL Workbench/J's colors instead, for a dark terminal; its
+``+``/``~``/``-`` marker keeps the plan's color.
 """
 
 from __future__ import annotations
 
+import os
+
+from pygments.lexers.sql import PostgresLexer
+from pygments.token import Comment, Keyword, Name, Number, Operator, Punctuation
+from pygments.token import String, _TokenType
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 from rich.theme import Theme
 
-THEME = Theme(
-    {
-        "accent": "bold green",  # pgcli's green: header, connection, headings
-        "muted": "dim",
-        "create": "green",  # + create / grant / add member
-        "change": "yellow",  # ~ owner / attribute change
-        "remove": "red",  # - revoke / drop / remove member
-        "error": "bold red",
-        "ok": "green",
-    }
-)
+STYLES = {
+    "accent": "bold green",  # pgcli's green: header, connection, headings
+    "muted": "dim",
+    "create": "green",  # + create / grant / add member
+    "change": "yellow",  # ~ owner / attribute change
+    "remove": "red",  # - revoke / drop / remove member
+    "error": "bold red",
+    "ok": "green",
+}
+# SQL Workbench/J's editor colors, by what a token is
+WORKBENCH = {
+    "accent": "bold #00FF00",
+    "muted": "#808080",  # its comments' gray
+    "sql.keyword": "#00FF00",
+    "sql.type": "#33CCFF",
+    "sql.operator": "#FFFFFF",
+    "sql.function": "#FF33FF",
+    "sql.literal": "#EEEEEE",  # strings and quoted names
+    "sql.comment": "#808080",
+}
+THEME_NAME = os.environ.get("SESAME_THEME", "")
+THEME = Theme(STYLES | WORKBENCH if THEME_NAME == "workbench" else STYLES)
 # soft_wrap: long statements and messages stay on one line (logs, grep, copy-paste)
 console = Console(theme=THEME, highlight=False, soft_wrap=True)
 err = Console(theme=THEME, highlight=False, soft_wrap=True, stderr=True)
@@ -37,7 +56,56 @@ def header(title: str, target: str | None = None) -> None:
 
 
 def operation(kind: str, sql: str, note: str = "") -> None:
-    """Print one planned statement, coloured and marked like Terraform's plan."""
+    """Print one planned statement, colored and marked like Terraform's plan."""
+    if THEME_NAME == "workbench":
+        # appended, not added: Text + Text styles the whole line as the first part
+        line = Text()
+        line.append(f"{SYMBOL[kind]} ", style=kind)
+        line.append_text(highlight(sql))
+        if note:
+            line.append(f"  {note}", style="muted")
+        console.print(line)
+        return
     # SQL and notes are data, not markup: ARRAY[x] or a [word] would be eaten
     suffix = f"  [muted]{escape(note)}[/muted]" if note else ""
     console.print(f"[{kind}]{SYMBOL[kind]} {escape(sql)}[/{kind}]{suffix}")
+
+
+def highlight(sql: str) -> Text:
+    """Return ``sql`` with each token styled by what it is (the ``sql.*`` styles)."""
+    tokens = list(PostgresLexer().get_tokens(sql.rstrip()))
+    runs: list[tuple[str, str]] = []  # (text, style): a quoted name is one run
+    for i, (token, value) in enumerate(tokens):
+        following = next((v for _, v in tokens[i + 1 :] if v.strip()), "")
+        style = _style(token, value, following)
+        if runs and runs[-1][1] == style:
+            runs[-1] = (runs[-1][0] + value, style)
+        else:
+            runs.append((value, style))
+    text = Text.assemble(*runs)
+    text.rstrip()  # the lexer ends with a newline
+    return text
+
+
+def _style(token: _TokenType, value: str, following: str) -> str:
+    """Return the ``sql.*`` style for one token, given the text after it.
+
+    pgsesame quotes every name it writes, so a bare upper-case word (NOLOGIN,
+    PUBLIC) is a keyword the lexer doesn't know, and a name before ``(`` is a
+    function.
+    """
+    if token in Keyword:
+        return "sql.keyword"
+    if token in Name.Builtin:
+        return "sql.type"
+    if token in String:
+        return "sql.literal"
+    if token in Comment:
+        return "sql.comment"
+    if token in Operator or token in Punctuation or (token in Number and value == "."):
+        return "sql.operator"
+    if token in Name and following == "(":
+        return "sql.function"
+    if token in Name and value.isupper():
+        return "sql.keyword"
+    return ""
