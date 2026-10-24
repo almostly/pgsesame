@@ -632,6 +632,12 @@ def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
         with pytest.raises(psycopg.errors.SyntaxError, match="incompatible"):
             conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD DISABLE")
         conn.execute(f"CREATE USER {P}intern CREATEUSER PASSWORD 'Sesame-pw-1'")
+        # nor makes one of a user whose password is disabled, or disables its own
+        conn.execute(f"CREATE USER {P}keyless PASSWORD DISABLE")
+        with pytest.raises(psycopg.errors.SyntaxError, match="disabled passwords"):
+            conn.execute(f"ALTER USER {P}keyless CREATEUSER")
+        with pytest.raises(psycopg.errors.SyntaxError, match="disabled passwords"):
+            conn.execute(f"ALTER USER {P}intern PASSWORD DISABLE")
         conn.execute(f"CREATE USER {P}dba PASSWORD 'Sesame-pw-2'")
     spec = _spec(tmp_path, SUPERUSERS)
     code, out = _sesame("plan", spec, "--dsn", dsn)
@@ -639,6 +645,7 @@ def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
     assert f'ALTER USER "{P}intern" NOCREATEUSER  needs --allow-superuser' in out, out
     assert f'ALTER USER "{P}dba" CREATEUSER  needs --allow-superuser' in out, out
     assert "the connected user, so it stays one" in out  # oblako isn't listed
+    assert f"{P}dba: Redshift refuses a superuser without a password" in out, out
     assert _sesame("apply", spec, "--dsn", dsn, "--allow-superuser")[0] == 0
     code, out = _sesame("plan", spec, "--dsn", dsn)
     assert code == 0, out
