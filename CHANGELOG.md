@@ -11,6 +11,22 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.4.0 (2026-10-24)
+
+A theme for the terminal, and Redshift's rule that a superuser has a password.
+Nothing changes for an existing spec: the theme is opt-in, and the new plan note
+only explains what Redshift already refuses.
+
+### Added
+
+- **Console**: SESAME_THEME=workbench highlights a plan's SQL in SQL Workbench/J's colors (keywords, types, operators, functions, names and strings), the +/~/- marker keeping the plan's color; the default output is unchanged
+
+### Changed
+
+- **Planner**: making a Redshift user a superuser notes that Redshift refuses one without a password, unless the spec gives it a password_env, as whose password is disabled can't be read; checked on Redshift Serverless
+- **CI**: the Redshift job signs in to AWS through GitHub's OIDC and pulls redshift-local from ECR Public as an account, not anonymously, whose shared allowance ran out; redshift-local pinned at oblako 73f9d17, which refuses ALTER USER leaving a superuser without a password and has pg_user_info and svv_user_info as Redshift does
+- **Tests**: every helper, fixture and fake in the tests has a docstring, checked by pydocstyle and test_docstrings.py as the package's are
+
 ## v0.3.1 (2026-10-21)
 
 For Supabase's change on October 30, 2026: new tables in public are no longer
