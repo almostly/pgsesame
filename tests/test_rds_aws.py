@@ -18,17 +18,23 @@ class NotFound(Exception):
 class FakeRds:
     """Answers like the RDS API for one cluster and one instance."""
 
-    class exceptions:  # as client.exceptions names them
+    class exceptions:
+        """The errors, as ``client.exceptions`` names them."""
+
         DBClusterNotFoundFault = NotFound
         DBInstanceNotFoundFault = NotFound
 
     class meta:
+        """The client's metadata: its region."""
+
         region_name = "eu-west-1"
 
     def __init__(self):
+        """Start with no auth tokens issued."""
         self.tokens: list[dict] = []
 
     def describe_db_clusters(self, DBClusterIdentifier):
+        """Return the dev cluster; any other name is not found."""
         if DBClusterIdentifier != "dev":
             raise NotFound()
         return {
@@ -43,6 +49,7 @@ class FakeRds:
         }
 
     def describe_db_instances(self, DBInstanceIdentifier):
+        """Return the legacy instance, or no-iam (IAM auth off); others are not found."""
         if DBInstanceIdentifier not in ("legacy", "no-iam"):
             raise NotFound()
         return {
@@ -61,6 +68,7 @@ class FakeRds:
         }
 
     def generate_db_auth_token(self, **kwargs):
+        """Record the token's arguments; return a token."""
         self.tokens.append(kwargs)
         return "signed-token"
 
@@ -109,27 +117,33 @@ class FakeRdsData:
     """Answers like the RDS Data API; fails the statement it is told to."""
 
     def __init__(self, records=None, fail_on=None):
+        """Set the records each statement returns and the SQL that fails."""
         self.records, self.fail_on = records or [], fail_on
         self.calls: list[tuple[str, dict]] = []
 
     def execute_statement(self, **kwargs):
+        """Record the call; raise on SQL with ``fail_on`` in it, else return records."""
         self.calls.append(("execute", kwargs))
         if self.fail_on and self.fail_on in kwargs["sql"]:
             raise RuntimeError("ERROR: permission denied")
         return {"records": self.records}
 
     def begin_transaction(self, **kwargs):
+        """Record the call; return the transaction's id."""
         self.calls.append(("begin", kwargs))
         return {"transactionId": "tx1"}
 
     def commit_transaction(self, **kwargs):
+        """Record the call."""
         self.calls.append(("commit", kwargs))
 
     def rollback_transaction(self, **kwargs):
+        """Record the call."""
         self.calls.append(("rollback", kwargs))
 
 
 def _db(client):
+    """Return an RDS Data API database on the dev cluster that talks to ``client``."""
     return RdsDataApiDatabase("app", CLUSTER_ARN, "arn:secret", "dev", client=client)
 
 
@@ -195,7 +209,10 @@ def test_an_aws_error_while_reading_is_said_plainly(tmp_path, monkeypatch):
     HttpEndpointNotEnabledException.__module__ = "botocore.errorfactory"
 
     class Failing(FakeRdsData):
+        """An RDS Data API whose HTTP endpoint is still being enabled."""
+
         def execute_statement(self, **kwargs):
+            """Raise the error the RDS Data API gives while its endpoint is enabled."""
             raise HttpEndpointNotEnabledException("HttpEndpoint is being enabled")
 
     monkeypatch.setattr(cli.ConnectOptions, "connect", lambda self: _db(Failing()))

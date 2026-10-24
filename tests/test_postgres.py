@@ -51,6 +51,7 @@ principals:
 
 
 def _cleanup(admin: psycopg.Connection) -> None:
+    """Drop the test database and the roles the tests create."""
     admin.execute("DROP DATABASE IF EXISTS sesame_test WITH (FORCE)")
     roles = admin.execute(
         "SELECT rolname FROM pg_roles WHERE rolname LIKE %s",
@@ -62,6 +63,7 @@ def _cleanup(admin: psycopg.Connection) -> None:
 
 @pytest.fixture
 def dsn():
+    """Yield a DSN for a fresh sesame_test database with schemas analytics and marts."""
     admin = psycopg.connect(DSN, autocommit=True)
     _cleanup(admin)
     admin.execute("CREATE DATABASE sesame_test")
@@ -82,12 +84,14 @@ def dsn():
 
 
 def _spec(tmp_path, text=SPEC):
+    """Write ``text`` to a spec file; return its path."""
     path = tmp_path / "spec.yaml"
     path.write_text(textwrap.dedent(text))
     return str(path)
 
 
 def _sesame(*args, env=None):
+    """Run the CLI; return its exit code and output, with any crash appended."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1", **(env or {})})
     crash = (
         f"\n{result.exception!r}"
@@ -310,14 +314,18 @@ def test_a_failed_apply_changes_nothing(dsn, tmp_path, monkeypatch):
     from pgsesame.ops import Operation
 
     class Boom(Operation):
+        """An operation that runs last and fails."""
+
         order = 99  # last, after every role and grant ran
 
         def statement(self):
+            """Return a statement that fails: a division by zero."""
             return sql.SQL("SELECT 1 / 0")
 
     make = cli.planner.make
 
     def make_with_a_failure(*args, **kwargs):
+        """Return the plan ``make`` would, with Boom appended."""
         plan = make(*args, **kwargs)
         plan.operations.append(Boom())
         return plan

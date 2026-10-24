@@ -45,12 +45,14 @@ row_level_security:
 
 
 def _sesame(*args):
+    """Run the CLI; return its exit code and output."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1"})
     return result.exit_code, result.stdout + result.stderr
 
 
 @pytest.fixture
 def project(tmp_path):
+    """Yield the spec's path and how many grants authenticated has in public."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
         conn.execute("CREATE SCHEMA sesame_sb")
@@ -109,13 +111,14 @@ EXAMPLE = Path(__file__).parent.parent / "examples" / "supabase"
 
 
 def _example(text: str) -> str:
-    """The example in a schema and roles of the test's own, never a real app's."""
+    """Return the example in the test's own schema and roles, never a real app's."""
     text = re.sub(r"\bapp\b", "sesame_example", text)
     text = re.sub(r"\b(reporting|dashboard)\b", r"sesame_\1", text)
     return text.replace("REFERENCES auth.users ON DELETE CASCADE", "")  # no sign-ups
 
 
 def _drop_example(conn):
+    """Drop the example's schema and roles."""
     conn.execute("DROP SCHEMA IF EXISTS sesame_example CASCADE")
     conn.execute("DROP ROLE IF EXISTS sesame_dashboard")
     conn.execute("DROP ROLE IF EXISTS sesame_reporting")
@@ -123,6 +126,7 @@ def _drop_example(conn):
 
 @pytest.fixture
 def example(tmp_path, monkeypatch):
+    """Yield the path of the example's spec, with its schema created in the database."""
     monkeypatch.setenv("DASHBOARD_PASSWORD", uuid.uuid4().hex)
     spec = tmp_path / "permissions.yaml"
     spec.write_text(_example((EXAMPLE / "permissions.yaml").read_text()))
@@ -134,6 +138,7 @@ def example(tmp_path, monkeypatch):
 
 
 def _posts_as(role: str, user_id: str = "") -> list:
+    """Return the titles of the posts ``role`` sees, signed in as ``user_id``."""
     with psycopg.connect(DSN) as conn:
         conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(role)))
         conn.execute(
@@ -185,6 +190,7 @@ principals:
 
 @pytest.fixture
 def hook(tmp_path):
+    """Yield a spec file for an access token hook anon and authenticated may run."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS sesame_sb CASCADE")
         conn.execute("CREATE SCHEMA sesame_sb")
@@ -237,12 +243,14 @@ row_level_security:
 
 
 def _drop_storage_policy():
+    """Drop the test's policy on storage.objects."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute('DROP POLICY IF EXISTS "sesame_test_own_files" ON storage.objects')
 
 
 @pytest.fixture
 def storage(tmp_path):
+    """Yield a temporary directory; drop the test's storage policy around it."""
     _drop_storage_policy()
     yield tmp_path
     _drop_storage_policy()
@@ -279,6 +287,7 @@ principals:
 
 @pytest.fixture
 def jwt_role(tmp_path):
+    """Yield a spec file that makes authenticator a member of sesame_test_editor."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
         spec = tmp_path / "jwt.yaml"
@@ -310,6 +319,7 @@ principals:
 
 @pytest.fixture
 def leaky(tmp_path):
+    """Yield a spec file for a table anon can read with row-level security off."""
     drop = "DROP VIEW IF EXISTS public.sesame_test_view; DROP TABLE IF EXISTS public.sesame_test_leaky"
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute(drop)
@@ -340,6 +350,7 @@ def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
 
 @pytest.fixture
 def giving(tmp_path):
+    """Yield a spec file for a schema whose defaults give anon each new table."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS sesame_given CASCADE")
         conn.execute("CREATE SCHEMA sesame_given")
@@ -365,6 +376,7 @@ def test_default_privileges_that_give_anon_new_tables_are_warned_about(giving):
 
 
 def _drop_imported(conn):
+    """Drop the table, function and role app_objects creates."""
     conn.execute("DROP FUNCTION IF EXISTS public.sesame_test_fn")
     conn.execute("DROP TABLE IF EXISTS public.sesame_test_items")
     conn.execute("DROP ROLE IF EXISTS sesame_test_editor")
@@ -372,6 +384,7 @@ def _drop_imported(conn):
 
 @pytest.fixture
 def app_objects():
+    """Create a table, function and role in public as an app's migration does."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         _drop_imported(conn)
         # granted as a migration now must, as Supabase's default privileges in
@@ -432,6 +445,7 @@ publications:
 
 @pytest.fixture
 def feed(tmp_path):
+    """Yield a spec file that publishes sesame_rt.feed to supabase_realtime."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS sesame_rt CASCADE")
         conn.execute("CREATE SCHEMA sesame_rt")

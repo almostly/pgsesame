@@ -58,6 +58,7 @@ principals:
 
 
 def _cleanup(conn: psycopg.Connection) -> None:
+    """Drop the schema, published grants, users, groups and roles the test makes."""
     conn.execute("DROP SCHEMA IF EXISTS marts CASCADE")
     conn.execute("DROP TABLE IF EXISTS monitoring.declared_grants")
     for template, query in (
@@ -77,6 +78,7 @@ def _cleanup(conn: psycopg.Connection) -> None:
 
 @pytest.fixture
 def admin():
+    """Yield an admin connection, with the test's objects dropped before and after."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         _cleanup(conn)
         yield conn
@@ -84,6 +86,7 @@ def admin():
 
 
 def _dbt(*args: str) -> str:
+    """Run dbt on the example project against the test database; return its output."""
     parts = conninfo_to_dict(DSN)
     env = {
         **os.environ,
@@ -118,12 +121,14 @@ def _dbt(*args: str) -> str:
 
 
 def _sesame(*args: str) -> str:
+    """Run the CLI, which must exit 0 or 2; return its output."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1"})
     assert result.exit_code in (0, 2), result.output
     return result.stdout
 
 
 def _grants(conn: psycopg.Connection) -> set[tuple[str, str]]:
+    """Return who holds what on marts.loans, on the table and its columns."""
     on_table = conn.execute(
         "SELECT identity_name, privilege_type FROM svv_relation_privileges "
         "WHERE namespace_name = 'marts' AND relation_name = 'loans'"
@@ -141,6 +146,7 @@ def _grants(conn: psycopg.Connection) -> set[tuple[str, str]]:
 
 
 def _table_id(conn: psycopg.Connection) -> int:
+    """Return marts.loans' oid, which changes when dbt replaces the table."""
     row = conn.execute(
         "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = 'marts' AND c.relname = 'loans'"
@@ -150,6 +156,7 @@ def _table_id(conn: psycopg.Connection) -> int:
 
 
 def _publish(spec: Path) -> None:
+    """Publish the spec's grants with the example's publish_grants.py."""
     rows = _sesame("grants", str(spec), "--format", "csv")
     result = subprocess.run(
         [sys.executable, str(EXAMPLE / "publish_grants.py"), DSN],

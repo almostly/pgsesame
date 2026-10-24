@@ -21,6 +21,7 @@ DSN = os.environ.get("PGSESAME_TEST_REDSHIFT_DSN", "")
 
 
 def _has_masking() -> bool:
+    """Return whether the DSN's database has dynamic data masking."""
     if not DSN:
         return False
     try:
@@ -62,6 +63,7 @@ masking:
 
 
 def _cleanup(conn) -> None:
+    """Drop the test schema, the test's masking policies (detached first) and roles."""
     conn.execute("DROP SCHEMA IF EXISTS sesame_ddm CASCADE")  # takes the attachments
     policies = conn.execute(
         "select policy_name from svv_masking_policy "
@@ -91,6 +93,7 @@ def _cleanup(conn) -> None:
 
 @pytest.fixture
 def db(tmp_path):
+    """Yield an admin connection with a fresh sesame_ddm.customers table."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         _cleanup(conn)
         conn.execute("CREATE SCHEMA sesame_ddm")
@@ -102,17 +105,20 @@ def db(tmp_path):
 
 
 def _spec(tmp_path, text=SPEC):
+    """Write ``text`` to a spec file; return its path."""
     path = tmp_path / "spec.yaml"
     path.write_text(textwrap.dedent(text))
     return str(path)
 
 
 def _sesame(*args):
+    """Run the CLI against the DSN; return its exit code and output."""
     result = CliRunner().invoke(app, [*args, "--dsn", DSN], env={"NO_COLOR": "1"})
     return result.exit_code, result.stdout + result.stderr
 
 
 def _attached(conn) -> set[tuple]:
+    """Return the masking policies attached in sesame_ddm, one row per attachment."""
     return set(
         conn.execute(
             "select policy_name, grantee, grantee_type, priority, output_columns "

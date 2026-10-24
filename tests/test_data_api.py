@@ -11,6 +11,7 @@ class AccessDenied(Exception):
     """An error shaped like botocore's: the AWS error code under ``response``."""
 
     def __init__(self, message: str):
+        """Keep the message; give the error the AccessDeniedException code."""
         super().__init__(message)
         self.response = {"Error": {"Code": "AccessDeniedException"}}
 
@@ -19,14 +20,17 @@ class FakeDataApi:
     """Answers like the Redshift Data API; each statement's fate is set up front."""
 
     def __init__(self, status="FINISHED", pages=None, deny=False):
+        """Set each statement's status, its result pages, and if batches are refused."""
         self.status, self.pages, self.deny = status, pages or [], deny
         self.calls: list[tuple[str, dict]] = []
 
     def execute_statement(self, **kwargs):
+        """Record the call; return the statement's id."""
         self.calls.append(("execute", kwargs))
         return {"Id": "s1"}
 
     def batch_execute_statement(self, **kwargs):
+        """Record the call; return the batch's id, or raise AccessDenied if refused."""
         self.calls.append(("batch", kwargs))
         if self.deny:
             raise AccessDenied(
@@ -35,6 +39,7 @@ class FakeDataApi:
         return {"Id": "b1"}
 
     def describe_statement(self, Id):
+        """Return the status set up front, with a result set if there are pages."""
         return {
             "Status": self.status,
             "HasResultSet": bool(self.pages),
@@ -42,6 +47,7 @@ class FakeDataApi:
         }
 
     def get_statement_result(self, Id, NextToken=None):
+        """Return the page ``NextToken`` points at, with the next one's token if any."""
         index = int(NextToken or 0)
         page = {"Records": self.pages[index]}
         if index + 1 < len(self.pages):
@@ -50,6 +56,7 @@ class FakeDataApi:
 
 
 def _db(client, **kwargs):
+    """Return a Data API database on workgroup ``wg`` that talks to ``client``."""
     return DataApiDatabase("dev", workgroup="wg", client=client, **kwargs)
 
 
@@ -87,11 +94,13 @@ class FakeSession:
     """The Data API's sessions: statements sent with its SessionId share one connection."""
 
     def __init__(self, fail_on: str | None = None):
+        """Set the SQL whose statement fails; nothing has run yet."""
         self.fail_on = fail_on
         self.calls: list[tuple[str, dict]] = []
         self.failed: set[str] = set()
 
     def execute_statement(self, **kwargs):
+        """Record the call; return its id and the session it ran in."""
         self.calls.append(("execute", kwargs))
         statement_id = str(len(self.calls))
         if kwargs["Sql"] == self.fail_on:
@@ -101,17 +110,21 @@ class FakeSession:
         return {"Id": statement_id, "SessionId": "sess-1"}
 
     def batch_execute_statement(self, **kwargs):
+        """Fail the test: a plan over the batch limit goes statement by statement."""
         raise AssertionError("a plan over the batch limit must not go as a batch")
 
     def describe_statement(self, Id):
+        """Return FAILED for the statement that ran ``fail_on``, else FINISHED."""
         failed = Id in self.failed
         return {"Status": "FAILED" if failed else "FINISHED", "Error": "boom"}
 
     def sqls(self) -> list[str]:
+        """Return the SQL of each call, in order."""
         return [kwargs["Sql"] for _, kwargs in self.calls]
 
 
 def _grants(n: int) -> list[sql.Composed]:
+    """Return ``n`` GRANT statements, one per table."""
     return [
         sql.SQL("GRANT SELECT ON {} TO {}").format(
             sql.Identifier("s", f"t{i}"), sql.Identifier("u")
@@ -156,10 +169,12 @@ class FailedBatch(FakeDataApi):
     """A batch whose statement ``failed`` (from 0) failed, described as Redshift does."""
 
     def __init__(self, failed: int, total: int, sub_statements: bool = True):
+        """Set which statement failed, how many there are, and whether to list them."""
         super().__init__(status="FAILED")
         self.failed, self.total, self.sub_statements = failed, total, sub_statements
 
     def describe_statement(self, Id):
+        """Return the failure; with sub-statements, those after it aborted."""
         described = {
             "Status": "FAILED",
             "Error": f"ERROR: Query #{self.failed + 1} failed with ERROR: "

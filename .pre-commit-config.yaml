@@ -20,6 +20,11 @@ repos:
     hooks:
       - id: pydocstyle        # the docstrings' style; a missing one on public names
         files: ^src/pgsesame/.*\.py$
+      - id: pydocstyle
+        name: pydocstyle (tests)
+        # the default --match skips test_*.py; a test_* function's name is its docstring
+        args: ['--match=.*\.py', --add-ignore=D103]
+        files: ^tests/.*\.py$
 
   - repo: local
     hooks:
@@ -28,7 +33,7 @@ repos:
         # pydocstyle asks for a docstring only on public names; this asks everywhere
         entry: uv run --frozen pytest -q tests/test_docstrings.py
         language: system
-        files: ^src/pgsesame/.*\.py$
+        files: ^(src/pgsesame|tests)/.*\.py$
         pass_filenames: false
 
       - id: ty

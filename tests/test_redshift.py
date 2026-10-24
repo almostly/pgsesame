@@ -1,9 +1,9 @@
-"""plan and apply against Redshift: oblako's redshift-local, or Amazon Redshift.
+r"""plan and apply against Redshift: oblako's redshift-local, or Amazon Redshift.
 
 Set ``PGSESAME_TEST_REDSHIFT_DSN`` to a superuser connection; the tests skip
 without it. For oblako's redshift-local:
 
-    PGSESAME_TEST_REDSHIFT_DSN="host=localhost port=5439 user=oblako \\
+    PGSESAME_TEST_REDSHIFT_DSN="host=localhost port=5439 user=oblako \
         password=oblako dbname=oblako sslmode=require"
 
 Every user, group and role the tests make is named ``rs_test_*`` and their objects
@@ -66,6 +66,7 @@ principals:
 
 
 def _cleanup(conn: psycopg.Connection) -> None:
+    """Drop the default privileges, schema, users, groups and roles the tests create."""
     # Redshift won't drop a user that has default privileges: revoke them first
     defaults = conn.execute(
         "SELECT owner_name, coalesce(schema_name, ''), object_type, privilege_type, "
@@ -117,6 +118,7 @@ def _cleanup(conn: psycopg.Connection) -> None:
 
 @pytest.fixture
 def dsn():
+    """Yield the DSN, with a fresh rs_test schema of two tables; clean up after."""
     with psycopg.connect(DSN, autocommit=True) as conn:
         _cleanup(conn)
         conn.execute("CREATE SCHEMA rs_test")
@@ -127,12 +129,14 @@ def dsn():
 
 
 def _spec(tmp_path, text=SPEC):
+    """Write ``text`` to a spec file; return its path."""
     path = tmp_path / "spec.yaml"
     path.write_text(textwrap.dedent(text))
     return str(path)
 
 
 def _sesame(*args, env=None):
+    """Run the CLI; return its exit code and output, with any crash appended."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1", **(env or {})})
     crash = (
         f"\n{result.exception!r}"

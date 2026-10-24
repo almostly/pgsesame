@@ -1,12 +1,12 @@
-"""Aurora PostgreSQL through the RDS Data API, on oblako (or AWS).
+r"""Aurora PostgreSQL through the RDS Data API, on oblako (or AWS).
 
 Set ``PGSESAME_TEST_RDS_DSN`` to the PostgreSQL the Data API runs statements in
 (for set-up and checks), and point boto3 at the RDS and RDS Data APIs; the tests
 skip without them. On oblako:
 
-    PGSESAME_TEST_RDS_DSN="host=localhost port=5432 user=oblako password=oblako dbname=oblako" \\
-    AWS_ENDPOINT_URL_RDS=http://localhost:8014 AWS_ENDPOINT_URL_RDS_DATA=http://localhost:8006 \\
-    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \\
+    PGSESAME_TEST_RDS_DSN="host=localhost port=5432 user=oblako password=oblako dbname=oblako" \
+    AWS_ENDPOINT_URL_RDS=http://localhost:8014 AWS_ENDPOINT_URL_RDS_DATA=http://localhost:8006 \
+    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \
       uv run pytest tests/test_rds.py
 
 The cluster (``PGSESAME_TEST_RDS_CLUSTER``, default ``sesame-aurora``) is created
@@ -54,6 +54,7 @@ row_level_security:
 
 
 def _cleanup(conn) -> None:
+    """Drop the test schema and the roles the tests create."""
     conn.execute(f"DROP SCHEMA IF EXISTS {P}app CASCADE")
     for (name,) in conn.execute(
         "SELECT rolname FROM pg_roles WHERE rolname LIKE %s", (P + "%",)
@@ -63,6 +64,7 @@ def _cleanup(conn) -> None:
 
 @pytest.fixture
 def cluster(tmp_path):
+    """Yield the spec's path and an admin connection; create the cluster if missing."""
     import boto3
 
     rds = boto3.client("rds")
@@ -87,6 +89,7 @@ def cluster(tmp_path):
 
 
 def _sesame(*args):
+    """Run the CLI through the RDS Data API; return its exit code and output."""
     database = str(conninfo_to_dict(DSN).get("dbname", "postgres"))
     via = [
         "--data-api",

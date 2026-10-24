@@ -54,19 +54,23 @@ class RecordingDataApi:
     """Answers like the Redshift Data API and records the order of calls."""
 
     def __init__(self):
+        """Start with no calls made."""
         self.calls: list[str] = []
         self.count = 0
 
     def execute_statement(self, **kwargs):
+        """Record the call; return the next statement id."""
         self.count += 1
         self.calls.append(f"execute {self.count}")
         return {"Id": str(self.count)}
 
     def describe_statement(self, Id):
+        """Record the wait; return a finished statement that took two seconds."""
         self.calls.append(f"wait {Id}")
         return {"Status": "FINISHED", "HasResultSet": True, "Duration": 2_000_000_000}
 
     def get_statement_result(self, Id, NextToken=None):
+        """Return one row holding the statement's id."""
         return {"Records": [[{"longValue": int(Id)}]]}
 
 
@@ -97,6 +101,7 @@ def test_without_boto3_the_hint_names_the_extra(service, extra, monkeypatch):
     real = builtins.__import__
 
     def no_boto3(name, *args, **kwargs):
+        """Import as usual, except boto3, which raises ImportError."""
         if name == "boto3":
             raise ImportError("no boto3")
         return real(name, *args, **kwargs)
@@ -110,16 +115,19 @@ class MaskingDataApi(RecordingDataApi):
     """Answers the masking reads: allowed or not, and nothing attached yet."""
 
     def __init__(self, allowed=True):
+        """Set whether the user may see masking policies."""
         super().__init__()
         self.allowed = allowed
 
     def get_statement_result(self, Id, NextToken=None):
+        """Answer the permission check with ``allowed``; other reads find nothing."""
         if Id == "1":  # can this user see masking policies
             return {"Records": [[{"booleanValue": self.allowed}]]}
         return {"Records": []}
 
 
 def _masking_spec():
+    """Return a Redshift spec that masks one column with one policy."""
     from pgsesame import spec
 
     return spec.parse(
@@ -156,12 +164,14 @@ class ProbingDataApi:
     """A Data API that keeps masking probes, as Redshift's would for one plan."""
 
     def __init__(self, deny_batch=False, fail_read=False):
+        """Set whether a batch is refused and whether the read fails."""
         self.deny_batch, self.fail_read = deny_batch, fail_read
         self.probes: list[str] = []
         self.dropped: list[str] = []
         self.statements: dict[str, str] = {}
 
     def batch_execute_statement(self, Sqls, **kwargs):
+        """Keep the policies a batch creates and drops; raise if batches are refused."""
         if self.deny_batch:
             raise RuntimeError("AccessDenied: BatchExecuteStatement")
         for text in Sqls:
@@ -173,15 +183,18 @@ class ProbingDataApi:
         return {"Id": "batch"}
 
     def execute_statement(self, Sql, **kwargs):
+        """Keep the read's SQL; return its id."""
         self.statements["read"] = Sql
         return {"Id": "read"}
 
     def describe_statement(self, Id):
+        """Return the read as failed if set up so; every other statement finished."""
         if Id == "read" and self.fail_read:
             return {"Status": "FAILED", "Error": "boom"}
         return {"Status": "FINISHED", "HasResultSet": Id == "read", "Duration": 0}
 
     def get_statement_result(self, Id, NextToken=None):
+        """Return one row per probe: its name, input column and expression."""
         return {
             "Records": [
                 [

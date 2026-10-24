@@ -32,12 +32,14 @@ def _arn() -> str:
 
 
 def _admin():
+    """Return a database connected to the test cluster as its admin."""
     from pgsesame.aws import dsql_database
 
     return dsql_database(CLUSTER)
 
 
 def _cleanup() -> None:
+    """Drop the IAM links, default privileges, tables, schema and roles made."""
     db = _admin()
     conn = db.conn
     for role, arn in conn.execute(
@@ -74,6 +76,7 @@ def _cleanup() -> None:
 
 @pytest.fixture
 def cluster():
+    """Yield the cluster with a fresh ds_test schema of two tables; clean up after."""
     _cleanup()
     db = _admin()
     db.conn.execute("CREATE SCHEMA ds_test")
@@ -85,12 +88,14 @@ def cluster():
 
 
 def _spec(tmp_path, text):
+    """Write ``text`` to a spec file; return its path."""
     path = tmp_path / "spec.yaml"
     path.write_text(textwrap.dedent(text))
     return str(path)
 
 
 def _sesame(*args):
+    """Run the CLI; return its exit code and output, with any crash appended."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1"})
     crash = (
         f"\n{result.exception!r}"
@@ -101,6 +106,7 @@ def _sesame(*args):
 
 
 def _spec_text(arn: str, iam: bool = True) -> str:
+    """Return a spec for a reader role and an app user, linked to ``arn`` if ``iam``."""
     link = f"\n    iam: [{arn}]" if iam else ""
     return f"""
 version: 1
