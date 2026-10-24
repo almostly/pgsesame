@@ -65,6 +65,17 @@ SYSTEM TABLE`, with `sys:monitor` joined. The superusers were `rdsdb`, the
 platform's, and the admin: listing the admin in `manage.superusers` warned about
 nothing. Then `sam delete`; the managed admin secret went with the namespace.
 
+2026-10-24 (us-east-1), superusers and disabled passwords, by hand as the
+namespace admin. Redshift refuses a superuser without a password whichever way
+it would arise: `ALTER USER x CREATEUSER` on a user whose password is disabled,
+and `ALTER USER x PASSWORD DISABLE` on a superuser, both fail with SQLSTATE 42601,
+"Superusers cannot have disabled passwords". Both at once works
+(`CREATEUSER PASSWORD '...'`, `NOCREATEUSER PASSWORD DISABLE`). Whose password is
+disabled can't be read: `pg_user_info.passwd` is `********` for every user, a
+disabled one too, `svv_user_info` has no such column, and `pg_shadow` and
+`svl_user_info` are refused to the admin. So a plan that makes a user a superuser
+notes the requirement unless the spec gives that user a `password_env`.
+
 ## Aurora PostgreSQL, express configuration
 
 A cluster made with express configuration needs no VPC or template: it is

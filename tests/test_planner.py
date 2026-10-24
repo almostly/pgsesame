@@ -1827,3 +1827,29 @@ def test_redshift_superusers_are_createuser():
         state,
     )
     assert _statements(plan) == ['ALTER USER "etl" NOCREATEUSER']
+
+
+def test_making_a_redshift_superuser_notes_it_needs_a_password():
+    state = _state(
+        Role("admin", True, True, "user"),
+        Role("IAM:etl", True, False, "user"),
+        Role("dba", True, False, "user"),
+        current_user="admin",
+    )
+    listing = {
+        "version": 1,
+        "engine": "redshift",
+        "principals": {"dba": {"type": "user", "password_env": "DBA_PW"}},
+        "manage": {"superusers": ["admin", "IAM:etl", "dba"]},
+    }
+    plan = planner.make(spec.parse(listing), state)
+    assert _statements(plan) == [
+        'ALTER USER "IAM:etl" CREATEUSER',
+        'ALTER USER "dba" CREATEUSER',
+    ]
+    # Redshift doesn't show whose password is disabled: said where it may be
+    assert [n for n in plan.notes if "refuses a superuser" in n] == [
+        "IAM:etl: Redshift refuses a superuser without a password; if its password "
+        "is disabled (an IAM user's), give it a password_env, or apply fails and "
+        "changes nothing"
+    ]

@@ -808,6 +808,14 @@ def _plan_superusers(
             plan.warnings.append(f"manage.superusers: {name} does not exist; skipped")
         elif able:
             ops.append(SetSuperuser(name=name, enabled=True, identity=identity(name)))
+            # Redshift doesn't show whose password is disabled, only refuses them
+            principal = spec.principals.get(name)
+            if spec.engine == "redshift" and not (principal and principal.password_env):
+                plan.notes.append(
+                    f"{name}: Redshift refuses a superuser without a password; if "
+                    "its password is disabled (an IAM user's), give it a password_env, "
+                    "or apply fails and changes nothing"
+                )
     if ops == [] and not able and plan.warnings and me is not None:
         plan.notes.append(
             f"superusers: {me} isn't one, so only a superuser can change them; "
