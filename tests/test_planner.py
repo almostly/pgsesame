@@ -1477,6 +1477,22 @@ def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change
     assert planner.make(NO_SPEC, bypasses).warnings == []
     platforms = _exposure_state(USAGE, SELECT, rls_switchable=set())
     assert planner.make(NO_SPEC, platforms).warnings == []
+    # nor a table in a schema the platform owns, though the user can act as the
+    # table's owner (Supabase's supabase_functions, owned by supabase_admin)
+    theirs = _exposure_state(
+        USAGE,
+        SELECT,
+        acts_as={"postgres", "supabase_functions_admin"},
+        owners={("schemas", "public"): "supabase_admin"},
+    )
+    assert planner.make(NO_SPEC, theirs).warnings == []
+    ours = _exposure_state(
+        USAGE,
+        SELECT,
+        acts_as={"postgres", "pg_database_owner"},
+        owners={("schemas", "public"): "pg_database_owner"},
+    )
+    assert len(planner.make(NO_SPEC, ours).warnings) == 1
 
 
 def _given(*privileges: str, owner="postgres") -> set[DefaultGrant]:

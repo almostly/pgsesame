@@ -341,6 +341,19 @@ def test_rows_anon_reaches_past_row_level_security_are_warned_about(leaky):
     code, out = _sesame("plan", leaky, "--dsn", DSN)
     assert "public.sesame_test_leaky: row-level security is off, and anon" in out, out
     assert "public.sesame_test_view: anon" in out and "owner's rights" in out, out
+    # nor anything in Supabase's own schemas (supabase_functions, with webhooks on)
+    with psycopg.connect(DSN) as conn:
+        theirs = {
+            name
+            for (name,) in conn.execute(
+                "SELECT nspname FROM pg_namespace "
+                "WHERE pg_get_userbyid(nspowner) = 'supabase_admin'"
+            )
+        }
+    warned = {
+        line[2:].split(".", 1)[0] for line in out.splitlines() if line[:2] == "! "
+    }
+    assert not warned & theirs, out
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute("ALTER TABLE public.sesame_test_leaky ENABLE ROW LEVEL SECURITY")
         conn.execute("ALTER VIEW public.sesame_test_view SET (security_invoker = true)")

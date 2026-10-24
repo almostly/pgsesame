@@ -534,7 +534,9 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
     row-level security off, or a view that runs with its owner's rights, that such
     a role can read or write in a schema it can use is said. A role that bypasses
     row-level security (service_role) is the server's, and the platform's own
-    tables are its business: only what the connected user can change is said.
+    tables are its business: only what the connected user can change, in a schema
+    whose owner it can act as, is said (Supabase's supabase_functions belongs to
+    supabase_admin, though postgres can act as its tables' owner).
     """
     joins = {m for m in current.memberships if m.member == API_ROLE}
     joins |= {
@@ -587,6 +589,11 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
             else p.object_name
         )
         schema = relation.split(".", 1)[0]
+        if (
+            current.acts_as is not None
+            and current.owners.get(("schemas", schema)) not in current.acts_as
+        ):
+            continue
         # what PUBLIC holds, every API role holds, as it does PUBLIC's USAGE
         if p.grantee == "public":
             who = "PUBLIC"
