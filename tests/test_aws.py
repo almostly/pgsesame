@@ -65,6 +65,7 @@ principals:
 
 
 def _where() -> list[str]:
+    """Return the CLI's flags that name the database and its workgroup or cluster."""
     where = ["--database", DATABASE]
     return where + (["--workgroup", WORKGROUP] if WORKGROUP else ["--cluster", CLUSTER])
 
@@ -103,6 +104,7 @@ def _iam_user() -> str:
 
 
 def _cleanup(conn: psycopg.Connection) -> None:
+    """Drop the schema, users, groups and roles the test creates."""
     conn.execute("DROP SCHEMA IF EXISTS aw_test CASCADE")
     for template, query in (
         (
@@ -124,6 +126,7 @@ def _cleanup(conn: psycopg.Connection) -> None:
 
 @pytest.fixture
 def admin():
+    """Yield an admin connection, with the test's objects dropped before and after."""
     with psycopg.connect(ADMIN, autocommit=True) as conn:
         _cleanup(conn)
         conn.execute("CREATE SCHEMA aw_test")
@@ -133,6 +136,7 @@ def admin():
 
 
 def _sesame(*args):
+    """Run the CLI; return its exit code and output, with any crash appended."""
     result = CliRunner().invoke(app, list(args), env={"NO_COLOR": "1"})
     crash = (
         f"\n{result.exception!r}"
@@ -143,6 +147,7 @@ def _sesame(*args):
 
 
 def _converge(tmp_path, *how: str) -> None:
+    """Plan, apply and plan again; the second plan must have nothing to do."""
     spec = tmp_path / "spec.yaml"
     spec.write_text(textwrap.dedent(SPEC))
     code, out = _sesame("plan", str(spec), *how, *_where())

@@ -28,10 +28,12 @@ from pgsesame.state import (
 
 
 def _spec(engine="postgres", **principals):
+    """Return a spec for ``engine`` with these principals."""
     return spec.parse({"version": 1, "engine": engine, "principals": principals})
 
 
 def _state(*roles: Role, objects=None, **extra) -> State:
+    """Return a state with these roles and objects."""
     state = State(roles={r.name: r for r in roles}, objects=objects or {}, **extra)
     return state
 
@@ -270,6 +272,7 @@ def test_a_builtin_role_takes_only_privileges():
 
 
 def _rls_spec(**policy):
+    """Return a spec with one row-level security policy on app.notes, for reader."""
     return spec.parse(
         {
             "version": 1,
@@ -365,6 +368,7 @@ MASKING = {
 
 
 def _masking_spec(masking=MASKING):
+    """Return a Redshift spec with ``masking`` and the roles it names."""
     principals = {r: {"type": "role"} for r in ("pii", "support", "fraud")}
     return spec.parse(
         {
@@ -377,6 +381,7 @@ def _masking_spec(masking=MASKING):
 
 
 def _masked_state(attachments=(), policies=()):
+    """Return a state with crm.c.email, its roles, these attachments and policies."""
     roles = [Role(r, False, False, "role") for r in ("pii", "support", "fraud")]
     return _state(
         *roles,
@@ -387,10 +392,12 @@ def _masked_state(attachments=(), policies=()):
 
 
 def _attachment(policy, grantee, priority, gtype="role"):
+    """Return an attachment of ``policy`` on crm.c.email for ``grantee``."""
     return Attachment(policy, "crm.c", ("email",), ("email",), grantee, gtype, priority)
 
 
 def _policy(name, expression="x", type_name="character varying(64)"):
+    """Return a masking policy that takes one ``value`` of ``type_name``."""
     return MaskPolicy(name, (("value", type_name),), expression, type_name)
 
 
@@ -420,6 +427,7 @@ def test_pass_through_policy_names():
 
 
 def _converged():
+    """Return the policies and attachments of a database that matches MASKING."""
     policies = [
         _policy("redact"),
         _policy("domain"),
@@ -567,6 +575,7 @@ FUNCTIONS = {"functions": {"app.hook(jsonb)", "app.f(integer)", "app.f(text)"}}
 
 
 def _statements(plan) -> list[str]:
+    """Return the plan's statements as SQL text."""
     return [op.statement().as_string(None) for op in plan.operations]
 
 
@@ -630,6 +639,7 @@ def test_functions_on_dsql_are_refused():
 # Default privileges
 # ---------------------------------------------------------------------------
 def _defaults_spec(engine="postgres", rules=None):
+    """Return a spec with these default privileges (by default: reader's in s)."""
     return spec.parse(
         {
             "version": 1,
@@ -649,6 +659,7 @@ def _defaults_spec(engine="postgres", rules=None):
 
 
 def _defaults_state(*grants, engine="pg"):
+    """Return a state with etl, reader and these default privileges."""
     roles = [
         Role("etl", True, False, engine),
         Role("reader", False, False, "role" if engine != "pg" else "pg"),
@@ -743,6 +754,7 @@ def test_an_owner_that_does_not_exist_stops_the_plan():
 # manage: schemas and prefixes
 # ---------------------------------------------------------------------------
 def _held(*privileges, roles=("reader",), extra_roles=()):
+    """Return a state where ``roles`` hold ``privileges`` in collections and risk."""
     state = _state(
         *[Role(r, False) for r in (*roles, *extra_roles)],
         objects={
@@ -849,6 +861,7 @@ def test_manage_prefixes_adopts_undeclared_roles_but_never_drops_them():
 # Ownership
 # ---------------------------------------------------------------------------
 def _owners_spec(owns, privileges=None):
+    """Return a spec where etl owns ``owns``, with ``privileges`` if given."""
     principals = {"etl": {"type": "role", "owns": owns}}
     if privileges:
         principals["etl"]["privileges"] = privileges
@@ -856,6 +869,7 @@ def _owners_spec(owns, privileges=None):
 
 
 def _owned_state(**owners):
+    """Return a state with etl, admin and schema a; ``owners`` maps ``type:name``."""
     state = _state(
         Role("etl", False),
         Role("admin", True),
@@ -1221,6 +1235,7 @@ def test_public_is_granted_and_its_drift_revoked_only_where_the_spec_speaks():
 
 def test_public_is_declared_only_as_a_builtin():
     def problems(principals, **more):
+        """Return the problems the spec parser finds with these principals."""
         with pytest.raises(spec.SpecError) as err:
             spec.parse(
                 {"version": 1, "engine": "postgres", "principals": principals, **more}
@@ -1253,6 +1268,7 @@ def test_public_is_declared_only_as_a_builtin():
 
 
 def _creator_spec(*rules, **principals):
+    """Return a Redshift spec with a reader group and these default privileges."""
     return spec.parse(
         {
             "version": 1,
@@ -1264,10 +1280,12 @@ def _creator_spec(*rules, **principals):
 
 
 def _creator_rule(owner, schema="ds_reporting"):
+    """Return a rule: reader may select the tables ``owner`` creates in ``schema``."""
     return {"owner": owner, "schema": schema, "grantee": "reader", "tables": ["select"]}
 
 
 def _creator_state(*extra_roles, **kw):
+    """Return a state with the reader group, these roles and two schemas."""
     return _state(
         Role("reader", False, identity="group"),
         *extra_roles,
@@ -1400,7 +1418,10 @@ def test_default_privileges_are_revoked_before_any_privilege_is():
 
 
 def _exposure_state(*privileges: Privilege, api=("anon",), **extra) -> State:
-    # Supabase's Data API signs in as authenticator and switches to its roles
+    """Return a Supabase state with public.todos, its row-level security off.
+
+    Supabase's Data API signs in as authenticator and switches to its roles, ``api``.
+    """
     return _state(
         Role("anon", False),
         Role("service_role", False, attributes=frozenset({"bypassrls"})),
@@ -1459,6 +1480,7 @@ def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change
 
 
 def _given(*privileges: str, owner="postgres") -> set[DefaultGrant]:
+    """Return default privileges that give anon ``privileges`` on new tables."""
     return {DefaultGrant(owner, "public", "tables", "anon", p) for p in privileges}
 
 
@@ -1537,6 +1559,7 @@ def test_a_view_that_runs_with_its_owners_rights_is_warned_about():
 
 
 def _publication_spec(*tables):
+    """Return a spec where supabase_realtime publishes these tables."""
     return spec.parse(
         {
             "version": 1,
@@ -1548,6 +1571,7 @@ def _publication_spec(*tables):
 
 
 def _publication_state(owner="postgres", all_tables=False, **extra) -> State:
+    """Return a state with three app tables; supabase_realtime has app.users."""
     return _state(
         objects={"tables": {"app.posts", "app.drafts", "app.users"}},
         publications={"supabase_realtime": (owner, all_tables)},
@@ -1599,12 +1623,16 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
     from pgsesame.db import Connection
 
     class Recorder:
+        """A connection that records each query and finds no rows."""
+
         database = "postgres"
 
         def __init__(self):
+            """Start with no queries run."""
             self.queries = []
 
         def rows(self, query):
+            """Record the query; return no rows."""
             self.queries.append(query)
             return []
 
@@ -1712,6 +1740,7 @@ def test_system_permissions_are_words_for_redshift_roles():
 
 
 def _superusers(current_user="admin") -> State:
+    """Return a state with four superusers, one the bootstrap user, and dba."""
     return _state(
         Role("admin", True, superuser=True),
         Role("intern", True, superuser=True),
@@ -1724,6 +1753,7 @@ def _superusers(current_user="admin") -> State:
 
 
 def _listing(*names):
+    """Return a spec where manage.superusers lists these names."""
     return spec.parse(
         {
             "version": 1,

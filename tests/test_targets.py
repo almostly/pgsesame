@@ -30,21 +30,26 @@ class MemoryKeyring(KeyringBackend):
     priority = 1
 
     def __init__(self):
+        """Start with no passwords kept."""
         super().__init__()
         self.items: dict[tuple[str, str], str] = {}
 
     def get_password(self, service, username):
+        """Return the password kept for this service and user, if any."""
         return self.items.get((service, username))
 
     def set_password(self, service, username, password):
+        """Keep the password for this service and user."""
         self.items[(service, username)] = password
 
     def delete_password(self, service, username):
+        """Forget the password for this service and user."""
         self.items.pop((service, username), None)
 
 
 @pytest.fixture
 def keychain(tmp_path, monkeypatch):
+    """Yield an in-memory keychain, with the config in a temporary directory."""
     monkeypatch.setenv("SESAME_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.delenv("SESAME_TARGET", raising=False)
     memory = MemoryKeyring()
@@ -55,6 +60,7 @@ def keychain(tmp_path, monkeypatch):
 
 
 def _sesame(*args, input=None, env=None):
+    """Run the CLI; return its exit code and output."""
     result = CliRunner().invoke(
         app, list(args), input=input, env={"NO_COLOR": "1", **(env or {})}
     )
@@ -95,6 +101,7 @@ needs_postgres = pytest.mark.skipif(not LOCAL, reason="set PGSESAME_TEST_DSN")
 
 
 def _login_args(name="local"):
+    """Return the arguments of a login to the local database, and its password."""
     parts = conninfo_to_dict(LOCAL)
     return [
         "login",
@@ -234,6 +241,8 @@ def test_an_rds_login_keeps_the_user_given_and_the_engines_port(
     from pgsesame import aws
 
     class Endpoint:
+        """The endpoint describe_rds finds for dwh."""
+
         host, port, master_user, name = (
             "dwh.abc.rds.amazonaws.com",
             5432,
@@ -301,6 +310,7 @@ def test_a_supabase_login_finds_the_session_pooler(keychain, tmp_path, monkeypat
     asked = []
 
     def urlopen(request, timeout):
+        """Record the URL and Authorization header asked for; answer with ``pools``."""
         asked.append((request.full_url, request.get_header("Authorization")))
         return io.BytesIO(json.dumps(pools).encode())
 

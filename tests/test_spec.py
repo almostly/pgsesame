@@ -12,12 +12,14 @@ EXAMPLE = Path(__file__).parents[1] / "examples" / "redshift.yaml"
 
 
 def _parse(**overrides):
+    """Parse a minimal PostgreSQL spec with ``overrides`` applied."""
     raw = {"version": 1, "engine": "postgres", "principals": {}}
     raw.update(overrides)
     return spec.parse(raw)
 
 
 def _problems(**overrides) -> list[str]:
+    """Return the problems parsing the spec with ``overrides`` raises."""
     with pytest.raises(spec.SpecError) as err:
         _parse(**overrides)
     return err.value.problems
