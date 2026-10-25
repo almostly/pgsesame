@@ -9,14 +9,17 @@ statement's SQL in SQL Workbench/J's colors instead, for a dark terminal; its
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
-from pygments.lexers.sql import PostgresLexer
 from pygments.token import Comment, Keyword, Name, Number, Operator, Punctuation
-from pygments.token import String, _TokenType
+from pygments.token import String
 from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
 from rich.theme import Theme
+
+if TYPE_CHECKING:
+    from pygments.token import _TokenType
 
 STYLES = {
     "accent": "bold green",  # pgcli's green: header, connection, headings
@@ -73,11 +76,20 @@ def operation(kind: str, sql: str, note: str = "") -> None:
 
 def highlight(sql: str) -> Text:
     """Return ``sql`` with each token styled by what it is (the ``sql.*`` styles)."""
+    from pygments.lexers.sql import PostgresLexer  # only the workbench theme's
+
     tokens = list(PostgresLexer().get_tokens(sql.rstrip()))
+    # each token's next non-blank value, found walking back from the end
+    following: list[str] = []
+    after = ""
+    for _, value in reversed(tokens):
+        following.append(after)
+        if value.strip():
+            after = value
+    following.reverse()
     runs: list[tuple[str, str]] = []  # (text, style): a quoted name is one run
-    for i, (token, value) in enumerate(tokens):
-        following = next((v for _, v in tokens[i + 1 :] if v.strip()), "")
-        style = _style(token, value, following)
+    for (token, value), next_value in zip(tokens, following, strict=True):
+        style = _style(token, value, next_value)
         if runs and runs[-1][1] == style:
             runs[-1] = (runs[-1][0] + value, style)
         else:

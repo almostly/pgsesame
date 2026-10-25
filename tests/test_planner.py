@@ -1493,6 +1493,17 @@ def test_reach_needs_the_schema_rls_that_applies_and_a_table_the_user_can_change
         owners={("schemas", "public"): "pg_database_owner"},
     )
     assert len(planner.make(NO_SPEC, ours).warnings) == 1
+    # a schema another role owns (postgres's public before PostgreSQL 15), or one
+    # the catalog doesn't show yet, is still the user's
+    migrator = _exposure_state(
+        USAGE,
+        SELECT,
+        acts_as={"migrator"},
+        owners={("schemas", "public"): "postgres"},
+    )
+    assert len(planner.make(NO_SPEC, migrator).warnings) == 1
+    unknown = _exposure_state(USAGE, SELECT, acts_as={"migrator"})
+    assert len(planner.make(NO_SPEC, unknown).warnings) == 1
 
 
 def _given(*privileges: str, owner="postgres") -> set[DefaultGrant]:
@@ -1845,7 +1856,10 @@ def test_redshift_superusers_are_createuser():
     assert _statements(plan) == ['ALTER USER "etl" NOCREATEUSER']
 
 
-def test_making_a_redshift_superuser_notes_it_needs_a_password():
+def test_making_a_redshift_superuser_notes_it_needs_a_password(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DBA_PW", "secret")
     state = _state(
         Role("admin", True, True, "user"),
         Role("IAM:etl", True, False, "user"),
@@ -1864,8 +1878,16 @@ def test_making_a_redshift_superuser_notes_it_needs_a_password():
         'ALTER USER "dba" CREATEUSER',
     ]
     # Redshift doesn't show whose password is disabled: said where it may be
+    note = (
+        ": Redshift refuses a superuser without a password; if its password is "
+        "disabled (an IAM user's), give it a password_env that is set, or apply "
+        "fails and changes nothing"
+    )
+    assert [n for n in plan.notes if "refuses a superuser" in n] == ["IAM:etl" + note]
+    # a password_env that isn't set gives no password either
+    monkeypatch.delenv("DBA_PW")
+    plan = planner.make(spec.parse(listing), state)
     assert [n for n in plan.notes if "refuses a superuser" in n] == [
-        "IAM:etl: Redshift refuses a superuser without a password; if its password "
-        "is disabled (an IAM user's), give it a password_env, or apply fails and "
-        "changes nothing"
+        "IAM:etl" + note,
+        "dba" + note,
     ]
