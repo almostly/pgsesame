@@ -534,8 +534,8 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
     row-level security off, or a view that runs with its owner's rights, that such
     a role can read or write in a schema it can use is said. A role that bypasses
     row-level security (service_role) is the server's, and the platform's own
-    tables are its business: only what the connected user can change, in a schema
-    whose owner it can act as, is said (Supabase's supabase_functions belongs to
+    tables are its business: only what the connected user can change, outside a
+    schema the platform owns, is said (Supabase's supabase_functions belongs to
     supabase_admin, though postgres can act as its tables' owner).
     """
     joins = {m for m in current.memberships if m.member == API_ROLE}
@@ -589,10 +589,7 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
             else p.object_name
         )
         schema = relation.split(".", 1)[0]
-        if (
-            current.acts_as is not None
-            and current.owners.get(("schemas", schema)) not in current.acts_as
-        ):
+        if _platforms(schema, current):
             continue
         # what PUBLIC holds, every API role holds, as it does PUBLIC's USAGE
         if p.grantee == "public":
@@ -639,18 +636,17 @@ def _exposed_by_default(
     PostgreSQL makes a table with row-level security off, so its rows are open to
     them until it is turned on. Supabase's own defaults in public did this until
     it stopped them; a spec imported before then still lists them. Only defaults
-    of an owner the connected user can act as, in a schema whose owner it can act
-    as, are said: the others (Supabase's storage, say) are the platform's.
+    of an owner the connected user can act as, outside a schema the platform owns,
+    are said: the others (Supabase's storage, say) are the platform's.
     """
     acts_as = current.acts_as
     given: dict[tuple[str, str], dict[str, set[str]]] = {}
     for d in defaults:
         if d.object_type != "tables" or d.privilege not in _ROW_PRIVILEGES:
             continue
-        if acts_as is not None and (
-            d.owner not in acts_as
-            or (d.schema and current.owners.get(("schemas", d.schema)) not in acts_as)
-        ):
+        if acts_as is not None and d.owner not in acts_as:
+            continue
+        if d.schema and _platforms(d.schema, current):
             continue
         if d.grantee == "public":
             who, users = "PUBLIC", api | {"public"}
@@ -817,11 +813,14 @@ def _plan_superusers(
             ops.append(SetSuperuser(name=name, enabled=True, identity=identity(name)))
             # Redshift doesn't show whose password is disabled, only refuses them
             principal = spec.principals.get(name)
-            if spec.engine == "redshift" and not (principal and principal.password_env):
+            password_env = principal.password_env if principal else None
+            if spec.engine == "redshift" and not (
+                password_env and os.environ.get(password_env)
+            ):
                 plan.notes.append(
                     f"{name}: Redshift refuses a superuser without a password; if "
-                    "its password is disabled (an IAM user's), give it a password_env, "
-                    "or apply fails and changes nothing"
+                    "its password is disabled (an IAM user's), give it a password_env "
+                    "that is set, or apply fails and changes nothing"
                 )
     if ops == [] and not able and plan.warnings and me is not None:
         plan.notes.append(
@@ -1126,6 +1125,22 @@ def _system_role(name: str) -> bool:
     return name.startswith(
         ("pg_", "rds", "sys:", "cloudsql", "alloydb", "supabase")
     ) or name in ("postgres", "PUBLIC", "dbowner")  # dbowner: Aurora DSQL's
+
+
+def _platforms(schema: str, current: State) -> bool:
+    """Return whether a platform's admin role, one the user can't act as, owns a schema.
+
+    Owning its tables doesn't make them the user's (Supabase's supabase_functions,
+    owned by supabase_admin). A schema the plan creates, or one owned by postgres
+    or pg_database_owner, stays the user's.
+    """
+    owner = current.owners.get(("schemas", schema))
+    return (
+        current.acts_as is not None
+        and owner is not None
+        and owner not in current.acts_as
+        and owner.startswith(("supabase", "rds", "cloudsql", "alloydb"))
+    )
 
 
 def _in_managed_schemas(p: Privilege, spec: Spec) -> bool:

@@ -124,7 +124,7 @@ jobs:
             uv run python -c "import os, psycopg; psycopg.connect(os.environ['PGSESAME_TEST_REDSHIFT_DSN'], connect_timeout=3).execute('select 1 from svv_roles limit 1')" 2>/dev/null && exit 0
             sleep 2
           done
-          echo "redshift-local did not come up"; docker logs redshift | tail -50; exit 1
+          echo "redshift-local did not come up"; docker logs redshift 2>&1 | tail -50; exit 1
 
       - name: Redshift tests
         run: uv run pytest -q tests/test_redshift.py tests/test_masking.py
