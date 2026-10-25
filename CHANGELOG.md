@@ -11,6 +11,17 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.4.2 (2026-10-25)
+
+Fixes from a review of 0.4: the Data API warnings 0.4.1 hid, and a Redshift note.
+
+### Changed
+
+- **Planner**: only a schema owned by a platform's admin role the connected user can't act as (Supabase's supabase_admin, RDS's rdsadmin) hides its tables and defaults from the Data API warnings; 0.4.1 hid any schema whose owner it couldn't act as, such as postgres's public before PostgreSQL 15, or one the plan creates
+- **Planner**: the note that Redshift refuses a superuser without a password is also given when its password_env isn't set
+- **Console**: pygments is a declared dependency, loaded for the workbench theme only, and highlighting runs in linear time
+- **CI**: the redshift-local log tail includes stderr
+
 ## v0.4.1 (2026-10-24)
 
 A fix for Supabase projects with Database Webhooks on.
