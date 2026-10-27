@@ -32,7 +32,7 @@ inputs:
     default: ""
   package:
     description: "What to install: a pgsesame requirement, or a path"
-    default: "pgsesame[redshift]==0.4.2"
+    default: "pgsesame[redshift]==0.5.0"
   github-token:
     description: "Token for the pull request comment (needs pull-requests: write)"
     default: ${{ github.token }}
