@@ -2,7 +2,8 @@
 
 import pytest
 
-from pgsesame.ops import AddMember, AlterLogin, CreateRole, Grant, RemoveMember, Revoke
+from pgsesame.ops import AddMember, AlterLogin, AlterOwner, CreateRole, Grant
+from pgsesame.ops import RemoveMember, Revoke
 
 
 @pytest.mark.parametrize(
@@ -62,12 +63,35 @@ def test_names_are_quoted_not_pasted():
     op = Grant(
         grantee='IAM:alice"; DROP TABLE x; --',
         object_type="tables",
-        object_name='analytics.Daily "Sales"',
+        object_name='analytics."Daily ""Sales"""',
         privilege="select",
     )
     assert op.statement().as_string() == (
         'GRANT SELECT ON TABLE "analytics"."Daily ""Sales""" '
         'TO "IAM:alice""; DROP TABLE x; --"'
+    )
+
+
+def test_a_dot_inside_quotes_is_part_of_the_name():
+    name = 'userrisk_dwh."roll rates.csv"'
+    table = Grant(
+        grantee="analyst", object_type="tables", object_name=name, privilege="select"
+    )
+    assert table.statement().as_string() == (
+        'GRANT SELECT ON TABLE "userrisk_dwh"."roll rates.csv" TO "analyst"'
+    )
+    column = Grant(
+        grantee="analyst",
+        object_type="columns",
+        object_name=f"{name}.month",
+        privilege="select",
+    )
+    assert column.statement().as_string() == (
+        'GRANT SELECT ("month") ON TABLE "userrisk_dwh"."roll rates.csv" TO "analyst"'
+    )
+    owner = AlterOwner(object_type="tables", object_name=name, owner="etl")
+    assert owner.statement().as_string() == (
+        'ALTER TABLE "userrisk_dwh"."roll rates.csv" OWNER TO "etl"'
     )
 
 

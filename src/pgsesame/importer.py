@@ -37,7 +37,7 @@ from pgsesame.spec import (
     PRIVILEGES,
     UNMASKED_PREFIX,
 )
-from pgsesame.state import Privilege, State
+from pgsesame.state import Privilege, State, qualify, schema_of, split
 
 
 # Supabase's roles besides its supabase_* ones: the Data API's, and its tools'
@@ -59,7 +59,7 @@ def _schema(p: Privilege) -> str | None:
         return None
     if p.object_type == "schemas":
         return p.object_name
-    return p.object_name.split(".", 1)[0]
+    return schema_of(p.object_name)
 
 
 def _in_schemas(p: Privilege, schemas: set[str]) -> bool:
@@ -185,7 +185,7 @@ def build(
         for (kind, obj), owner in sorted(state.owners.items()):
             if owner != name or kind not in OWNABLE[engine]:
                 continue
-            schema = obj if kind == "schemas" else obj.split(".", 1)[0]
+            schema = obj if kind == "schemas" else schema_of(obj)
             if kind == "databases" or (
                 (not in_scope or schema in in_scope) and schema not in platform_schemas
             ):
@@ -283,7 +283,7 @@ def build(
                 for name in [*column.get("unmasked", []), *column.get("roles", {})]:
                     if name not in principals:
                         principals[name] = {"type": "builtin"}  # referred to
-    if any(t.split(".", 1)[0] not in platform_schemas for t, _ in state.policies):
+    if any(schema_of(t) not in platform_schemas for t, _ in state.policies):
         notes.append("row-level security isn't imported yet; add it by hand")
     notes += public_create_notes(state, schemas)
     return spec, sorted(set(notes))
@@ -307,7 +307,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
 
     by_column: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for a in state.attachments:
-        if in_scope and a.table.split(".", 1)[0] not in in_scope:
+        if in_scope and schema_of(a.table) not in in_scope:
             continue
         if len(a.columns) != 1 or a.inputs != a.columns:
             notes.append(
@@ -395,7 +395,7 @@ def _masking(state: State, in_scope: set[str], notes: list[str]) -> dict[str, An
                 f"{where}: attached another way than pgsesame's model (priorities "
                 f"{sorted({a.priority for a in attached})}); the plan re-attaches them"
             )
-        columns[f"{table}.{column}"] = entry
+        columns[qualify(*split(table), column)] = entry
 
     written: dict[str, dict[str, Any]] = {}
     for name in sorted(used):

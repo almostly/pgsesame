@@ -17,6 +17,7 @@ from typing import Any
 
 from pgsesame.db import Connection
 from pgsesame.state import DefaultGrant, Membership, Privilege, Role, State
+from pgsesame.state import part_sql, qualify
 
 USERS = "select usesysid, usename, usesuper from pg_user"
 # pg_catalog.pg_group, qualified: on redshift-local the proxy then leaves out
@@ -68,7 +69,10 @@ OWNERS = (
     "join pg_user u on u.usesysid = n.nspowner where "
     + _USER_SCHEMA.format(col="n.nspname")
     + " union all select case c.relkind when 'v' then 'views' else 'tables' end, "
-    "n.nspname || '.' || c.relname, u.usename from pg_class c "
+    + part_sql("n.nspname")
+    + " || '.' || "
+    + part_sql("c.relname")
+    + ", u.usename from pg_class c "
     "join pg_namespace n on n.oid = c.relnamespace "
     "join pg_user u on u.usesysid = c.relowner where c.relkind in ('r', 'v') and "
     + _USER_SCHEMA.format(col="n.nspname")
@@ -210,8 +214,8 @@ def read(db: Connection, columns: bool = True) -> State:
     kinds: dict[str, str] = {}
     for schema, name, table_type in rows["relations"]:
         kind = "views" if table_type == "VIEW" else "tables"
-        kinds[f"{schema}.{name}"] = kind
-        state.objects[kind].add(f"{schema}.{name}")
+        kinds[qualify(schema, name)] = kind
+        state.objects[kind].add(qualify(schema, name))
 
     def privilege(
         grantee: str, identity: str, kind: str, name: str, priv: str, option=False
@@ -234,7 +238,7 @@ def read(db: Connection, columns: bool = True) -> State:
     for grantee, identity, schema, relation, priv, option in rows[
         "relation_privileges"
     ]:
-        full = f"{schema}.{relation}"
+        full = qualify(schema, relation)
         privilege(grantee, identity, kinds.get(full, "tables"), full, priv, option)
     for kind, name, owner in rows["owners"]:
         state.owners[(kind, name)] = owner
@@ -246,9 +250,10 @@ def read(db: Connection, columns: bool = True) -> State:
                 )
             )
     if columns:
-        state.objects["columns"] = {f"{s}.{t}.{c}" for s, t, c in rows["columns"]}
+        state.objects["columns"] = {qualify(*row) for row in rows["columns"]}
     for grantee, identity, schema, relation, column, priv in rows["column_privileges"]:
-        privilege(grantee, identity, "columns", f"{schema}.{relation}.{column}", priv)
+        name = qualify(schema, relation, column)
+        privilege(grantee, identity, "columns", name, priv)
     try:  # on its own: an older catalog has no such view
         held = db.rows(SYSTEM_PRIVILEGES)
     except Exception:

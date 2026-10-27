@@ -441,6 +441,48 @@ def test_default_privileges_of_an_owner_that_cant_create_are_skipped(dsn, tmp_pa
     assert code == 0 and "can't create" not in out, out
 
 
+def test_a_table_with_a_dot_in_its_name_is_granted_and_imported(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute('CREATE TABLE rs_test."roll rates.csv" (month date)')
+    spec = _spec(
+        tmp_path,
+        f"""
+        version: 1
+        engine: redshift
+        principals:
+          {P}reader:
+            type: role
+            privileges:
+              schemas:
+                usage: [rs_test]
+              tables:
+                select: ['rs_test."roll rates.csv"']
+              columns:
+                update: ['rs_test."roll rates.csv".month']
+        """,
+    )
+    code, out = _sesame("apply", spec, "--dsn", dsn)
+    assert code == 0, out
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        dsn,
+        "--engine",
+        "redshift",
+        "--prefix",
+        P,
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    assert 'rs_test."roll rates.csv"' in imported.read_text()
+    code, out = _sesame("plan", str(imported), "--dsn", dsn)
+    assert code == 0, out
+
+
 def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     env = {"RS_TEST_ALICE_PASSWORD": "Alice-pw-1"}
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=env)[0] == 0

@@ -676,6 +676,46 @@ def test_default_privileges_reach_the_tables_made_later(dsn, tmp_path):
     assert _sesame("apply", empty, "--dsn", dsn, "--allow-revoke")[0] == 0
 
 
+def test_a_table_with_a_dot_in_its_name_is_granted_and_imported(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute('CREATE TABLE analytics."roll rates.csv" (month date)')
+    spec = _spec(
+        tmp_path,
+        f"""
+        version: 1
+        engine: postgres
+        principals:
+          {P}reader:
+            type: role
+            privileges:
+              schemas:
+                usage: [analytics]
+              tables:
+                select: ['analytics."roll rates.csv"']
+              columns:
+                update: ['analytics."roll rates.csv".month']
+        """,
+    )
+    code, out = _sesame("apply", spec, "--dsn", dsn)
+    assert code == 0, out
+    code, out = _sesame("plan", spec, "--dsn", dsn)
+    assert code == 0, out
+    imported = tmp_path / "imported.yaml"
+    code, out = _sesame(
+        "import",
+        "--dsn",
+        dsn,
+        "--prefix",
+        P,
+        "-o",
+        str(imported),
+    )
+    assert code == 0, out
+    assert 'analytics."roll rates.csv"' in imported.read_text()
+    code, out = _sesame("plan", str(imported), "--dsn", dsn)
+    assert code == 0, out
+
+
 def test_import_writes_a_spec_whose_plan_is_empty(dsn, tmp_path):
     env = {"SESAME_TEST_ALICE_PASSWORD": "alice-pw-4"}
     assert _sesame("apply", _spec(tmp_path), "--dsn", dsn, env=env)[0] == 0

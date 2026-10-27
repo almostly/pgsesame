@@ -20,6 +20,8 @@ from typing import Annotated, Any, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from pgsesame.state import qualify, schema_of, split
+
 # dsql: Amazon Aurora DSQL, PostgreSQL 16 for roles and grants, with less of it
 Engine = Literal["postgres", "redshift", "dsql"]
 ObjectType = Literal[
@@ -53,13 +55,18 @@ Identifier = Annotated[
 ]
 # an environment variable name, as a shell accepts it
 EnvVar = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+# a part of an object's name: as written, or in double quotes when it holds a dot
+# or a double quote ("roll rates.csv", with "" for a ")
+_QUOTED = r'"(?:[^"\x00]|"")+"'
+_SCHEMA = rf'(?:[^."\x00]+|{_QUOTED})'
+_PART = rf'(?:[^."\x00*]+|{_QUOTED})'
 # an object: name, schema.name, schema.* (every object of the type in schema), for
 # columns schema.table.column, or for a function schema.name(argument types)
 # (which parts a type takes is checked per type)
 ObjectPattern = Annotated[
     str,
     StringConstraints(
-        pattern=r"^[^.\x00]+(\.(\*|[^.\x00*]+(\.[^.\x00*]+)?))?$"
+        pattern=rf"^{_SCHEMA}(\.(\*|{_PART}(\.{_PART})?))?$"
         r"|^[^.\x00(]+\.[^.\x00*(]+\([^\x00()]*\)$"
     ),
 ]
@@ -208,7 +215,7 @@ class DefaultPrivilege(_Model):
 
 
 # a table, schema-qualified: schema.table
-TableName = Annotated[str, StringConstraints(pattern=r"^[^.\x00]+\.[^.\x00*]+$")]
+TableName = Annotated[str, StringConstraints(pattern=rf"^{_SCHEMA}\.{_PART}$")]
 
 
 class RlsPolicy(_Model):
@@ -233,7 +240,7 @@ class RlsTable(_Model):
 
 # a column, schema.table.column
 ColumnName = Annotated[
-    str, StringConstraints(pattern=r"^[^.\x00]+\.[^.\x00*]+\.[^.\x00*]+$")
+    str, StringConstraints(pattern=rf"^{_SCHEMA}\.{_PART}\.{_PART}$")
 ]
 # a SQL type as a masking policy's input declares it: varchar(256), numeric(12, 2),
 # character varying, timestamp ... (words, then an optional (n) or (p, s))
@@ -457,8 +464,12 @@ def _check(spec: Spec) -> list[str]:
         ]:
             for pattern in patterns:
                 # a function's argument types may be schema-qualified
-                parts = pattern.split("(", 1)[0].split(".")
-                if kind == "functions" and len(parts) != 2:
+                parts = split(pattern.split("(", 1)[0])
+                if kind not in ("databases", "schemas", "functions") and (
+                    qualify(*parts) != pattern
+                ):
+                    problems.append(f"{where}: {pattern}: {_written(pattern)}")
+                elif kind == "functions" and len(parts) != 2:
                     problems.append(
                         f"{where}: {pattern}: a function is schema.name, "
                         "schema.name(types) or schema.*"
@@ -567,12 +578,38 @@ def _check(spec: Spec) -> list[str]:
                     )
     if redshift:
         problems += _check_case(spec)
+    problems += _check_written(spec)
     problems += _check_rls(spec)
     problems += _check_publications(spec)
     problems += _check_masking(spec)
     problems += _check_manage(spec)
     problems += _check_owners(spec)
     return problems
+
+
+def _written(name: str) -> str:
+    """Return why a name isn't written as pgsesame reads it back, and how it is."""
+    return (
+        f"write it as {qualify(*split(name))} (only a name with a dot or a double "
+        'quote in it is quoted, as "roll rates.csv")'
+    )
+
+
+def _check_written(spec: Spec) -> list[str]:
+    """Refuse a table or column outside the principals not written as it reads back."""
+    named = [("row_level_security", table) for table in spec.row_level_security]
+    if spec.masking is not None:
+        named += [("masking.columns", column) for column in spec.masking.columns]
+    named += [
+        (f"publications.{name}.tables", table)
+        for name, publication in spec.publications.items()
+        for table in publication.tables
+    ]
+    return [
+        f"{where}: {name}: {_written(name)}"
+        for where, name in named
+        if qualify(*split(name)) != name
+    ]
 
 
 def _folded(name: str) -> bool:
@@ -656,7 +693,7 @@ def _check_publications(spec: Spec) -> list[str]:
         f"publications.{name}.tables: {table}: a table is schema.table or schema.*"
         for name, publication in spec.publications.items()
         for table in publication.tables
-        if table.count(".") != 1
+        if len(split(table)) != 2
     ]
 
 
@@ -740,7 +777,7 @@ def _check_manage(spec: Spec) -> list[str]:
                 continue
             for patterns in grants.values():
                 for pattern in patterns:
-                    schema = pattern if kind == "schemas" else pattern.split(".", 1)[0]
+                    schema = pattern if kind == "schemas" else schema_of(pattern)
                     if schema not in schemas:
                         problems.append(
                             f"principals.{name}.privileges.{kind}: {pattern} is outside "
@@ -750,7 +787,7 @@ def _check_manage(spec: Spec) -> list[str]:
             if kind == "databases":
                 continue
             for pattern in patterns:
-                schema = pattern if kind == "schemas" else pattern.split(".", 1)[0]
+                schema = pattern if kind == "schemas" else schema_of(pattern)
                 if schema not in schemas:
                     problems.append(
                         f"principals.{name}.owns.{kind}: {pattern} is outside "
