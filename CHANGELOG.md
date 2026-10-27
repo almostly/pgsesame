@@ -11,6 +11,12 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.5.1 (2026-10-27)
+
+### Fixed
+
+- **Planner**: a default privilege for a superuser grantee was planned again on every apply, since its existing entry wasn't compared. Such a rule is now left alone with a note, as a superuser's grants are.
+
 ## v0.5.0 (2026-10-27)
 
 Tables with a dot in their name. A spec without one reads as before.
