@@ -8,7 +8,7 @@ Declarative permission management for PostgreSQL and Amazon Redshift. Define
 roles, users, groups and grants in YAML, then plan and apply changes like
 Terraform.
 
-> **Status: 0.4, alpha.** `validate`, `plan`, `apply`, change sets and `import`
+> **Status: 0.5, alpha.** `validate`, `plan`, `apply`, change sets and `import`
 > work for roles, users, groups, memberships, privileges, ownership and default
 > privileges on PostgreSQL and Redshift, along with row-level security and Redshift
 > masking. Tested against PostgreSQL 14 to 18, Supabase, oblako's redshift-local and
@@ -556,7 +556,7 @@ jobs:
     env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
       - uses: actions/checkout@v4
-      - uses: almostly/pgsesame@v0.4.2
+      - uses: almostly/pgsesame@v0.5.0
         with: {command: plan, spec: permissions.yaml}
 
   apply:
@@ -566,7 +566,7 @@ jobs:
     environment: production
     env: {SESAME_DSN: "${{ secrets.SESAME_DSN }}"}
     steps:
-      - uses: almostly/pgsesame@v0.4.2
+      - uses: almostly/pgsesame@v0.5.0
         with: {command: apply}
 ```
 

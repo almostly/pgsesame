@@ -11,9 +11,15 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.5.0 (2026-10-27)
+
+Tables with a dot in their name. A spec without one reads as before.
+
 ### Changed
 
 - **Spec**: a table, view or column name with a dot or a double quote in it is written in double quotes (`userrisk_dwh."roll rates.csv"`, `""` for a `"`), and import and plan read such names from the catalog that way; before, a dot in a name was taken for the one after the schema, so validation refused the cluster. Every other name reads as before, and a name quoted where it needn't be is refused with how to write it. A name with a double quote in it, which was written bare, now takes the quoted form
+- **Docs**: the README's status says 0.5
+
 ## v0.4.2 (2026-10-25)
 
 Fixes from a review of 0.4: the Data API warnings 0.4.1 hid, and a Redshift note.
