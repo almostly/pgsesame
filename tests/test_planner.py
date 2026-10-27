@@ -704,6 +704,21 @@ def test_default_privileges_of_other_grantees_are_left_alone():
     assert planner.make(_defaults_spec(), _defaults_state(other, mine)).operations == []
 
 
+def test_a_default_privilege_for_a_superuser_is_left_alone():
+    from pgsesame.state import DefaultGrant
+
+    current = _defaults_state(DefaultGrant("etl", "s", "tables", "reader", "select"))
+    current.roles["reader"] = Role("reader", True, superuser=True)
+    plan = planner.make(_defaults_spec(), current)
+    # the spec's grant exists but isn't compared for a superuser: not planned again
+    assert plan.operations == []
+    assert "default_privileges[0]: reader is a superuser; left alone" in plan.notes
+
+    # and one it lacks isn't granted, as it gives a superuser nothing
+    current.default_privileges = set()
+    assert planner.make(_defaults_spec(), current).operations == []
+
+
 def test_a_builtin_roles_default_privileges_are_managed_where_the_spec_names_it():
     from pgsesame.state import DefaultGrant
 
