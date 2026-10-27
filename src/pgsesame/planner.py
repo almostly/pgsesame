@@ -943,6 +943,11 @@ def _plan_defaults(
                 f"default_privileges[{i}].owner: {rule.owner} does not exist"
             )
             continue
+        if _superuser(current, rule.grantee):  # it reads anything anyway
+            notes.append(
+                f"default_privileges[{i}]: {rule.grantee} is a superuser; left alone"
+            )
+            continue
         for kind, privileges in rule.grants().items():
             for privilege in privileges:
                 spelt = "temporary" if privilege == "temp" else privilege
