@@ -19,6 +19,7 @@ from pgsesame import __version__, masking, planner, postgres, redshift, spec, ta
 from pgsesame.changeset import ChangeSet, ChangeSetError, is_changeset, same_operations
 from pgsesame.console import SYMBOL, console, err, header, operation
 from pgsesame.db import Connection, Database, PartiallyApplied, StatementFailed
+from pgsesame.state import split
 
 # pgcli's green for the help screens, in place of Typer's cyan and yellow
 for _name, _style in {
@@ -660,7 +661,7 @@ def grants_command(
     if fmt not in ("json", "csv"):
         err.print("[error]✗[/error] --format is json or csv")
         raise typer.Exit(1)
-    if only is not None and only.count(".") != 1:
+    if only is not None and len(split(only)) != 2:
         err.print("[error]✗[/error] --object is schema.table")
         raise typer.Exit(1)
     sys.stdout.write(grants.dump(grants.rows(_load(path), only), fmt))

@@ -42,7 +42,7 @@ from pgsesame.ops import (
     ReattachMaskingPolicy,
 )
 from pgsesame.spec import UNMASKED_PREFIX, Spec
-from pgsesame.state import Attachment, MaskPolicy, State
+from pgsesame.state import Attachment, MaskPolicy, State, parent, qualify, split
 
 MASK_PRIORITY = 10
 ROLE_PRIORITY = 20  # then 30, 40 ... in the order the spec lists the roles
@@ -107,13 +107,13 @@ def read(db: Connection, spec: Spec, state: State) -> None:
     """
     assert spec.masking is not None
     queries = {"can_manage": CAN_MANAGE, "policies": POLICIES, "attached": ATTACHED}
-    tables = sorted({c.rsplit(".", 1)[0] for c in spec.masking.columns})
+    tables = sorted({tuple(split(c)[:-1]) for c in spec.masking.columns})
     if tables:
         where = sql.SQL(" or ").join(
             sql.SQL("(n.nspname = {} and c.relname = {})").format(
-                sql.Literal(t.split(".", 1)[0]), sql.Literal(t.split(".", 1)[1])
+                sql.Literal(schema), sql.Literal(table)
             )
-            for t in tables
+            for schema, table in tables
         )
         queries["columns"] = db.render(sql.SQL(COLUMNS).format(where))
     rows = redshift.fetch(db, queries)
@@ -124,7 +124,7 @@ def read(db: Connection, spec: Spec, state: State) -> None:
             "superusers and the sys:secadmin role only), so it can't plan them"
         )
     for schema, table, column, type_name in rows.get("columns", []):
-        state.column_types[f"{schema}.{table}.{column}"] = type_name
+        state.column_types[qualify(schema, table, column)] = type_name
 
 
 def read_policies(db: Connection, state: State) -> bool:
@@ -152,7 +152,7 @@ def _store(rows: dict[str, list[tuple[Any, ...]]], state: State) -> bool:
         state.attachments.add(
             Attachment(
                 policy=policy,
-                table=f"{schema}.{table}",
+                table=qualify(schema, table),
                 columns=tuple(_json(outputs)),
                 inputs=tuple(_json(inputs)),
                 grantee=grantee,
@@ -282,15 +282,16 @@ def _wanted_attachments(
     assert spec.masking is not None
     out: set[Attachment] = set()
     for column, c in sorted(spec.masking.columns.items()):
-        table, name = column.rsplit(".", 1)
+        table, name = parent(column), split(column)[-1]
         type_name = state.column_types.get(column)
         if type_name is None:
             problems.append(f"masking.columns.{column}: the column does not exist")
             continue
         for extra in c.inputs or []:
-            if f"{table}.{extra}" not in state.column_types:
+            if qualify(*split(table), extra) not in state.column_types:
                 problems.append(
-                    f"masking.columns.{column}.inputs: {table}.{extra} does not exist"
+                    f"masking.columns.{column}.inputs: "
+                    f"{qualify(*split(table), extra)} does not exist"
                 )
 
         def attach(policy: str, grantee: str, gtype: str, priority: int) -> None:
@@ -340,7 +341,7 @@ def plan(
     want = _wanted_attachments(spec, state, grantee_type, problems)
     if problems:
         return []
-    managed_columns = {tuple(c.rsplit(".", 1)) for c in spec.masking.columns}
+    managed_columns = {(parent(c), split(c)[-1]) for c in spec.masking.columns}
 
     def managed(a: Attachment) -> bool:
         """Return whether an attachment is on a column the spec masks."""

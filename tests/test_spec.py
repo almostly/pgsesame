@@ -284,6 +284,42 @@ def test_column_privileges_name_columns():
     ]
 
 
+def test_a_name_with_a_dot_is_quoted_and_only_then():
+    _parse(
+        principals={
+            "u": {
+                "type": "role",
+                "privileges": {
+                    "tables": {"select": ['userrisk_dwh."roll rates.csv"']},
+                    "columns": {"select": ['userrisk_dwh."roll rates.csv".month']},
+                },
+            }
+        }
+    )
+    problems = _problems(
+        principals={
+            "u": {
+                "type": "role",
+                "privileges": {"tables": {"select": ['"public".todos']}},
+            }
+        },
+        row_level_security={'public."todos"': {}},
+    )
+    assert problems == [
+        'principals.u: "public".todos: write it as public.todos (only a name with a '
+        'dot or a double quote in it is quoted, as "roll rates.csv")',
+        'row_level_security: public."todos": write it as public.todos (only a name '
+        'with a dot or a double quote in it is quoted, as "roll rates.csv")',
+    ]
+    # an unclosed quote isn't a name at all
+    (problem,) = _problems(
+        principals={
+            "u": {"type": "role", "privileges": {"tables": {"select": ['s."roll']}}}
+        }
+    )
+    assert problem.startswith("principals.u.privileges.tables.select.0: string should")
+
+
 def test_redshift_grants_select_and_update_on_columns():
     problems = _problems(
         engine="redshift",

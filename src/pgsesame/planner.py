@@ -43,6 +43,7 @@ from pgsesame.ops import (
 from pgsesame import masking
 from pgsesame.spec import ATTRIBUTES, PRIVILEGES, Spec
 from pgsesame.state import DefaultGrant, Identity, Membership, Privilege, State
+from pgsesame.state import parent, schema_of
 
 # object types this milestone reads and plans
 PLANNED_TYPES = (
@@ -133,8 +134,8 @@ def _expand(pattern: str, existing: set[str], kind: str = "") -> set[str]:
     and the types compare with spaces ignored.
     """
     if pattern.endswith(".*"):
-        schema = pattern[:-2]
-        return {obj for obj in existing if obj.split(".", 1)[0] == schema}
+        schema = schema_of(pattern)
+        return {obj for obj in existing if schema_of(obj) == schema}
     if kind != "functions":
         return {pattern} & existing
     if "(" in pattern:
@@ -411,7 +412,7 @@ def make(
     def implied(p: Privilege) -> bool:
         """Return whether the grantee holds this by owning the object."""
         if p.object_type == "columns":
-            table = p.object_name.rsplit(".", 1)[0]
+            table = parent(p.object_name)
             return p.grantee in (
                 owner_of.get(("tables", table)),
                 owner_of.get(("views", table)),
@@ -434,7 +435,7 @@ def make(
         kind = "tables" if p.object_type == "views" else p.object_type
         if kind not in ("tables", "sequences", "functions", "schemas"):
             return False
-        schema = p.object_name.split(".", 1)[0]
+        schema = schema_of(p.object_name)
         owner = owner_of.get((p.object_type, p.object_name))
         if owner is None:
             return False
@@ -584,11 +585,9 @@ def _exposed(spec: Spec, current: State, operations: list[Operation]) -> list[st
         if p.privilege not in _ROW_PRIVILEGES:
             continue
         relation = (
-            p.object_name.rsplit(".", 1)[0]
-            if p.object_type == "columns"
-            else p.object_name
+            parent(p.object_name) if p.object_type == "columns" else p.object_name
         )
-        schema = relation.split(".", 1)[0]
+        schema = schema_of(relation)
         if _platforms(schema, current):
             continue
         # what PUBLIC holds, every API role holds, as it does PUBLIC's USAGE
@@ -686,7 +685,7 @@ def _scope(principal) -> tuple[set[str], set[str]]:
                 elif kind == "schemas":
                     schemas.add(pattern)
                 else:
-                    schemas.add(pattern.split(".", 1)[0])
+                    schemas.add(schema_of(pattern))
     return schemas, databases
 
 
@@ -697,7 +696,7 @@ def _in_scope(p: Privilege, scope: tuple[set[str], set[str]]) -> bool:
         return p.object_name in databases
     if p.object_type == "schemas":
         return p.object_name in schemas
-    return p.object_name.split(".", 1)[0] in schemas
+    return schema_of(p.object_name) in schemas
 
 
 def _plan_rls(
@@ -1148,7 +1147,5 @@ def _in_managed_schemas(p: Privilege, spec: Spec) -> bool:
     schemas = spec.manage.schemas
     if not schemas or p.object_type == "databases":
         return True
-    schema = (
-        p.object_name if p.object_type == "schemas" else p.object_name.split(".", 1)[0]
-    )
+    schema = p.object_name if p.object_type == "schemas" else schema_of(p.object_name)
     return schema in schemas

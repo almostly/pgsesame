@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 
 from pgsesame.planner import PLANNED_TYPES
 from pgsesame.spec import Spec
+from pgsesame.state import split
 
 COLUMNS = (
     "object_type",
@@ -65,15 +66,15 @@ def rows(spec: Spec, only: str | None = None) -> list[GrantRow]:
                     elif object_type == "schemas":
                         schema, obj, column = pattern, pattern, ""
                     elif object_type == "columns":
-                        schema, obj, column = pattern.split(".")
+                        schema, obj, column = split(pattern)
                     else:  # a function's argument types may hold dots
-                        schema, obj = pattern.split(".", 1)
+                        schema, obj = split(pattern)
                         column = ""
                     out.add(
                         GrantRow(object_type, schema, obj, column, spelt, name, kind)
                     )
     if only is not None:
-        schema, _, obj = only.partition(".")
+        schema, obj = split(only)
         out = {
             r
             for r in out

@@ -17,7 +17,7 @@ from psycopg import sql
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pgsesame.spec import ATTRIBUTES, PRIVILEGES
-from pgsesame.state import Identity
+from pgsesame.state import Identity, parent, split
 
 if TYPE_CHECKING:  # LiteralString is typing's from Python 3.11 on
     from typing_extensions import LiteralString
@@ -71,7 +71,7 @@ def _routine(name: str) -> sql.Composed:
     The types come from the catalog and are written as SQL, checked first: a name
     is quoted, the types can't be.
     """
-    schema, rest = name.split(".", 1)
+    schema, rest = split(name)
     routine, types = rest.split("(", 1)
     types = types.removesuffix(")")
     if not _ARGUMENT_TYPES.match(types):
@@ -88,9 +88,9 @@ def _object(object_type: str, name: str) -> sql.Composed:
     if object_type == "functions":
         return _routine(name)
     if object_type == "columns":  # the table a column grant is ON
-        name = name.rsplit(".", 1)[0]
+        name = parent(name)
     parts = (
-        name.split(".", 1)
+        split(name)
         if object_type in ("tables", "views", "sequences", "columns")
         else [name]
     )
@@ -100,7 +100,7 @@ def _object(object_type: str, name: str) -> sql.Composed:
 def _privilege_on(privilege: str, object_type: str, name: str) -> sql.Composed:
     """Return ``SELECT ON TABLE s.t``, or for a column ``SELECT (c) ON TABLE s.t``."""
     if object_type == "columns":
-        column = sql.Identifier(name.rsplit(".", 1)[1])
+        column = sql.Identifier(split(name)[-1])
         return sql.SQL("{} ({}) ON {}").format(
             _privilege(privilege), column, _object(object_type, name)
         )
@@ -369,7 +369,7 @@ class AlterOwner(Operation):
     def statement(self) -> sql.Composed:
         """Return ALTER {DATABASE|SCHEMA|TABLE|SEQUENCE} ... OWNER TO ..."""
         parts = (
-            self.object_name.split(".", 1)
+            split(self.object_name)
             if self.object_type in ("tables", "views", "sequences")
             else [self.object_name]
         )
@@ -539,8 +539,7 @@ class RemoveMember(Operation):
 
 def _table(name: str) -> sql.Composed:
     """Return ``schema.table`` as a quoted identifier."""
-    schema, table = name.split(".", 1)
-    return sql.SQL("{}").format(sql.Identifier(schema, table))
+    return sql.SQL("{}").format(sql.Identifier(*split(name)))
 
 
 def _roles(roles: tuple[str, ...]) -> sql.Composed:

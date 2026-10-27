@@ -131,6 +131,11 @@ principals:
         update: [crm.customers.email]
 ```
 
+Names are written as the catalog has them, case and spaces included. A name with
+a dot or a double quote in it goes in double quotes, so its dot isn't read as the
+one after the schema: `'userrisk_dwh."roll rates.csv"'`, in single quotes for
+YAML. `sesame import` writes such names that way.
+
 Connect once with `sesame login`, then plan and apply by name. The password goes
 to the operating system's keychain, never to a file; a Redshift target with IAM or
 the Data API keeps no secret at all:

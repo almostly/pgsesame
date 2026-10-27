@@ -14,6 +14,7 @@ from dataclasses import replace
 from pgsesame.db import Connection, Database
 from pgsesame.spec import ATTRIBUTES, Spec
 from pgsesame.state import DefaultGrant, Membership, Policy, Privilege, Role, State
+from pgsesame.state import part_sql, split
 
 ROLES = """
 select rolname, rolcanlogin, rolsuper from pg_roles
@@ -28,12 +29,18 @@ join pg_roles m on m.oid = a.member
 
 _USER_SCHEMA = "n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'"
 
+
+# a relation and a column, named as State names them (schema.name, schema.name.column)
+_RELATION = f"{part_sql('n.nspname')} || '.' || {part_sql('c.relname')}"
+_COLUMN = f"{_RELATION} || '.' || {part_sql('a.attname')}"
+_TABLE = f"{part_sql('schemaname')} || '.' || {part_sql('tablename')}"
+
 SCHEMAS = f"""
 select n.nspname from pg_namespace n where {_USER_SCHEMA}
 """
 
 RELATIONS = f"""
-select n.nspname || '.' || c.relname,
+select {_RELATION},
        case c.relkind when 'S' then 'sequences'
                       when 'v' then 'views' when 'm' then 'views'
                       else 'tables' end
@@ -69,7 +76,7 @@ select coalesce(g.rolname, 'public'),
        case c.relkind when 'S' then 'sequences'
                       when 'v' then 'views' when 'm' then 'views'
                       else 'tables' end,
-       n.nspname || '.' || c.relname,
+       {_RELATION},
        lower(a.privilege_type), a.is_grantable
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace,
@@ -82,7 +89,7 @@ where c.relkind in ('r', 'p', 'v', 'm', 'S') and {_USER_SCHEMA}
 
 # columns of tables and views (what column grants can name) and their grants
 COLUMNS = f"""
-select n.nspname || '.' || c.relname || '.' || a.attname
+select {_COLUMN}
 from pg_attribute a
 join pg_class c on c.oid = a.attrelid
 join pg_namespace n on n.oid = c.relnamespace
@@ -91,7 +98,7 @@ where c.relkind in ('r', 'p', 'v', 'm', 'f') and a.attnum > 0 and not a.attisdro
 """
 
 COLUMN_PRIVILEGES = f"""
-select coalesce(g.rolname, 'public'), n.nspname || '.' || c.relname || '.' || a.attname,
+select coalesce(g.rolname, 'public'), {_COLUMN},
        lower(x.privilege_type)
 from pg_attribute a
 join pg_class c on c.oid = a.attrelid
@@ -151,7 +158,7 @@ where {_USER_SCHEMA}
 union all
 select case c.relkind when 'S' then 'sequences'
                       when 'v' then 'views' when 'm' then 'views' else 'tables' end,
-       n.nspname || '.' || c.relname, r.rolname
+       {_RELATION}, r.rolname
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 join pg_roles r on r.oid = c.relowner
@@ -179,7 +186,7 @@ where a.grantee <> d.defaclrole
 # security_invoker), among those the connected user may change, as their owner;
 # an extension's own are left out
 DEFINER_VIEWS = f"""
-select n.nspname || '.' || c.relname
+select {_RELATION}
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
@@ -192,7 +199,7 @@ where c.relkind = 'v' and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
 """
 
 RLS_TABLES = f"""
-select n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
+select {_RELATION}, c.relrowsecurity, c.relforcerowsecurity
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA}
@@ -201,7 +208,7 @@ where c.relkind in ('r', 'p') and {_USER_SCHEMA}
 # the tables whose row-level security the connected user may switch: only as their
 # owner, which a platform's tables (Supabase's storage.objects) aren't
 RLS_SWITCHABLE = f"""
-select n.nspname || '.' || c.relname
+select {_RELATION}
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p') and {_USER_SCHEMA} and pg_has_role(c.relowner, 'USAGE')
@@ -227,8 +234,8 @@ select rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls,
 from pg_roles where rolname = current_user
 """
 
-POLICIES = """
-select schemaname || '.' || tablename, policyname, lower(cmd), permissive = 'PERMISSIVE',
+POLICIES = f"""
+select {_TABLE}, policyname, lower(cmd), permissive = 'PERMISSIVE',
        roles::text[], qual, with_check
 from pg_policies
 where schemaname !~ '^pg_' and schemaname <> 'information_schema'
@@ -247,8 +254,8 @@ select p.pubname, r.rolname, p.puballtables
 from pg_publication p join pg_roles r on r.oid = p.pubowner
 """
 
-PUBLICATION_TABLES = """
-select pubname, schemaname || '.' || tablename from pg_publication_tables
+PUBLICATION_TABLES = f"""
+select pubname, {_TABLE} from pg_publication_tables
 """
 
 # whether the connected user may alter a role and grant it: a superuser always;
@@ -412,7 +419,7 @@ def normalize_policies(
                         with_check=p.with_check,
                     ).statement()
                 )
-                schema, relname = table.split(".", 1)
+                schema, relname = split(table)
                 row = cur.execute(
                     "select qual, with_check from pg_policies "
                     "where schemaname = %s and tablename = %s and policyname = %s",

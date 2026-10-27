@@ -2,7 +2,8 @@
 
 The reader turns a database's catalog into a ``State``; the planner turns a spec
 into one. Objects are named the way GRANT names them: a database or schema by its
-name, a relation or sequence as ``schema.name``.
+name, a relation or sequence as ``schema.name``. A part holding a dot or a double
+quote is quoted, as SQL quotes it: ``userrisk_dwh."roll rates.csv"``.
 """
 
 from __future__ import annotations
@@ -13,6 +14,64 @@ from typing import Literal
 # what kind of identity a name is: a PostgreSQL role ("pg"), or one of Redshift's
 # three, which each have their own DDL and grantee syntax
 Identity = Literal["pg", "user", "group", "role"]
+
+
+def qualify(*parts: str) -> str:
+    """Return ``parts`` joined by dots, quoting each that holds a dot or a quote.
+
+    A plain name stays as written (``public.todos``), so names that read before
+    read the same; only one a dot would cut in two is quoted.
+    """
+    return ".".join(
+        '"' + part.replace('"', '""') + '"' if "." in part or '"' in part else part
+        for part in parts
+    )
+
+
+def part_sql(column: str) -> str:
+    """Return SQL writing a catalog name part as qualify() does: quoted if it must be."""
+    return (
+        f"case when strpos({column}, '.') + strpos({column}, '\"') > 0 "
+        f"then '\"' || replace({column}, '\"', '\"\"') || '\"' else {column} end"
+    )
+
+
+def split(name: str) -> list[str]:
+    """Return the parts of a dotted name, unquoted; a dot inside quotes is the name's.
+
+    A function's argument types, from ``(`` on, stay with its last part, dots and
+    all: ``public.f(public.money)`` is ``public`` and ``f(public.money)``.
+    """
+    parts = [""]
+    quoted = False
+    i = 0
+    while i < len(name):
+        char = name[i]
+        if char == '"':
+            if quoted and name[i + 1 : i + 2] == '"':  # "" inside quotes is a "
+                parts[-1] += char
+                i += 1
+            else:
+                quoted = not quoted
+        elif char == "." and not quoted:
+            parts.append("")
+        elif char == "(" and not quoted:
+            parts[-1] += name[i:]
+            break
+        else:
+            parts[-1] += char
+        i += 1
+    return parts
+
+
+def schema_of(name: str) -> str:
+    """Return the schema of a ``schema.name`` (or a column's), unquoted."""
+    return split(name)[0]
+
+
+def parent(name: str) -> str:
+    """Return the table a ``schema.table.column`` belongs to, as ``schema.table``."""
+    return qualify(*split(name)[:-1])
 
 
 @dataclass(frozen=True, order=True)
