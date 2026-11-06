@@ -671,7 +671,7 @@ def test_an_admin_user_acts_as_the_roles_it_creates(dsn, tmp_path):
     assert code == 2, out
     # it has only ADMIN OPTION on etl: it joins it to give it objects and set its
     # default privileges; foreign's it can't, so they're noted, not run
-    assert f'+ GRANT "{P}etl" TO CURRENT_USER' in out, out
+    assert f'+ GRANT "{P}etl" TO CURRENT_USER WITH INHERIT TRUE, SET TRUE' in out, out
     assert f"{P}foreign: can't act as it as this user" in out, out
     assert _sesame("apply", spec, "--dsn", master, "--allow-owner")[0] == 0
     code, out = _sesame("plan", spec, "--dsn", master)

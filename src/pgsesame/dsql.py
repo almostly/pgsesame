@@ -21,6 +21,7 @@ def read(db: Connection, columns: bool = True) -> State:
     nothing plans it on Aurora DSQL, and its catalog may not have it.
     """
     state = postgres.read(db, columns, full=False)
+    postgres.read_acting(db, state)  # its admin isn't a superuser
     state.iam_links = {(role, arn) for role, arn in db.rows(IAM_LINKS)}
     return state
 

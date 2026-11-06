@@ -414,13 +414,15 @@ class ActAs(Operation):
     A CREATEROLE user (an RDS, Aurora or AlloyDB admin user) gets only ADMIN OPTION
     on a role it creates from PostgreSQL 16 on; changing the role's default
     privileges, or giving it an object, needs membership too. ``gated``: the flag
-    of every operation that needs it, so it runs only with them.
+    of the operations that need it, so it runs only with them. ``options``: say
+    INHERIT and SET (PostgreSQL 16+), which a NOINHERIT user doesn't get otherwise.
     """
 
     order: ClassVar[int] = 12  # after the role exists, before it owns anything
     op: Literal["act_as"] = "act_as"
     role: str
     gated: Gate | None = None
+    options: bool = False
 
     @property
     def needs(self) -> Gate | None:
@@ -428,8 +430,11 @@ class ActAs(Operation):
         return self.gated
 
     def statement(self) -> sql.Composed:
-        """Return GRANT role TO CURRENT_USER."""
-        return sql.SQL("GRANT {} TO CURRENT_USER").format(sql.Identifier(self.role))
+        """Return GRANT role TO CURRENT_USER, WITH INHERIT and SET from 16 on."""
+        return sql.SQL("GRANT {} TO CURRENT_USER{}").format(
+            sql.Identifier(self.role),
+            sql.SQL(" WITH INHERIT TRUE, SET TRUE" if self.options else ""),
+        )
 
 
 class AddMember(Operation):

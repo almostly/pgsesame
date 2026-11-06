@@ -199,6 +199,8 @@ class State:
     administers: set[str] | None = None
     # the roles the connected user acts as (PostgreSQL); None: every role
     acts_as: set[str] | None = None
+    # server_version_num (PostgreSQL, Aurora DSQL)
+    server_version: int | None = None
     # the roles the connected user may SET ROLE to, and so give objects to
     # (PostgreSQL); None: every role
     sets_role: set[str] | None = None

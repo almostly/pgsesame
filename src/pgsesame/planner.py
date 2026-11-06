@@ -517,7 +517,7 @@ def make(
 
     plan.operations += _plan_superusers(spec, current, plan, identity)
     plan.operations = _within_reach(plan, current)
-    plan.operations = _acting_as(plan, current)
+    plan.operations = _acting_as(plan, current, managed)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     if spec.engine == "postgres":
         plan.warnings += _exposed(spec, current, plan.operations)
@@ -1006,7 +1006,7 @@ def _plan_defaults(
     ]
 
 
-def _acting_as(plan: Plan, current: State) -> list[Operation]:
+def _acting_as(plan: Plan, current: State, managed: set[str]) -> list[Operation]:
     """Make the connected user a member of the roles it acts for; note the rest.
 
     Changing a role's default privileges needs its rights (membership with
@@ -1014,7 +1014,8 @@ def _acting_as(plan: Plan, current: State) -> list[Operation]:
     isn't a superuser gets neither on the roles it creates from PostgreSQL 16 on,
     only ADMIN OPTION: with that it grants itself the role first. A role it
     neither creates nor administers is noted and its changes dropped, rather than
-    failing the apply.
+    failing the apply. So is every one when the spec manages the user itself: its
+    memberships are then the spec's to give.
     """
     me, acts = current.current_user, current.acts_as
     if acts is None or me is None or _superuser(current, me):
@@ -1038,7 +1039,8 @@ def _acting_as(plan: Plan, current: State) -> list[Operation]:
         out = [
             r
             for r in roles
-            if r not in created and administers is not None and r not in administers
+            if me in managed
+            or (r not in created and administers is not None and r not in administers)
         ]
         if out:
             plan.notes.append(
@@ -1050,11 +1052,12 @@ def _acting_as(plan: Plan, current: State) -> list[Operation]:
         for role in roles:
             gates.setdefault(role, set()).add(op.needs)
         kept.append(op)
-    # one grant per role, gated only when every statement that needs it is
-    kept += [
-        ActAs(role=role, gated=next(iter(g)) if len(g) == 1 else None)
-        for role, g in sorted(gates.items())
-    ]
+    # a grant per role, ungated if a statement that needs it is; else one per flag,
+    # so it runs only with a statement that needs it
+    options = (current.server_version or 0) >= 160000
+    for role, g in sorted(gates.items()):
+        flags = [None] if None in g else sorted(f for f in g if f is not None)
+        kept += [ActAs(role=role, gated=f, options=options) for f in flags]
     return kept
 
 

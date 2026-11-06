@@ -314,6 +314,16 @@ def _sets_attributes(rows: list) -> set[str]:
     return {"createrole"} | {name for name, on in held.items() if on}
 
 
+def read_acting(db: Connection, state: State) -> None:
+    """Read the server's version and the roles the connected user acts as."""
+    state.server_version = next(
+        (int(v) for (v,) in db.rows("select current_setting('server_version_num')")),
+        None,
+    )
+    state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
+    state.sets_role = {name for (name,) in db.rows(SETS_ROLE)}
+
+
 def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     """Return the current state of the database ``db`` is connected to.
 
@@ -369,8 +379,7 @@ def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
     if full:
-        state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
-        state.sets_role = {name for (name,) in db.rows(SETS_ROLE)}
+        read_acting(db, state)
         state.rls_switchable = {name for (name,) in db.rows(RLS_SWITCHABLE)}
         for name, *flags in db.rows(ROLE_ATTRIBUTES):
             has = frozenset(a for a, on in zip(ATTRIBUTES, flags) if on)

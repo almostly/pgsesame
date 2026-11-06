@@ -36,7 +36,8 @@ on AlloyDB Express), Amazon RDS and Aurora, Cloud SQL, Neon.
 
 Such an admin role isn't a superuser. From PostgreSQL 16 it gets only ADMIN OPTION
 on the roles it creates, so to set a role's default privileges or give it an
-object, pgsesame first makes it a member (`GRANT etl TO CURRENT_USER`). For a role
+object, pgsesame first makes it a member (`GRANT etl TO CURRENT_USER`). Aurora
+DSQL's admin is the same. For a role
 it doesn't administer, the plan says so and leaves the change out.
 
 On Amazon RDS and Aurora PostgreSQL, `--rds` names the instance or cluster and
