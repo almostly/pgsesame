@@ -408,6 +408,30 @@ def _membership(
     )
 
 
+class ActAs(Operation):
+    """Make the connected user a member of ``role``, so it may act as it.
+
+    A CREATEROLE user (an RDS, Aurora or AlloyDB admin user) gets only ADMIN OPTION
+    on a role it creates from PostgreSQL 16 on; changing the role's default
+    privileges, or giving it an object, needs membership too. ``gated``: the flag
+    of every operation that needs it, so it runs only with them.
+    """
+
+    order: ClassVar[int] = 12  # after the role exists, before it owns anything
+    op: Literal["act_as"] = "act_as"
+    role: str
+    gated: Gate | None = None
+
+    @property
+    def needs(self) -> Gate | None:
+        """Return the flag apply needs to run this operation, if any."""
+        return self.gated
+
+    def statement(self) -> sql.Composed:
+        """Return GRANT role TO CURRENT_USER."""
+        return sql.SQL("GRANT {} TO CURRENT_USER").format(sql.Identifier(self.role))
+
+
 class AddMember(Operation):
     """Make ``member`` a member of ``role`` (a group or role on Redshift)."""
 
@@ -960,6 +984,7 @@ class RemoveFromPublication(Operation):
 # a plan's operations as one type, told apart by ``op``: what a change set stores
 AnyOperation = Annotated[
     CreateRole
+    | ActAs
     | AlterOwner
     | AlterLogin
     | AlterPassword
