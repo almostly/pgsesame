@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 
 from pgsesame.ops import (
+    ActAs,
     AddMember,
     AddToPublication,
     RemoveFromPublication,
@@ -39,6 +40,7 @@ from pgsesame.ops import (
     SetAttribute,
     SetSuperuser,
     GrantSystem,
+    Gate,
 )
 from pgsesame import masking
 from pgsesame.spec import ATTRIBUTES, PRIVILEGES, Spec
@@ -515,6 +517,7 @@ def make(
 
     plan.operations += _plan_superusers(spec, current, plan, identity)
     plan.operations = _within_reach(plan, current)
+    plan.operations = _acting_as(plan, current, managed)
     plan.operations.sort(key=lambda op: op.order)  # stable: keeps the sorted order
     if spec.engine == "postgres":
         plan.warnings += _exposed(spec, current, plan.operations)
@@ -1001,6 +1004,61 @@ def _plan_defaults(
     return [op(GrantDefault, d) for d in sorted(want - have)] + [
         op(RevokeDefault, d) for d in sorted(have - want)
     ]
+
+
+def _acting_as(plan: Plan, current: State, managed: set[str]) -> list[Operation]:
+    """Make the connected user a member of the roles it acts for; note the rest.
+
+    Changing a role's default privileges needs its rights (membership with
+    INHERIT), and giving it an object needs SET ROLE to it. A CREATEROLE user that
+    isn't a superuser gets neither on the roles it creates from PostgreSQL 16 on,
+    only ADMIN OPTION: with that it grants itself the role first. A role it
+    neither creates nor administers is noted and its changes dropped, rather than
+    failing the apply. So is every one when the spec manages the user itself: its
+    memberships are then the spec's to give.
+    """
+    me, acts = current.current_user, current.acts_as
+    if acts is None or me is None or _superuser(current, me):
+        return plan.operations
+    sets = current.sets_role if current.sets_role is not None else acts
+    created = {op.name for op in plan.operations if isinstance(op, CreateRole)}
+    administers = current.administers
+
+    def needed(op: Operation) -> list[str]:
+        """Return the roles the user must be a member of to run ``op``."""
+        if isinstance(op, (GrantDefault, RevokeDefault)):
+            return [op.owner] if op.owner not in acts else []
+        if isinstance(op, AlterOwner):
+            return [op.owner] if op.owner not in sets else []
+        return []
+
+    gates: dict[str, set[Gate | None]] = {}
+    kept: list[Operation] = []
+    for op in plan.operations:
+        roles = needed(op)
+        out = [
+            r
+            for r in roles
+            if me in managed
+            or (r not in created and administers is not None and r not in administers)
+        ]
+        if out:
+            plan.notes.append(
+                f"{out[0]}: can't act as it as this user, to run "
+                f"{op.statement().as_string(None)}: needs to be a member of it (or "
+                "a superuser)"
+            )
+            continue
+        for role in roles:
+            gates.setdefault(role, set()).add(op.needs)
+        kept.append(op)
+    # a grant per role, ungated if a statement that needs it is; else one per flag,
+    # so it runs only with a statement that needs it
+    options = (current.server_version or 0) >= 160000
+    for role, g in sorted(gates.items()):
+        flags = [None] if None in g else sorted(f for f in g if f is not None)
+        kept += [ActAs(role=role, gated=f, options=options) for f in flags]
+    return kept
 
 
 def _owners_can_create(

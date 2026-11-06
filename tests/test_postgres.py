@@ -101,6 +101,14 @@ def _sesame(*args, env=None):
     return result.exit_code, result.stdout + result.stderr + crash
 
 
+def _needs_superuser(dsn: str) -> None:
+    """Skip unless connected as a superuser (a managed platform's admin isn't one)."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+        if row.fetchone() != (True,):
+            pytest.skip("needs a superuser connection")
+
+
 def test_plan_apply_then_nothing_to_do(dsn, tmp_path):
     spec = _spec(tmp_path)
     code, out = _sesame("plan", spec, "--dsn", dsn)
@@ -478,6 +486,7 @@ principals:
 
 
 def test_column_privileges(dsn, tmp_path):
+    _needs_superuser(dsn)
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("CREATE TABLE analytics.people (id int, name text, ssn text)")
         conn.execute("INSERT INTO analytics.people VALUES (1, 'ann', '123')")
@@ -533,6 +542,7 @@ default_privileges:
 
 
 def test_function_privileges(dsn, tmp_path):
+    _needs_superuser(dsn)
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             f"""
@@ -616,6 +626,60 @@ def test_an_admin_user_that_is_not_a_superuser(dsn, tmp_path):
     code, out = _sesame("plan", spec, "--dsn", master)
     assert f'~ ALTER ROLE "{P}foreign" LOGIN' in out, out
     assert f'+ GRANT "{P}foreign" TO "{P}mine"' in out, out
+
+
+ACTING_AS = f"""
+version: 1
+engine: postgres
+principals:
+  {P}etl:
+    type: role
+    owns:
+      schemas: [staging]
+      tables: [staging.*]
+  {P}reader:
+    type: role
+    privileges:
+      schemas:
+        usage: [staging]
+default_privileges:
+  - owner: {P}etl
+    schema: staging
+    grantee: {P}reader
+    tables: [select]
+  - owner: {P}foreign
+    schema: staging
+    grantee: {P}reader
+    tables: [select]
+"""
+
+
+def test_an_admin_user_acts_as_the_roles_it_creates(dsn, tmp_path):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if conn.info.server_version < 160000:
+            pytest.skip("ADMIN OPTION limits a CREATEROLE user from PostgreSQL 16")
+        # like an RDS, Aurora or AlloyDB admin user: CREATEROLE, not a superuser
+        conn.execute(f"CREATE ROLE {P}master LOGIN CREATEROLE PASSWORD 'master-pw-1'")
+        conn.execute(f"GRANT CREATE ON DATABASE sesame_test TO {P}master")
+        conn.execute(f"CREATE ROLE {P}foreign NOLOGIN")  # a superuser's role
+    master = make_conninfo(dsn, user=f"{P}master", password="master-pw-1")
+    with psycopg.connect(master, autocommit=True) as conn:
+        conn.execute("CREATE SCHEMA staging")
+        conn.execute("CREATE TABLE staging.loads (id int)")
+    spec = _spec(tmp_path, ACTING_AS)
+    code, out = _sesame("plan", spec, "--dsn", master)
+    assert code == 2, out
+    # it has only ADMIN OPTION on etl: it joins it to give it objects and set its
+    # default privileges; foreign's it can't, so they're noted, not run
+    assert f'+ GRANT "{P}etl" TO CURRENT_USER WITH INHERIT TRUE, SET TRUE' in out, out
+    assert f"{P}foreign: can't act as it as this user" in out, out
+    assert _sesame("apply", spec, "--dsn", master, "--allow-owner")[0] == 0
+    code, out = _sesame("plan", spec, "--dsn", master)
+    assert code == 0, out
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT tableowner FROM pg_tables WHERE schemaname = 'staging'"
+        ).fetchall() == [(f"{P}etl",)]
 
 
 DEFAULTS = f"""
@@ -853,6 +917,7 @@ principals:
 
 
 def test_role_attributes(dsn, tmp_path):
+    _needs_superuser(dsn)
     spec = _spec(tmp_path, ATTRIBUTES)
     code, out = _sesame("plan", spec, "--dsn", dsn)
     assert code == 2, out
@@ -904,6 +969,7 @@ manage:
 
 
 def test_superusers_are_who_the_spec_lists(dsn, tmp_path):
+    _needs_superuser(dsn)
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(f"CREATE ROLE {P}intern LOGIN SUPERUSER")
         conn.execute(f"CREATE ROLE {P}dba LOGIN")

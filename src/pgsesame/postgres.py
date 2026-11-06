@@ -248,6 +248,16 @@ ACTS_AS = """
 select rolname from pg_roles where pg_has_role(oid, 'USAGE')
 """
 
+# the roles it may SET ROLE to: only to those can it give an object (SET is its
+# own option from PostgreSQL 16, membership before)
+SETS_ROLE = """
+select rolname from pg_roles
+where case when current_setting('server_version_num')::int >= 160000
+           then pg_has_role(oid, 'SET')
+           else pg_has_role(oid, 'MEMBER')
+      end
+"""
+
 # publications, and the tables each sends the changes of (Supabase Realtime's)
 PUBLICATIONS = """
 select p.pubname, r.rolname, p.puballtables
@@ -302,6 +312,16 @@ def _sets_attributes(rows: list) -> set[str]:
         return {"createdb", "createrole"}
     held = {"createdb": createdb, "replication": replication, "bypassrls": bypassrls}
     return {"createrole"} | {name for name, on in held.items() if on}
+
+
+def read_acting(db: Connection, state: State) -> None:
+    """Read the server's version and the roles the connected user acts as."""
+    state.server_version = next(
+        (int(v) for (v,) in db.rows("select current_setting('server_version_num')")),
+        None,
+    )
+    state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
+    state.sets_role = {name for (name,) in db.rows(SETS_ROLE)}
 
 
 def read(db: Connection, columns: bool = True, full: bool = True) -> State:
@@ -359,7 +379,7 @@ def read(db: Connection, columns: bool = True, full: bool = True) -> State:
     for table, enabled, forced in db.rows(RLS_TABLES):
         state.rls[table] = (enabled, forced)
     if full:
-        state.acts_as = {name for (name,) in db.rows(ACTS_AS)}
+        read_acting(db, state)
         state.rls_switchable = {name for (name,) in db.rows(RLS_SWITCHABLE)}
         for name, *flags in db.rows(ROLE_ATTRIBUTES):
             has = frozenset(a for a, on in zip(ATTRIBUTES, flags) if on)

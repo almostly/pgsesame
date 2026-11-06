@@ -1679,7 +1679,6 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
             return []
 
     full_only = {
-        postgres.ACTS_AS,
         postgres.ROLE_ATTRIBUTES,
         postgres.SETS_ATTRIBUTES,
         postgres.DEFINER_VIEWS,
@@ -1693,11 +1692,8 @@ def test_aurora_dsql_is_read_without_what_only_postgresql_plans():
     on_dsql = Recorder()
     state = dsql.read(cast(Connection, on_dsql))
     assert full_only.isdisjoint(on_dsql.queries)
-    assert (state.acts_as, state.rls_switchable, state.sets_attributes) == (
-        None,
-        None,
-        None,
-    )  # no limit known
+    assert (state.rls_switchable, state.sets_attributes) == (None, None)
+    assert state.acts_as == set()  # read: its admin isn't a superuser
     on_postgres = Recorder()
     postgres.read(cast(Connection, on_postgres))
     assert full_only <= set(on_postgres.queries)
@@ -1906,3 +1902,66 @@ def test_making_a_redshift_superuser_notes_it_needs_a_password(
         "IAM:etl" + note,
         "dba" + note,
     ]
+
+
+def _admin_state(*grants: DefaultGrant, **extra) -> State:
+    """Return a state where admin, not a superuser, acts as no other role (16+)."""
+    return _state(
+        Role("admin", True),
+        Role("etl", False),
+        Role("reader", False),
+        default_privileges=set(grants),
+        current_user="admin",
+        acts_as={"admin"},
+        sets_role={"admin"},
+        administers={"etl", "reader"},
+        server_version=160000,
+        **extra,
+    )
+
+
+def test_an_admin_joins_a_role_only_with_the_flag_its_statements_need():
+    from pgsesame.ops import ActAs
+
+    # giving etl the schema needs --allow-owner, and so does joining it for that
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {
+                "etl": {"type": "role", "owns": {"schemas": ["s"]}},
+                "reader": {"type": "role"},
+            },
+        }
+    )
+    current = _admin_state(
+        objects={"schemas": {"s"}}, owners={("schemas", "s"): "admin"}
+    )
+    plan = planner.make(loaded, current)
+    (join,) = [op for op in plan.operations if isinstance(op, ActAs)]
+    assert join.needs == "owner"
+    assert join.statement().as_string(None) == (
+        'GRANT "etl" TO CURRENT_USER WITH INHERIT TRUE, SET TRUE'
+    )
+    assert join not in plan.allowed(False, False)
+    assert join in plan.allowed(False, False, allow_owner=True)
+
+
+def test_an_admin_the_spec_manages_isnt_made_a_member_behind_its_back():
+    loaded = spec.parse(
+        {
+            "version": 1,
+            "engine": "postgres",
+            "principals": {
+                "admin": {"type": "user"},
+                "etl": {"type": "role"},
+                "reader": {"type": "role"},
+            },
+            "default_privileges": [
+                {"owner": "etl", "grantee": "reader", "tables": ["select"]}
+            ],
+        }
+    )
+    plan = planner.make(loaded, _admin_state())
+    assert plan.operations == []
+    assert any(n.startswith("etl: can't act as it as this user") for n in plan.notes)

@@ -218,6 +218,34 @@ def test_a_failed_statement_says_how_many_were_applied(cluster):
     db.close()
 
 
+def test_default_privileges_of_a_role_the_admin_creates(cluster, tmp_path):
+    # admin isn't a superuser: it joins the role first, as on PostgreSQL 16+
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(
+        textwrap.dedent(
+            f"""
+            version: 1
+            engine: dsql
+            principals:
+              {P}etl:
+                type: role
+              {P}reader:
+                type: role
+            default_privileges:
+              - owner: {P}etl
+                schema: ds_test
+                grantee: {P}reader
+                tables: [select]
+            """
+        )
+    )
+    code, out = _sesame("plan", str(spec), "--dsql", CLUSTER)
+    assert f'+ GRANT "{P}etl" TO CURRENT_USER WITH INHERIT TRUE, SET TRUE' in out, out
+    assert _sesame("apply", str(spec), "--dsql", CLUSTER)[0] == 0
+    code, out = _sesame("plan", str(spec), "--dsql", CLUSTER)
+    assert code == 0, out
+
+
 def test_what_aurora_dsql_lacks_is_refused_in_the_spec(tmp_path):
     spec = _spec(
         tmp_path,

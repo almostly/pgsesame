@@ -29,11 +29,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # connecting through AWS (IAM sign-in, the Data APIs) needs boto3, about 28 MB
-# installed, so it's an extra: named for the service, the same thing in each
-redshift = ["boto3>=1.34"]
-rds = ["boto3>=1.34"]
-aurora = ["boto3>=1.34"]
-dsql = ["boto3>=1.34"]
+# installed, so it's an extra: named for the service, the same thing in each;
+# botocore[crt] reads the credentials `aws login` saves
+redshift = ["boto3>=1.34", "botocore[crt]"]
+rds = ["boto3>=1.34", "botocore[crt]"]
+aurora = ["boto3>=1.34", "botocore[crt]"]
+dsql = ["boto3>=1.34", "botocore[crt]"]
 
 [project.scripts]
 sesame = "pgsesame.cli:app"
