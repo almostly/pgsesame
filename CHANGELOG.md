@@ -11,6 +11,8 @@ versioned entries below.
 
 ## Unreleased
 
+## v0.6.0 (2026-11-06)
+
 ### Fixed
 
 - **Planner**: an admin user that isn't a superuser (RDS, Aurora, AlloyDB, from PostgreSQL 16) failed an apply that set default privileges for, or gave an object to, a role it created, since it holds only ADMIN OPTION on it. The plan now makes it a member first (`GRANT etl TO CURRENT_USER WITH INHERIT TRUE, SET TRUE` from 16 on), only with the flag its statements need, and for a role it doesn't administer, or when the spec manages the connected user itself, notes the change and leaves it out. Aurora DSQL, whose admin isn't a superuser either, now reads whom it acts as and gets the same.
