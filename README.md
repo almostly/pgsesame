@@ -8,7 +8,7 @@ Declarative permission management for PostgreSQL and Amazon Redshift. Define
 roles, users, groups and grants in YAML, then plan and apply changes like
 Terraform.
 
-> **Status: 0.5, alpha.** `validate`, `plan`, `apply`, change sets and `import`
+> **Status: 0.6, alpha.** `validate`, `plan`, `apply`, change sets and `import`
 > work for roles, users, groups, memberships, privileges, ownership and default
 > privileges on PostgreSQL and Redshift, along with row-level security and Redshift
 > masking. Tested against PostgreSQL 14 to 18, Supabase, oblako's redshift-local and
